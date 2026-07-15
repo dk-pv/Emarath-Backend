@@ -1,98 +1,165 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Emarath Backend
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+API service for the **Emarath** ERP/CRM platform, built with [NestJS 11](https://nestjs.com/) and TypeScript.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+This repository is intentionally **separate** from the frontend (`emarath-frontend`). The two apps are developed, versioned, and deployed independently.
 
-## Description
+- Backend (this repo) → deployed to **Render**
+- Frontend → deployed to **Vercel**
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+> Scope note: this repository currently implements backlog task **FND-01.1 — Project scaffold & environments**. Database, authentication, and feature modules are added under their own approved backlog tasks.
 
-## Project setup
+---
+
+## Prerequisites
+
+| Tool    | Version (baseline)     |
+| ------- | ---------------------- |
+| Node.js | v22.13.1 (Node 20+ ok) |
+| npm     | 11.6.2                 |
+
+This project uses **npm** (not pnpm/yarn).
+
+---
+
+## Installation
 
 ```bash
-$ npm install
+npm install
 ```
 
-## Compile and run the project
+Then create your local environment file from the template:
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+cp .env.example .env
 ```
 
-## Run tests
+---
+
+## Environment configuration
+
+Configuration is loaded through `@nestjs/config` and exposed as a typed `app`
+namespace (`src/config/configuration.ts`). Application code reads values via
+`ConfigService` — it never reads `process.env` directly.
+
+The active environment is selected by **`NODE_ENV`**, with no code changes:
+
+| Environment   | How it is selected                                   |
+| ------------- | ---------------------------------------------------- |
+| `development` | default when `NODE_ENV` is unset; local `.env` files |
+| `staging`     | `NODE_ENV=staging` (real env vars on Render)         |
+| `production`  | `NODE_ENV=production` (real env vars on Render)      |
+
+Environment files are loaded in this order (first match wins), so hosted
+platforms can rely purely on injected environment variables:
+
+```
+.env.<NODE_ENV>.local  →  .env.<NODE_ENV>  →  .env
+```
+
+### Variables
+
+| Variable      | Default                 | Purpose                                          |
+| ------------- | ----------------------- | ------------------------------------------------ |
+| `NODE_ENV`    | `development`           | Selects the environment                          |
+| `PORT`        | `5000`                  | HTTP port (Render injects this in production)    |
+| `APP_NAME`    | `Emarath Backend`       | Service name shown in the health response        |
+| `API_PREFIX`  | `api`                   | Global route prefix (`/api/...`)                 |
+| `CORS_ORIGIN` | `http://localhost:3000` | Allowed frontend origin                          |
+
+See [`.env.example`](./.env.example). **Never commit real secrets** — only
+`.env.example` is tracked; all other `.env*` files are git-ignored.
+
+---
+
+## Running locally
 
 ```bash
-# unit tests
-$ npm run test
+# development (watch mode) — http://localhost:5000
+npm run start:dev
 
-# e2e tests
-$ npm run test:e2e
+# development (no watch)
+npm run start
 
-# test coverage
-$ npm run test:cov
+# production build output
+npm run start:prod
 ```
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+Select a different environment without changing code, e.g. staging:
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+# macOS/Linux/Git Bash
+NODE_ENV=staging npm run start:prod
+
+# Windows PowerShell
+$env:NODE_ENV="staging"; npm run start:prod
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+The backend listens on **http://localhost:5000** with all routes under the
+`/api` prefix.
 
-## Resources
+---
 
-Check out a few resources that may come in handy when working with NestJS:
+## Health check
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+```
+GET /api/health
+```
 
-## Support
+Returns a lightweight liveness payload (no database dependency yet):
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+```json
+{
+  "status": "ok",
+  "service": "Emarath Backend",
+  "environment": "development",
+  "timestamp": "2026-07-15T00:00:00.000Z",
+  "uptime": 12.34
+}
+```
 
-## Stay in touch
+Quick check:
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+```bash
+curl http://localhost:5000/api/health
+```
 
-## License
+---
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+## Quality checks
+
+```bash
+npm run lint          # ESLint (auto-fix) — also enforces Prettier
+npm run format        # Prettier: format src & test
+npm run format:check  # Prettier: verify formatting (no writes)
+npm run test          # Jest unit tests
+npm run test:e2e      # Jest e2e tests
+npm run build         # Compile to ./dist
+```
+
+---
+
+## Build & production start
+
+```bash
+npm run build      # outputs to ./dist
+npm run start:prod # runs node dist/main
+```
+
+---
+
+## Project structure
+
+```
+src/
+├── config/
+│   └── configuration.ts     # typed, namespaced app config (@nestjs/config)
+├── health/
+│   ├── health.controller.ts # GET /api/health
+│   ├── health.service.ts    # liveness payload
+│   └── health.module.ts
+├── app.controller.ts
+├── app.module.ts            # ConfigModule + HealthModule wiring
+├── app.service.ts
+└── main.ts                  # global prefix, CORS, bootstrap
+```
