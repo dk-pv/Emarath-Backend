@@ -7,9 +7,10 @@ export default defineConfig({
   schema: 'prisma/schema.prisma',
   migrations: {
     path: 'prisma/migrations',
-    // Seed command (run via `prisma db seed`). Placeholder for FND-01.2 —
-    // no reference/domain data is seeded (that is later backlog scope).
-    seed: 'ts-node prisma/seed.ts',
+    // A single command, no `&&`: Prisma forwards the whole string on to the
+    // runner, so a chain here is swallowed as arguments to the first program and
+    // the seed silently never executes. The chain lives in the npm script.
+    seed: 'npm run seed:run',
   },
   datasource: {
     // Prisma CLI (migrate / introspect) uses the DIRECT, UNPOOLED Neon

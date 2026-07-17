@@ -22,12 +22,108 @@ datasource db {
   provider = "postgresql"
 }
 
-// No domain models yet. Feature schemas (Leads, Activities, Calls, Documents,
-// …) arrive under their own approved backlog tasks and MUST adopt the shared
-// field conventions documented above.
-//
 // Migration history proves the tooling round-trip required by FND-01.2 AC2:
 //   20260715115025_init                 -> created "migration_check"
 //   <ts>_drop_migration_check           -> rolled it back (reverse migration)
 // The convention-check model was temporary scaffolding, never a domain entity,
 // and held no application data.
+
+/// The five user types the platform is built around (AUTH-01.1). Fixed by the
+/// backlog rather than configurable — role administration is explicitly out of
+/// scope — so an enum is the honest model.
+enum UserRole {
+  SUPERADMIN
+  SALES_MANAGER
+  SALES_AGENT
+  CUSTOMER_SERVICE_AGENT
+  MARKETING_ANALYST
+}
+
+/// Minimum slice of AUTH-01.1 needed for LEAD-01.1 AC4 (multi-agent assignment).
+/// AUTH-01.1 is NOT complete here: credentials, hashing and login are its own
+/// task and add to this model rather than reshape it.
+model User {
+  id        String    @id @default(uuid()) @db.Uuid
+  name      String    @db.VarChar(120)
+  email     String    @unique @db.VarChar(180)
+  role      UserRole
+  /// Team association, used later for role scoping (AUTH-01.1 AC1/AC3).
+  team      String?   @db.VarChar(120)
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  assignments LeadAssignment[]
+
+  @@map("users")
+}
+
+/// Core lead record (LEAD-01.1).
+///
+/// Optionality mirrors what Workpex marks required in the New Lead drawer
+/// (`leads-add-new-lead-drawer-scroll-1-top.png`): Customer Name, Primary Phone
+/// and Lead Status carry an asterisk; everything else is blank on real rows in
+/// `leads-list-default-scroll-left-assigned-avatar-tooltip.png`.
+///
+/// Order, delivery, tags, complaint and outreach fields are deliberately absent:
+/// they are LEAD-01.2 and LEAD-01.3, each with its own migration.
+model Lead {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// "Customer Name" in Workpex — the display name, not a person's given name.
+  name           String  @db.VarChar(180)
+  firstName      String? @map("first_name") @db.VarChar(120)
+  primaryPhone   String  @map("primary_phone") @db.VarChar(32)
+  secondaryPhone String? @map("secondary_phone") @db.VarChar(32)
+  language       String? @db.VarChar(64)
+  country        String? @db.VarChar(64)
+
+  /// Origin channel (Workpex: DoubleTick, Broadcast, …).
+  source String? @db.VarChar(64)
+
+  /// LEAD-01.1 AC3: status and pipeline stage are ONE field. Workpex proves it —
+  /// the Kanban columns in `kanban-board-default-legend-tooltip-converted.png`
+  /// (New, Initial Contact, SUPER HOT, HOT, Cold, Warm) are the same values the
+  /// card badges and the list's Lead Status column show. Modelling them twice
+  /// would let a lead sit in one column while claiming another status.
+  ///
+  /// A string, not an enum: Workpex users define their own statuses and colours,
+  /// so new values must not require a migration. The reference table and colour
+  /// mapping belong to FND-04.2 / LEAD-11.1.
+  status String @db.VarChar(64)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  assignments LeadAssignment[]
+
+  /// AC2: the fields the list and board filter and group by are indexed.
+  /// Each is paired with deletedAt because every query must exclude soft-deleted
+  /// rows, so that predicate is always present alongside them.
+  @@index([status, deletedAt])
+  @@index([source, deletedAt])
+  @@index([createdAt(sort: Desc)])
+  @@map("leads")
+}
+
+/// Lead-to-agent assignment (LEAD-01.1 AC4). An explicit join rather than an
+/// implicit m-n relation: Workpex shows an "Assigned Date" column, so the link
+/// carries its own timestamp, which an implicit relation has nowhere to put.
+model LeadAssignment {
+  id        String   @id @default(uuid()) @db.Uuid
+  leadId    String   @map("lead_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  /// Doubles as Workpex's "Assigned Date" — the row is created when assigned.
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// An agent is assigned to a lead once or not at all.
+  @@unique([leadId, userId])
+  /// Drives "leads assigned to me", the agent's default view of the list.
+  @@index([userId])
+  @@map("lead_assignments")
+}
