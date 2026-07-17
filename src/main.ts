@@ -26,6 +26,8 @@ async function bootstrap() {
       `http://localhost:${appConfig.port}/${appConfig.apiPrefix}`,
     'Bootstrap',
   );
+
+  
 }
 
 void bootstrap();
