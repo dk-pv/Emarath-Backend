@@ -1,0 +1,33 @@
+// Emarath — Prisma schema (FND-01.2: Core database setup & conventions)
+// Docs: https://pris.ly/d/prisma-schema
+//
+// Shared field conventions (every future model MUST follow these):
+//   id         String   @id @default(uuid()) @db.Uuid   -> column "id"
+//   createdAt  DateTime @default(now())      @map("created_at")
+//   updatedAt  DateTime @updatedAt           @map("updated_at")
+//   deletedAt  DateTime?                     @map("deleted_at")  // soft-delete, where needed
+//
+// Naming: PascalCase models / camelCase fields in Prisma; snake_case tables &
+// columns in PostgreSQL via @@map / @map. See README "Database conventions".
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  runtime             = "nodejs"
+  moduleFormat        = "cjs"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// No domain models yet. Feature schemas (Leads, Activities, Calls, Documents,
+// …) arrive under their own approved backlog tasks and MUST adopt the shared
+// field conventions documented above.
+//
+// Migration history proves the tooling round-trip required by FND-01.2 AC2:
+//   20260715115025_init                 -> created "migration_check"
+//   <ts>_drop_migration_check           -> rolled it back (reverse migration)
+// The convention-check model was temporary scaffolding, never a domain entity,
+// and held no application data.

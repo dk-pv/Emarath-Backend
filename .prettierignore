@@ -1,0 +1,6 @@
+# generated Prisma client (not hand-edited)
+src/generated
+# build output
+dist
+# migration SQL is authored/generated, keep as-is
+prisma/migrations

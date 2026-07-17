@@ -4,6 +4,7 @@ import appConfig from './config/configuration';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { HealthModule } from './health/health.module';
+import { PrismaModule } from './prisma/prisma.module';
 
 const nodeEnv = process.env.NODE_ENV ?? 'development';
 
@@ -18,6 +19,7 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
       // from real environment variables. Load order: most specific wins.
       envFilePath: [`.env.${nodeEnv}.local`, `.env.${nodeEnv}`, '.env'],
     }),
+    PrismaModule,
     HealthModule,
   ],
   controllers: [AppController],

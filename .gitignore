@@ -5,6 +5,9 @@ node_modules
 /dist
 /build
 
+# generated Prisma client (regenerated via `prisma generate` / postinstall)
+/src/generated
+
 # test coverage
 /coverage
 
