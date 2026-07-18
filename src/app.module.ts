@@ -3,7 +3,9 @@ import { ConfigModule } from '@nestjs/config';
 import appConfig from './config/configuration';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { AuthModule } from './auth/auth.module';
 import { HealthModule } from './health/health.module';
+import { LeadsModule } from './leads/leads.module';
 import { PrismaModule } from './prisma/prisma.module';
 
 const nodeEnv = process.env.NODE_ENV ?? 'development';
@@ -20,7 +22,9 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
       envFilePath: [`.env.${nodeEnv}.local`, `.env.${nodeEnv}`, '.env'],
     }),
     PrismaModule,
+    AuthModule,
     HealthModule,
+    LeadsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

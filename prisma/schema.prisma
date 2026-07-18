@@ -92,11 +92,71 @@ model Lead {
   /// mapping belong to FND-04.2 / LEAD-11.1.
   status String @db.VarChar(64)
 
+  // ── LEAD-01.2: order & delivery ────────────────────────────────────────────
+  //
+  // Every field here is nullable even though the New Lead drawer stars Product,
+  // Actual Amount and Payment Method. Real Workpex rows contradict the form:
+  // `leads-manage-columns-drawer-open.png` shows leads with an empty QTY, and
+  // imported records arrive without commercial detail at all. "Required" is a
+  // rule about the create form, so it lives in the DTO (LEAD-06.1); a NOT NULL
+  // here would reject data Workpex demonstrably holds.
+
+  /// Two fixed product slots, not a collection: Workpex offers exactly Product
+  /// and Product 2, and the criterion caps it at two. A child table would model
+  /// a list the product does not have.
+  ///
+  /// Quantities are decimal because Workpex renders them "1.00" in the QTY
+  /// column — an integer would silently truncate a half-unit order.
+  product      String?  @db.VarChar(180)
+  productQty   Decimal? @map("product_qty") @db.Decimal(12, 2)
+  /// Free text, unlike `product`, which is a dropdown. Workpex's own asymmetry.
+  product2     String?  @db.VarChar(180)
+  product2Qty  Decimal? @map("product2_qty") @db.Decimal(12, 2)
+
+  /// Date only — Workpex captures no time of day for a booking.
+  bookingDate DateTime? @map("booking_date") @db.Date
+  category    String?   @db.VarChar(120)
+
+  /// Confirmed vs expected value; both feed pipeline totals and revenue reports.
+  /// Decimal, never float: AED totals must not drift on rounding.
+  actualAmount     Decimal? @map("actual_amount") @db.Decimal(12, 2)
+  forecastedAmount Decimal? @map("forecasted_amount") @db.Decimal(12, 2)
+
+  /// A string, not an enum (AC3 asks only that values such as Cash on Delivery
+  /// are supported); Workpex drives this from a configurable dropdown.
+  paymentMethod String? @map("payment_method") @db.VarChar(64)
+
+  /// Delivery address. `country` above completes it — the backlog puts country on
+  /// the lead (LEAD-01.1 AC1) while Workpex draws it inside the Address section,
+  /// so the field is shared rather than duplicated here.
+  state        String? @db.VarChar(120)
+  street       String? @db.VarChar(240)
+  city         String? @db.VarChar(120)
+  nationalCode String? @map("national_code") @db.VarChar(240)
+
+  // ── LEAD-01.3: outreach ────────────────────────────────────────────────────
+
+  /// Workpex values: Answered, No Response, Invalid Number. Nullable for the
+  /// same reason as the fields above — real rows leave it blank.
+  callStatus String? @map("call_status") @db.VarChar(64)
+
+  /// Two counters, never one total: the criterion keeps call attempts and
+  /// WhatsApp attempts separate, and Workpex columns them separately too.
+  ///
+  /// NOT NULL DEFAULT 0 per AC5. Workpex shows some cells blank, which would
+  /// mean NULL; a counter that can be null forces every reader to treat absent
+  /// and zero as the same thing, and the criterion is explicit that they default
+  /// to zero. Recorded as a display difference rather than modelled as one.
+  callAttempts     Int @default(0) @map("call_attempts")
+  whatsappAttempts Int @default(0) @map("whatsapp_attempts")
+
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   deletedAt DateTime? @map("deleted_at")
 
   assignments LeadAssignment[]
+  tags        LeadTag[]
+  complaints  Complaint[]
 
   /// AC2: the fields the list and board filter and group by are indexed.
   /// Each is paired with deletedAt because every query must exclude soft-deleted
@@ -126,4 +186,66 @@ model LeadAssignment {
   /// Drives "leads assigned to me", the agent's default view of the list.
   @@index([userId])
   @@map("lead_assignments")
+}
+
+/// A reusable tag (LEAD-01.3 AC1). Workpex shows them as chips on the lead row —
+/// "QC VERIFIED" in `leads-list-all-rows-selected-bulk-action-bar.png`.
+///
+/// A table rather than a string array on the lead: LEAD-12.1 AC4 filters by tag,
+/// which wants an indexed join, and renaming a tag should not mean rewriting
+/// every lead that carries it.
+model Tag {
+  id        String    @id @default(uuid()) @db.Uuid
+  name      String    @unique @db.VarChar(80)
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  leads LeadTag[]
+
+  @@map("tags")
+}
+
+/// Lead-to-tag link.
+model LeadTag {
+  id        String   @id @default(uuid()) @db.Uuid
+  leadId    String   @map("lead_id") @db.Uuid
+  tagId     String   @map("tag_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  /// LEAD-12.1 AC5: the same tag cannot be applied to a lead twice.
+  @@unique([leadId, tagId])
+  /// LEAD-12.1 AC4: "leads tagged X" reads from this side.
+  @@index([tagId])
+  @@map("lead_tags")
+}
+
+/// A complaint raised against a lead (LEAD-01.3 AC2).
+///
+/// An entity, not a column on the lead: LEAD-13.1 requires it to carry its own
+/// details and a status to track handling, which a single dropdown value cannot.
+/// One-to-many rather than one-to-one — Workpex's column is titled COMPLAINTS,
+/// and a second complaint must not overwrite the first.
+model Complaint {
+  id      String @id @default(uuid()) @db.Uuid
+  leadId  String @map("lead_id") @db.Uuid
+  details String @db.Text
+
+  /// Handling state (LEAD-13.1 AC4). A string for the same reason as lead
+  /// status: the values are the business's to define, not a migration's.
+  status String @db.VarChar(64)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  /// AC2: retrieving a lead's complaints is the only access path there is.
+  @@index([leadId, deletedAt])
+  @@map("complaints")
 }
