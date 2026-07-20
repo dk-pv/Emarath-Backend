@@ -92,6 +92,16 @@ model Lead {
   /// mapping belong to FND-04.2 / LEAD-11.1.
   status String @db.VarChar(64)
 
+  /// LEAD-06.2 (ADR-0005): the pipeline/board a lead is routed to — Workpex values
+  /// "Lead Pipeline", "Complaints", "LOGISTICS", "QC". This is a SEPARATE axis from
+  /// `status`: status is the stage within a pipeline (New/HOT/WON — the Kanban
+  /// columns), pipeline is the board the lead belongs to. The New Lead drawer and
+  /// the list both show Lead Status and Lead Pipeline as distinct fields, so the
+  /// original single-field assumption was incomplete. A configurable string like
+  /// status/source; options come from a lookup provider. Defaulted so the additive
+  /// migration backfills existing rows and the Workpex form's default is matched.
+  pipeline String @default("Lead Pipeline") @map("pipeline") @db.VarChar(64)
+
   // ── LEAD-01.2: order & delivery ────────────────────────────────────────────
   //
   // Every field here is nullable even though the New Lead drawer stars Product,
@@ -163,7 +173,15 @@ model Lead {
   /// rows, so that predicate is always present alongside them.
   @@index([status, deletedAt])
   @@index([source, deletedAt])
+  @@index([pipeline, deletedAt])
   @@index([createdAt(sort: Desc)])
+  /// LEAD-03.1: substring search on Customer Name and Primary Phone. `contains`
+  /// compiles to ILIKE '%term%', whose leading wildcard a btree cannot use, so
+  /// these are GIN trigram indexes (pg_trgm) — the index that makes an unanchored
+  /// ILIKE fast at 15,000+ rows. Declared here so Prisma owns them and no drift
+  /// results; the extension itself is enabled in the migration.
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([primaryPhone(ops: raw("gin_trgm_ops"))], type: Gin)
   @@map("leads")
 }
 

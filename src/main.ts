@@ -9,13 +9,7 @@ async function bootstrap() {
 
   const config = app.get(ConfigService);
   const appConfig = config.getOrThrow<AppConfig>('app');
-
-  // Consistent global API prefix -> health check served at /<apiPrefix>/health.
   app.setGlobalPrefix(appConfig.apiPrefix);
-
-  // Input is rejected before it reaches a controller, and an unrecognised
-  // parameter is an error rather than something quietly dropped: a mistyped
-  // filter must not return the unfiltered list while looking like it worked.
   app.useGlobalPipes(
     new ValidationPipe({
       transform: true,
@@ -24,7 +18,6 @@ async function bootstrap() {
     }),
   );
 
-  // Allow the Emarath frontend to reach the API (e.g. the health check).
   app.enableCors({
     origin: appConfig.corsOrigin,
     credentials: true,

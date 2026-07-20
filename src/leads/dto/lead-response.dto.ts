@@ -17,6 +17,7 @@ export interface LeadListItem {
   country: string | null;
   source: string | null;
   status: string;
+  pipeline: string;
   category: string | null;
   actualAmount: string | null;
   forecastedAmount: string | null;
@@ -50,6 +51,7 @@ export const LEAD_LIST_SELECT = {
   country: true,
   source: true,
   status: true,
+  pipeline: true,
   category: true,
   actualAmount: true,
   forecastedAmount: true,
@@ -84,6 +86,7 @@ export function toLeadListItem(row: LeadRow): LeadListItem {
     country: row.country,
     source: row.source,
     status: row.status,
+    pipeline: row.pipeline,
     category: row.category,
     actualAmount: row.actualAmount?.toString() ?? null,
     forecastedAmount: row.forecastedAmount?.toString() ?? null,

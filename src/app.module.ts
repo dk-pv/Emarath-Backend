@@ -6,6 +6,7 @@ import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
 import { HealthModule } from './health/health.module';
 import { LeadsModule } from './leads/leads.module';
+import { LookupsModule } from './lookups/lookups.module';
 import { PrismaModule } from './prisma/prisma.module';
 
 const nodeEnv = process.env.NODE_ENV ?? 'development';
@@ -25,6 +26,7 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     AuthModule,
     HealthModule,
     LeadsModule,
+    LookupsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
