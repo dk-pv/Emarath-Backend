@@ -22,6 +22,12 @@ export interface LeadFilters {
   source?: string[];
   status?: string[];
   assignedAgent?: string[];
+  /** ISO instant, inclusive lower bound on createdAt (LEAD-04.1 date presets). */
+  createdFrom?: string;
+  /** ISO instant, exclusive upper bound on createdAt (LEAD-04.1 date presets). */
+  createdTo?: string;
+  /** LEAD-04.1 Unassigned preset: leads carrying no assignment. */
+  unassigned?: boolean;
 }
 
 /**
@@ -49,6 +55,23 @@ export function leadFilterWhere(filters: LeadFilters): Prisma.LeadWhereInput[] {
     conditions.push({
       assignments: { some: { userId: { in: filters.assignedAgent } } },
     });
+  }
+
+  // Created-date window (LEAD-04.1: Today / This Week / Last Week). The boundaries
+  // are computed in the caller's timezone on the client and sent as ISO instants,
+  // so the server only compares — a half-open [from, to) range on createdAt.
+  if (filters.createdFrom || filters.createdTo) {
+    const createdAt: { gte?: Date; lt?: Date } = {};
+    if (filters.createdFrom) createdAt.gte = new Date(filters.createdFrom);
+    if (filters.createdTo) createdAt.lt = new Date(filters.createdTo);
+    conditions.push({ createdAt });
+  }
+
+  // Unassigned (LEAD-04.1). ANDed with an agent's scope (assignments some self)
+  // this is empty by construction — an agent has no unassigned leads to see —
+  // which is the correct role-scoped result, not a special case.
+  if (filters.unassigned) {
+    conditions.push({ assignments: { none: {} } });
   }
 
   return conditions;

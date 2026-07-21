@@ -2,6 +2,8 @@ import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
+  IsDateString,
   IsIn,
   IsInt,
   IsOptional,
@@ -12,6 +14,12 @@ import {
   Min,
 } from 'class-validator';
 import { normalizeFilterValues } from '../lead-filter';
+
+/** A query-string flag: present as "true"/"1" is true; absent stays undefined. */
+const toOptionalBoolean = ({ value }: { value: unknown }): unknown =>
+  value === undefined
+    ? undefined
+    : value === true || value === 'true' || value === '1';
 
 /**
  * Columns the list may be ordered by (LEAD-02.1 AC2).
@@ -156,4 +164,34 @@ export class ListLeadsQueryDto {
   })
   @IsOptional()
   assignedAgent?: string[];
+
+  /**
+   * Quick Filter presets (LEAD-04.1). `createdFrom`/`createdTo` are ISO instants
+   * the client computes in its own timezone for the Today / This Week / Last Week
+   * presets; `unassigned` and `archived` are one-shot flags for those presets. All
+   * reuse the same list pipeline (scope + search + filters) as the field filters.
+   */
+  @Transform(({ value }: { value: unknown }): unknown =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsDateString({}, { message: 'createdFrom must be an ISO date' })
+  @IsOptional()
+  createdFrom?: string;
+
+  @Transform(({ value }: { value: unknown }): unknown =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsDateString({}, { message: 'createdTo must be an ISO date' })
+  @IsOptional()
+  createdTo?: string;
+
+  @Transform(toOptionalBoolean)
+  @IsBoolean({ message: 'unassigned must be a boolean' })
+  @IsOptional()
+  unassigned?: boolean;
+
+  @Transform(toOptionalBoolean)
+  @IsBoolean({ message: 'archived must be a boolean' })
+  @IsOptional()
+  archived?: boolean;
 }

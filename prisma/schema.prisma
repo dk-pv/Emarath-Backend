@@ -53,7 +53,9 @@ model User {
   updatedAt DateTime  @updatedAt @map("updated_at")
   deletedAt DateTime? @map("deleted_at")
 
-  assignments LeadAssignment[]
+  assignments     LeadAssignment[]
+  importJobs      ImportJob[]
+  viewPreferences UserViewPreference[]
 
   @@map("users")
 }
@@ -266,4 +268,88 @@ model Complaint {
   /// AC2: retrieving a lead's complaints is the only access path there is.
   @@index([leadId, deletedAt])
   @@map("complaints")
+}
+
+/// A bulk-import run (LEAD-07.1).
+///
+/// Persisted so progress can be polled while rows are written asynchronously, and
+/// so the summary, the failed rows and the import history survive the request that
+/// started the import. The row processing itself is not held here — only its
+/// state — which keeps the table small regardless of file size.
+///
+/// `module` is a string, not an enum: the same engine imports Customers/Products/
+/// Vendors later (the descriptor differs, the table does not), so a new module
+/// must not force a migration — the same reason `status` on Lead is a string.
+///
+/// `errors` holds the standardized row-error objects
+/// (`{ rowNumber, values, reason, errorCode }`) that back the downloadable error
+/// report and the failed-row review. It is nullable — populated only once a row
+/// fails — and lives inline rather than in a child table: at the 10 MB import cap
+/// the failed set is bounded, and a second table would buy paging the review does
+/// not need.
+model ImportJob {
+  id       String @id @default(uuid()) @db.Uuid
+  module   String @db.VarChar(64)
+  status   String @default("PENDING") @db.VarChar(24)
+  fileName String @map("file_name") @db.VarChar(260)
+  pipeline String @db.VarChar(64)
+
+  /// The applied column → field mapping, kept as the run's audit trail.
+  mapping Json
+
+  totalRows     Int @default(0) @map("total_rows")
+  processedRows Int @default(0) @map("processed_rows")
+  importedCount Int @default(0) @map("imported_count")
+  skippedCount  Int @default(0) @map("skipped_count")
+  failedCount   Int @default(0) @map("failed_count")
+
+  errors Json?
+
+  startedAt   DateTime? @map("started_at")
+  completedAt DateTime? @map("completed_at")
+
+  /// The importer — drives history ("my imports") and the same role scoping the
+  /// list uses. Nullable with `SetNull` so removing a user never destroys the
+  /// import audit trail.
+  createdById String? @map("created_by_id") @db.Uuid
+  createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  /// History is "my recent imports, newest first".
+  @@index([createdById, createdAt(sort: Desc)])
+  @@map("import_jobs")
+}
+
+/// A saved per-user table layout — the Manage Columns result (LEAD-05.1 AC3).
+///
+/// Generic on purpose: `viewKey` names which table the layout is for ("leads"
+/// today), so the same store backs the Activities and Kanban Manage Columns
+/// drawers without a new table — the same reasoning that keeps `ImportJob.module`
+/// a string. It is a user preference, not domain data: one row per user per view,
+/// overwritten on Submit, so there is no soft delete (a reset just removes the row
+/// and the default returns) — matching LeadAssignment/LeadTag, which also omit it.
+///
+/// `layout` holds `{ order: string[], hidden: string[] }` keyed by the frontend's
+/// column ids. JSON, not columns, because the column set is the client's to define
+/// (each entry carries render logic) and must be able to change without a
+/// migration; the client reconciles stored keys against the live set on load, so a
+/// renamed or new column never leaves a stale layout stuck.
+model UserViewPreference {
+  id      String @id @default(uuid()) @db.Uuid
+  userId  String @map("user_id") @db.Uuid
+  viewKey String @map("view_key") @db.VarChar(64)
+
+  layout Json
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// One saved layout per user per view; the upsert target.
+  @@unique([userId, viewKey])
+  @@map("user_view_preferences")
 }

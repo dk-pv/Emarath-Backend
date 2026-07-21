@@ -71,4 +71,28 @@ describe('leadFilterWhere', () => {
       { assignments: { some: { userId: { in: ids } } } },
     ]);
   });
+
+  // ── LEAD-04.1 Quick Filter fragments ──────────────────────────────────────
+
+  it('filters a created-date window as a half-open [from, to) range', () => {
+    const from = '2026-07-20T20:00:00.000Z';
+    const to = '2026-07-21T20:00:00.000Z';
+    expect(leadFilterWhere({ createdFrom: from, createdTo: to })).toEqual([
+      { createdAt: { gte: new Date(from), lt: new Date(to) } },
+    ]);
+  });
+
+  it('supports an open-ended created-date bound', () => {
+    const from = '2026-07-14T20:00:00.000Z';
+    expect(leadFilterWhere({ createdFrom: from })).toEqual([
+      { createdAt: { gte: new Date(from) } },
+    ]);
+  });
+
+  it('filters unassigned leads through the assignment join', () => {
+    expect(leadFilterWhere({ unassigned: true })).toEqual([
+      { assignments: { none: {} } },
+    ]);
+    expect(leadFilterWhere({ unassigned: false })).toEqual([]);
+  });
 });

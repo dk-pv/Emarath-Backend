@@ -3,8 +3,7 @@ import { Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { LeadsRepository } from './leads.repository';
 import { leadScopeWhere } from './lead-scope';
-import { leadSearchWhere } from './lead-search';
-import { leadFilterWhere } from './lead-filter';
+import { buildLeadWhere } from './lead-where';
 import {
   LeadListItem,
   LeadListResponse,
@@ -164,28 +163,14 @@ export class LeadsService {
   }
 
   /**
-   * Scope is always applied; search and filters are applied only when present.
-   * Every fragment is ANDed with scope, never ORed, so no term or filter can
-   * reach a lead outside the caller's scope — a search or a colleague's agent
-   * filter that matches someone else's lead returns nothing.
+   * The scoped, searched, filtered `where` for the list — the same builder the
+   * export uses (`buildLeadWhere`), so a file and the on-screen list can never
+   * disagree and neither can leak a lead outside the caller's scope.
    */
   private buildWhere(
     user: CurrentUser,
     query: ListLeadsQueryDto,
   ): Prisma.LeadWhereInput {
-    const conditions: Prisma.LeadWhereInput[] = [leadScopeWhere(user)];
-
-    const search = leadSearchWhere(query.search);
-    if (search) conditions.push(search);
-
-    conditions.push(
-      ...leadFilterWhere({
-        source: query.source,
-        status: query.status,
-        assignedAgent: query.assignedAgent,
-      }),
-    );
-
-    return conditions.length === 1 ? conditions[0] : { AND: conditions };
+    return buildLeadWhere(user, query);
   }
 }

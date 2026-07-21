@@ -12,8 +12,16 @@ import { CurrentUser } from '../auth/current-user';
  * Excluding soft-deleted rows lives here too, so no caller can scope correctly
  * and still resurrect a deleted lead by forgetting the second predicate.
  */
-export function leadScopeWhere(user: CurrentUser): Prisma.LeadWhereInput {
-  const visible: Prisma.LeadWhereInput = { deletedAt: null };
+export function leadScopeWhere(
+  user: CurrentUser,
+  archived = false,
+): Prisma.LeadWhereInput {
+  // The Archived quick filter (LEAD-04.1) flips this predicate to show only
+  // soft-deleted leads. The deletedAt condition is still owned here — never
+  // elsewhere — so no caller can scope by role yet forget the delete state.
+  const visible: Prisma.LeadWhereInput = {
+    deletedAt: archived ? { not: null } : null,
+  };
 
   switch (user.role) {
     // A sales agent sees only what is assigned to them. This is the rule the
