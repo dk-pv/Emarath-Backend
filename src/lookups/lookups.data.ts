@@ -21,20 +21,9 @@ function options(values: readonly string[]): LookupOption[] {
   return values.map((value) => ({ value, label: value }));
 }
 
-/**
- * Sales stage (drives the Kanban columns). Default "New" — see the drawer's
- * pre-filled Lead Status. The seeded set observed in the list/filter data.
- */
-const LEAD_STATUS = [
-  'New',
-  'Initial Contact',
-  'Cold',
-  'Warm',
-  'HOT',
-  'SUPER HOT',
-  'WON',
-  'NOT ANSWER',
-] as const;
+// Lead status is no longer config-backed: it graduated to the `Stage` catalogue
+// (KAN-05.1), the single user-editable source the board, badges and this form read.
+// `LookupsService` serves `leadStatus` from that table; there is no hard-coded copy.
 
 /** Pipeline/board — separate axis from status (ADR-0005). Default "Lead Pipeline". */
 const PIPELINE = ['Lead Pipeline', 'Complaints', 'LOGISTICS', 'QC'] as const;
@@ -249,7 +238,6 @@ const PRODUCT = [
  * `tags` and `agents` are intentionally absent — they come from the database.
  */
 export const LOOKUP_DATA = {
-  leadStatus: options(LEAD_STATUS),
   pipelines: options(PIPELINE),
   languages: options(LANGUAGE),
   sources: options(SOURCE),

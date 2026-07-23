@@ -353,3 +353,38 @@ model UserViewPreference {
   @@unique([userId, viewKey])
   @@map("user_view_preferences")
 }
+
+/// Pipeline stage catalogue (KAN-05.1) — the single, user-editable source of the
+/// stage set, colours and order.
+///
+/// Replaces the config-backed stage list (ADR-0005) that was duplicated on the
+/// frontend and backend. Everything that reads stages — the board columns, the list
+/// badges, the New Lead status dropdown, filters and reports — sources them here, so
+/// the views can no longer drift, and add/rename/recolour/reorder/delete happen only
+/// through the Stage Management API.
+///
+/// A stage belongs to a `pipeline` (AC1), and its `name` IS the value a lead stores
+/// in `status`: "status and pipeline stage are ONE field" (LEAD-01.1 AC3). Renaming a
+/// stage cascades to the leads carrying its old status so the two never diverge.
+///
+/// `color` is a palette key (`violet`, `amber`, …), not a CSS class: the store stays
+/// framework-agnostic and the frontend maps the key to its design tokens (KAN-05.2).
+/// `position` orders the stages within a pipeline (AC3). No soft delete — a stage is a
+/// catalogue entry, not domain data, and a delete is guarded (refused while leads sit
+/// in it), matching UserViewPreference/LeadTag which also omit `deletedAt`.
+model Stage {
+  id       String @id @default(uuid()) @db.Uuid
+  pipeline String @db.VarChar(64)
+  name     String @db.VarChar(64)
+  color    String @db.VarChar(32)
+  position Int
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// AC5: a stage name is unique within its pipeline.
+  @@unique([pipeline, name])
+  /// The board/list read the ordered stage set for one pipeline.
+  @@index([pipeline, position])
+  @@map("stages")
+}

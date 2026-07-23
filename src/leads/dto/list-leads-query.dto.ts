@@ -165,6 +165,34 @@ export class ListLeadsQueryDto {
   @IsOptional()
   assignedAgent?: string[];
 
+  /** Tag filter (LEAD-12.1 AC4) — tag ids matched through the lead-tag join. */
+  @Transform(({ value }: { value: unknown }): unknown =>
+    normalizeFilterValues(value),
+  )
+  @IsArray({ message: 'tag must be one or more values' })
+  @IsUUID('all', { each: true, message: 'each tag must be a valid id' })
+  @ArrayMaxSize(MAX_FILTER_VALUES, {
+    message: `tag accepts at most ${MAX_FILTER_VALUES} values`,
+  })
+  @IsOptional()
+  tag?: string[];
+
+  /**
+   * Pipeline filter (KAN-02.2). An exact match on one board's leads, so the Kanban
+   * board can load each stage column scoped to the selected pipeline — the same
+   * pipeline the board summary (KAN-02.1) counts. Optional and unused by the Leads
+   * list, so list behaviour is unchanged; `buildLeadWhere` already applies it.
+   */
+  @Transform(({ value }: { value: unknown }): unknown =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsString({ message: 'pipeline must be a string' })
+  @MaxLength(MAX_FILTER_VALUE_LENGTH, {
+    message: `pipeline must be at most ${MAX_FILTER_VALUE_LENGTH} characters`,
+  })
+  @IsOptional()
+  pipeline?: string;
+
   /**
    * Quick Filter presets (LEAD-04.1). `createdFrom`/`createdTo` are ISO instants
    * the client computes in its own timezone for the Today / This Week / Last Week

@@ -18,6 +18,37 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient, UserRole } from '../generated/prisma/client';
 
 /**
+ * The initial stage catalogue for the default board (KAN-05.1). Transcribed from
+ * the Workpex stage set and order (`lead-status.mp4`), with a palette-key colour per
+ * stage (the frontend maps the key to its design tokens). This is the seed that
+ * makes the board, list badges and status dropdown all read one canonical source;
+ * after this, add/rename/recolour/reorder/delete happen through the Stage API.
+ */
+const DEFAULT_PIPELINE = 'Lead Pipeline';
+
+const STAGES: ReadonlyArray<{ name: string; color: string }> = [
+  { name: 'New', color: 'violet' },
+  { name: 'Initial Contact', color: 'cyan' },
+  { name: 'SUPER HOT', color: 'slate' },
+  { name: 'HOT', color: 'amber' },
+  { name: 'Cold', color: 'sky' },
+  { name: 'Warm', color: 'yellow' },
+  { name: 'DATE SHIPMENT', color: 'purple' },
+  { name: 'NOT ANSWER', color: 'teal' },
+  { name: 'NOT REACHEBLE', color: 'rose' },
+  { name: 'Follow-Up', color: 'blue' },
+  { name: 'Cancel', color: 'red' },
+  { name: 'CS NUMBER Received', color: 'violet' },
+  { name: 'SALES REJECTED', color: 'red' },
+  { name: 'COMPLAINT', color: 'gray' },
+  { name: 'QC NOT APPROVED', color: 'violet' },
+  { name: 'WON', color: 'lime' },
+  { name: 'READY TO DISPATCH', color: 'sky' },
+  { name: 'Converted', color: 'lime' },
+  { name: 'LOST', color: 'rose' },
+];
+
+/**
  * One account per role, so role scoping (LEAD-02.1 AC3) has something to scope
  * against the moment it lands. Names are placeholders for real staff records.
  */
@@ -85,6 +116,24 @@ async function main(): Promise<void> {
       });
     }
     console.log(`[seed] ${USERS.length} users upserted.`);
+
+    // Upsert by (pipeline, name): re-running corrects colour/order without ever
+    // duplicating a stage or resetting one a user has since renamed away.
+    for (const [position, stage] of STAGES.entries()) {
+      await prisma.stage.upsert({
+        where: {
+          pipeline_name: { pipeline: DEFAULT_PIPELINE, name: stage.name },
+        },
+        update: { color: stage.color, position },
+        create: {
+          pipeline: DEFAULT_PIPELINE,
+          name: stage.name,
+          color: stage.color,
+          position,
+        },
+      });
+    }
+    console.log(`[seed] ${STAGES.length} stages upserted.`);
   } finally {
     await prisma.$disconnect();
   }

@@ -10,5 +10,8 @@ import { LeadsBulkService } from './leads-bulk.service';
 @Module({
   controllers: [LeadsBulkController],
   providers: [LeadsBulkService],
+  // Exported so the single-lead row actions (LEAD-10.1) reuse the scoped reassign
+  // and hard-delete instead of writing that query logic a second time.
+  exports: [LeadsBulkService],
 })
 export class LeadsBulkModule {}

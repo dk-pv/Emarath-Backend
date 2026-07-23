@@ -11,4 +11,6 @@ export interface LeadFilterOptions {
   sources: string[];
   statuses: string[];
   agents: { id: string; name: string }[];
+  /** LEAD-12.1 AC4: the tags present on the caller's scoped leads. */
+  tags: { id: string; name: string }[];
 }

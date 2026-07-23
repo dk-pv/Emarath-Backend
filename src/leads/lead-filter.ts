@@ -22,6 +22,10 @@ export interface LeadFilters {
   source?: string[];
   status?: string[];
   assignedAgent?: string[];
+  /** LEAD-12.1 AC4: tag ids matched through the lead-tag join. */
+  tag?: string[];
+  /** KAN-02.1: the board/pipeline a lead belongs to — an exact match on one value. */
+  pipeline?: string;
   /** ISO instant, inclusive lower bound on createdAt (LEAD-04.1 date presets). */
   createdFrom?: string;
   /** ISO instant, exclusive upper bound on createdAt (LEAD-04.1 date presets). */
@@ -55,6 +59,16 @@ export function leadFilterWhere(filters: LeadFilters): Prisma.LeadWhereInput[] {
     conditions.push({
       assignments: { some: { userId: { in: filters.assignedAgent } } },
     });
+  }
+  // Tag (LEAD-12.1 AC4). Matched through the lead-tag join, ORed within the field
+  // like the others; `@@index([tagId])` on LeadTag backs the "leads tagged X" read.
+  if (filters.tag?.length) {
+    conditions.push({ tags: { some: { tagId: { in: filters.tag } } } });
+  }
+  // Pipeline (KAN-02.1). An exact match on one board — the board groups leads by
+  // stage within a single selected pipeline; `@@index([pipeline, deletedAt])` backs it.
+  if (filters.pipeline) {
+    conditions.push({ pipeline: filters.pipeline });
   }
 
   // Created-date window (LEAD-04.1: Today / This Week / Last Week). The boundaries

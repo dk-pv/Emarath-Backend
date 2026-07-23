@@ -101,6 +101,26 @@ export class LeadsRepository {
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  /**
+   * The distinct tags applied to a scoped set of leads (LEAD-12.1 AC4).
+   *
+   * `lead` filters the tag links by the same scope as the list, so the option
+   * list only ever contains tags that appear on a lead the caller may open — the
+   * same privacy rule the source/status/agent facets follow.
+   */
+  async distinctTags(
+    where: Prisma.LeadWhereInput,
+  ): Promise<{ id: string; name: string }[]> {
+    const rows = await this.prisma.leadTag.findMany({
+      where: { lead: where },
+      select: { tag: { select: { id: true, name: true } } },
+      distinct: ['tagId'],
+    });
+    return rows
+      .map((row) => row.tag)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
   /** One user's id and name, for the agent's own single filter option. */
   async findUserSummary(
     id: string,

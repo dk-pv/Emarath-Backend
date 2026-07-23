@@ -15,6 +15,8 @@ export interface LeadWhereQuery {
   source?: string[];
   status?: string[];
   assignedAgent?: string[];
+  tag?: string[];
+  pipeline?: string;
   createdFrom?: string;
   createdTo?: string;
   unassigned?: boolean;
@@ -46,6 +48,8 @@ export function buildLeadWhere(
       source: query.source,
       status: query.status,
       assignedAgent: query.assignedAgent,
+      tag: query.tag,
+      pipeline: query.pipeline,
       createdFrom: query.createdFrom,
       createdTo: query.createdTo,
       unassigned: query.unassigned,

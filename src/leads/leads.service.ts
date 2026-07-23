@@ -55,13 +55,14 @@ export class LeadsService {
     const user = await this.currentUser.resolve();
     const scope = leadScopeWhere(user);
 
-    const [sources, statuses, agents] = await Promise.all([
+    const [sources, statuses, agents, tags] = await Promise.all([
       this.repository.distinctSources(scope),
       this.repository.distinctStatuses(scope),
       this.agentOptions(user, scope),
+      this.repository.distinctTags(scope),
     ]);
 
-    return { sources, statuses, agents };
+    return { sources, statuses, agents, tags };
   }
 
   private async agentOptions(

@@ -58,17 +58,34 @@ describe('leadFilterWhere', () => {
     ]);
   });
 
+  it('filters by Tag through the lead-tag join (LEAD-12.1 AC4)', () => {
+    const ids = ['33333333-3333-4333-8333-333333333333'];
+    expect(leadFilterWhere({ tag: ids })).toEqual([
+      { tags: { some: { tagId: { in: ids } } } },
+    ]);
+  });
+
+  it('filters by Pipeline as an exact match on one board (KAN-02.1)', () => {
+    expect(leadFilterWhere({ pipeline: 'LOGISTICS' })).toEqual([
+      { pipeline: 'LOGISTICS' },
+    ]);
+    expect(leadFilterWhere({ pipeline: undefined })).toEqual([]);
+  });
+
   it('emits one fragment per active filter so they combine with AND (AC2)', () => {
     const ids = ['22222222-2222-4222-8222-222222222222'];
+    const tagIds = ['33333333-3333-4333-8333-333333333333'];
     const fragments = leadFilterWhere({
       source: ['DoubleTick'],
       status: ['New'],
       assignedAgent: ids,
+      tag: tagIds,
     });
     expect(fragments).toEqual([
       { source: { in: ['DoubleTick'] } },
       { status: { in: ['New'] } },
       { assignments: { some: { userId: { in: ids } } } },
+      { tags: { some: { tagId: { in: tagIds } } } },
     ]);
   });
 
