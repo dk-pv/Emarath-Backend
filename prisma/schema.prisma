@@ -482,6 +482,10 @@ enum CallOutcome {
 /// so each attempt is its own row. Supports day-over-day trend analysis.
 model Call {
   id        String        @id @default(uuid()) @db.Uuid
+  /// The PBX's own call id (CALL-02.1). Ingestion is idempotent on this key so a
+  /// replayed 3CX event is not stored twice (AC5). Nullable because CALL-01.1 rows
+  /// and any future manual sources have no external id.
+  externalId String?      @unique @map("external_id") @db.VarChar(128)
   leadId    String        @map("lead_id") @db.Uuid
   agentId   String        @map("agent_id") @db.Uuid
   phone     String        @db.VarChar(32)
