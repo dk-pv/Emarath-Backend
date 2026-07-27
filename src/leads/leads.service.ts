@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { LeadsRepository } from './leads.repository';
@@ -41,6 +45,25 @@ export class LeadsService {
     });
 
     return { rows: rows.map(toLeadListItem), total };
+  }
+
+  /**
+   * One lead for the Lead Detail page. Scoped like the list, so an out-of-scope,
+   * unknown or soft-deleted id is a 404 — never a cross-scope read (the graceful
+   * missing/deleted state the page renders). Returns the same shape as a list
+   * row, so nothing wider than the list is exposed.
+   */
+  async findById(id: string): Promise<LeadListItem> {
+    const user = await this.currentUser.resolve();
+    const lead = await this.repository.findById({
+      AND: [leadScopeWhere(user), { id }],
+    });
+    if (!lead) {
+      throw new NotFoundException(
+        'That lead does not exist or is not in your scope.',
+      );
+    }
+    return toLeadListItem(lead);
   }
 
   /**

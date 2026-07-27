@@ -1,3 +1,4 @@
+import { NotFoundException } from '@nestjs/common';
 import { CurrentUserService } from '../auth/current-user';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { CreateLeadDto } from './dto/create-lead.dto';
@@ -42,14 +43,15 @@ const BASE_DTO: CreateLeadDto = {
 
 function makeService(role: UserRole = UserRole.SUPERADMIN, userId = 'me') {
   const create = jest.fn().mockResolvedValue(FAKE_ROW);
-  const repository = { create } as unknown as LeadsRepository;
+  const findById = jest.fn();
+  const repository = { create, findById } as unknown as LeadsRepository;
   const currentUser = {
     resolve: jest.fn().mockResolvedValue({ id: userId, role }),
   } as unknown as CurrentUserService;
   const service = new LeadsService(repository, currentUser);
   const dataOf = (call = 0): Prisma.LeadCreateInput =>
     (create.mock.calls[call] as [Prisma.LeadCreateInput])[0];
-  return { service, create, dataOf };
+  return { service, create, findById, dataOf };
 }
 
 describe('LeadsService.create', () => {
@@ -100,5 +102,41 @@ describe('LeadsService.create', () => {
     expect(dataOf(0).whatsappAttempts).toBe(0);
     await service.create({ ...BASE_DTO, msgAttempts: 3 });
     expect(dataOf(1).whatsappAttempts).toBe(3);
+  });
+});
+
+describe('LeadsService.findById', () => {
+  it('returns the scoped lead mapped to a list item', async () => {
+    const { service, findById } = makeService();
+    findById.mockResolvedValue(FAKE_ROW);
+
+    const lead = await service.findById('lead-1');
+
+    expect(lead.id).toBe('lead-1');
+    expect(lead.name).toBe('X');
+  });
+
+  it('queries within the caller scope AND the id', async () => {
+    const { service, findById } = makeService(UserRole.SALES_AGENT, 'agent-1');
+    findById.mockResolvedValue(FAKE_ROW);
+
+    await service.findById('lead-1');
+
+    const where = (findById.mock.calls as unknown[][])[0][0] as {
+      AND: [{ deletedAt: null }, { id: string }];
+    };
+    // scope first (excludes soft-deleted), then the id — an out-of-scope or
+    // deleted lead simply won't match, so it 404s rather than leaking.
+    expect(where.AND[0]).toMatchObject({ deletedAt: null });
+    expect(where.AND[1]).toEqual({ id: 'lead-1' });
+  });
+
+  it('404s when the lead is out of scope, deleted or missing', async () => {
+    const { service, findById } = makeService();
+    findById.mockResolvedValue(null);
+
+    await expect(service.findById('nope')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
   });
 });

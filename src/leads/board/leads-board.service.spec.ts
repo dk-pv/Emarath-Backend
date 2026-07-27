@@ -98,6 +98,48 @@ describe('LeadsBoardService.board', () => {
     expect(args.where.AND).toContainEqual({ deletedAt: null });
   });
 
+  it('narrows the rollup by the same search and filters as the list (KAN-07.1 AC1/AC5)', async () => {
+    const { service, groupBy, aggregate } = makeService();
+    groupBy.mockResolvedValue([]);
+    aggregate.mockResolvedValue(emptyOverall);
+
+    await service.board({
+      pipeline: 'Lead Pipeline',
+      search: 'acme',
+      source: ['Broadcast'],
+      status: ['New'],
+    });
+
+    const args = (groupBy.mock.calls as unknown[][])[0][0] as {
+      where: { AND: Record<string, unknown>[] };
+    };
+    // The search and each field filter reach the groupBy `where`, ANDed with scope
+    // and pipeline — the identical fragments the list builds from the same query.
+    expect(args.where.AND).toContainEqual({ pipeline: 'Lead Pipeline' });
+    expect(args.where.AND).toContainEqual({ source: { in: ['Broadcast'] } });
+    expect(args.where.AND).toContainEqual({ status: { in: ['New'] } });
+    expect(args.where.AND).toContainEqual({
+      OR: [
+        { name: { contains: 'acme', mode: 'insensitive' } },
+        { primaryPhone: { contains: 'acme' } },
+      ],
+    });
+  });
+
+  it('defaults an absent pipeline to the sales board (KAN-02.1)', async () => {
+    const { service, groupBy, aggregate } = makeService();
+    groupBy.mockResolvedValue([]);
+    aggregate.mockResolvedValue(emptyOverall);
+
+    const res = await service.board({});
+
+    expect(res.pipeline).toBe('Lead Pipeline');
+    const args = (groupBy.mock.calls as unknown[][])[0][0] as {
+      where: { AND: Record<string, unknown>[] };
+    };
+    expect(args.where.AND).toContainEqual({ pipeline: 'Lead Pipeline' });
+  });
+
   it('returns an empty board cleanly when a pipeline has no leads', async () => {
     const { service, groupBy, aggregate } = makeService();
     groupBy.mockResolvedValue([]);

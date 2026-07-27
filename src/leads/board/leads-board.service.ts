@@ -10,12 +10,8 @@ import { StagesService } from '../../stages/stages.service';
 import { OUT_OF_SCOPE_REASON } from '../bulk/dto/bulk-actions.dto';
 import { LEAD_LIST_SELECT, toLeadListItem } from '../dto/lead-response.dto';
 import { leadScopeWhere } from '../lead-scope';
-import { buildLeadWhere } from '../lead-where';
-import {
-  BoardQueryDto,
-  BoardStageSummary,
-  LeadBoardResponse,
-} from './dto/board-query.dto';
+import { buildLeadWhere, LeadWhereQuery } from '../lead-where';
+import { BoardStageSummary, LeadBoardResponse } from './dto/board-query.dto';
 import { MoveLeadStageDto, MoveLeadStageResponse } from './dto/move-stage.dto';
 
 /**
@@ -45,9 +41,16 @@ export class LeadsBoardService {
     private readonly stages: StagesService,
   ) {}
 
-  async board(query: BoardQueryDto): Promise<LeadBoardResponse> {
+  async board(query: LeadWhereQuery): Promise<LeadBoardResponse> {
     const user = await this.currentUser.resolve();
-    const where = buildLeadWhere(user, { pipeline: query.pipeline });
+    // The list query is optional on `pipeline`; the board always groups one board,
+    // so default it here (the DTO already trimmed it). The whole query then flows
+    // through the one shared builder, so the board's search and filters narrow the
+    // rollup exactly as they narrow the list (KAN-07.1 AC1/AC5) — a groupBy over
+    // `where status IN (...)` returns only the matching stages, an empty search or
+    // filter leaves the pipeline board unchanged.
+    const pipeline = query.pipeline || 'Lead Pipeline';
+    const where = buildLeadWhere(user, { ...query, pipeline });
 
     // Two independent read aggregates — `Promise.all`, not a snapshot transaction:
     // a board rollup only needs live counts, and the exact groupBy result types
@@ -62,7 +65,7 @@ export class LeadsBoardService {
     ]);
 
     return {
-      pipeline: query.pipeline,
+      pipeline,
       // A stable, deterministic order; the board reorders by its stage config.
       stages: stages.sort((a, b) => a.stage.localeCompare(b.stage)),
       totals: {

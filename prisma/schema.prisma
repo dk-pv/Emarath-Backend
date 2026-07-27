@@ -56,6 +56,10 @@ model User {
   assignments     LeadAssignment[]
   importJobs      ImportJob[]
   viewPreferences UserViewPreference[]
+  /// ACT-01.1 (ACT-06.1): activities this user is assigned to work.
+  activityAssignments ActivityAssignee[]
+  /// CALL-01.1: calls made or received by this agent.
+  calls               Call[]
 
   @@map("users")
 }
@@ -169,6 +173,11 @@ model Lead {
   assignments LeadAssignment[]
   tags        LeadTag[]
   complaints  Complaint[]
+  /// ACT-01.1: follow-ups on this lead. Independent of the lead's stage — an
+  /// activity links to the lead, not to a status/pipeline (ADR-0027 dec 7).
+  activities  Activity[]
+  /// CALL-01.1: call records linked to this lead.
+  calls       Call[]
 
   /// AC2: the fields the list and board filter and group by are indexed.
   /// Each is paired with deletedAt because every query must exclude soft-deleted
@@ -387,4 +396,113 @@ model Stage {
   /// The board/list read the ordered stage set for one pipeline.
   @@index([pipeline, position])
   @@map("stages")
+}
+
+/// Workpex "Follow Up Type" — the required first field of the Add Follow-up
+/// drawer, which also drives the derived title (ACT-01.1 gap M1, ADR-0027 dec 1).
+/// Fixed by the product, not user-configurable, so an enum is the honest model.
+enum ActivityType {
+  CALL
+  MEETING
+  TASK
+}
+
+/// A follow-up on a lead (ACT-01.1). Links to the lead, not to a stage
+/// (ADR-0027) — so it is independent of the lead's pipeline/status.
+///
+/// `title` is NOT stored: it is derived "{type} with {lead.name}" (ADR-0027
+/// dec 2 / gap C2). `type` is the Workpex Follow Up Type (M1). Due is composed
+/// as `dueAt` (Due Date + Start Time); `endAt` is the Meeting/Task End Time (M2).
+/// `description` is the "Follow-up Description" — nullable here because imported/
+/// legacy rows may lack it, but the create/edit DTO enforces non-empty (C1,
+/// resolved required by the video). `locationId` is the optional Location select
+/// (Meeting/Task only); its catalogue + on-site check-in are the GPS module's, so
+/// there is no FK until that table exists (E1). `completedAt` is ACT-04.1.
+model Activity {
+  id          String       @id @default(uuid()) @db.Uuid
+  type        ActivityType
+  leadId      String       @map("lead_id") @db.Uuid
+  description String?      @db.Text
+  dueAt       DateTime     @map("due_at")
+  endAt       DateTime?    @map("end_at")
+  completedAt DateTime?    @map("completed_at")
+  locationId  String?      @map("location_id") @db.Uuid
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  lead      Lead               @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  assignees ActivityAssignee[]
+
+  /// Overdue/Today/Tomorrow/All bucketing compares dueAt to day boundaries.
+  @@index([dueAt])
+  /// A lead's activities, excluding soft-deleted.
+  @@index([leadId, deletedAt])
+  /// The Completed tab.
+  @@index([completedAt])
+  @@map("activities")
+}
+
+/// Multi-user assignment (ACT-06.1) — an explicit join mirroring LeadAssignment,
+/// so a follow-up appears on every assignee's worklist and drives assignee-based
+/// role scope. Completion lives on Activity, not here, so "done" is one truth for
+/// all assignees.
+model ActivityAssignee {
+  id         String   @id @default(uuid()) @db.Uuid
+  activityId String   @map("activity_id") @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  activity Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// A user is assigned to a follow-up once or not at all.
+  @@unique([activityId, userId])
+  /// "activities assigned to me" — the agent's role-scoped view.
+  @@index([userId])
+  @@map("activity_assignees")
+}
+
+/// Direction of a call (CALL-01.1).
+enum CallDirection {
+  INBOUND
+  OUTBOUND
+}
+
+/// Outcome of a call (CALL-01.1).
+enum CallOutcome {
+  ANSWERED
+  NO_ANSWER
+  BUSY
+}
+
+/// A call record (CALL-01.1). Data originates from a connected PBX (3CX),
+/// so each attempt is its own row. Supports day-over-day trend analysis.
+model Call {
+  id        String        @id @default(uuid()) @db.Uuid
+  leadId    String        @map("lead_id") @db.Uuid
+  agentId   String        @map("agent_id") @db.Uuid
+  phone     String        @db.VarChar(32)
+  startedAt DateTime      @map("started_at")
+  direction CallDirection
+  outcome   CallOutcome
+  /// Duration in seconds.
+  duration  Int           @default(0)
+  leadNotes String?       @map("lead_notes") @db.Text
+  callNotes String?       @map("call_notes") @db.Text
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  lead  Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  agent User @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  /// The backlog requires an index on date/time and agent.
+  @@index([startedAt])
+  @@index([agentId, startedAt])
+  @@index([leadId, deletedAt])
+  @@map("calls")
 }

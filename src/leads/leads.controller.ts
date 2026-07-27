@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { LeadsService } from './leads.service';
 import { LeadListItem, LeadListResponse } from './dto/lead-response.dto';
 import { LeadFilterOptions } from './dto/lead-filter-options.dto';
@@ -36,5 +44,14 @@ export class LeadsController {
   @Post()
   create(@Body() dto: CreateLeadDto): Promise<LeadListItem> {
     return this.leads.create(dto);
+  }
+
+  /**
+   * GET /api/leads/:id — one scoped lead for the Lead Detail page. Declared last
+   * so the static `:id`-shaped routes above are never captured as an id.
+   */
+  @Get(':id')
+  detail(@Param('id', ParseUUIDPipe) id: string): Promise<LeadListItem> {
+    return this.leads.findById(id);
   }
 }

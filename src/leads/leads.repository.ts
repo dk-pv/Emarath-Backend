@@ -35,6 +35,14 @@ export class LeadsRepository {
     return this.prisma.lead.create({ data, select: LEAD_LIST_SELECT });
   }
 
+  /**
+   * One lead by the caller-supplied scoped `where`, or null. Same projection as
+   * the list, so the Lead Detail read can never surface a field the list hides.
+   */
+  async findById(where: Prisma.LeadWhereInput) {
+    return this.prisma.lead.findFirst({ where, select: LEAD_LIST_SELECT });
+  }
+
   async findPage({ where, sort, direction, skip, take }: FindLeadsArgs) {
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.lead.findMany({
