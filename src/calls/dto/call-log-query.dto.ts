@@ -5,6 +5,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   MaxLength,
   Min,
@@ -74,4 +75,10 @@ export class CallLogQueryDto {
   @MaxLength(64)
   @IsOptional()
   leadStatus?: string;
+
+  /** Agent filter (CALL-06.1) — narrows to one call agent. */
+  @Transform(emptyToUndefined)
+  @IsUUID('4', { message: 'agentId must be a valid id' })
+  @IsOptional()
+  agentId?: string;
 }

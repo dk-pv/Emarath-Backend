@@ -7,6 +7,7 @@ import {
 import { ActivityType, Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import { GpsService } from '../gps/gps.service';
 import { leadScopeWhere } from '../leads/lead-scope';
 import { activityScopeWhere } from './activity-scope';
 import { activityBucketWhere, DayBoundaries } from './activity-buckets';
@@ -46,6 +47,7 @@ export class ActivitiesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
+    private readonly gps: GpsService,
   ) {}
 
   /**
@@ -155,16 +157,18 @@ export class ActivitiesService {
      * ACT-10.1 location gate (ADR-0027 dec 6, blueprint §1.8, §10).
      *
      * A location-tied activity (`locationId != null`) requires an on-site GPS
-     * check-in before it can be marked complete. The GPS module owns the
-     * check-in catalogue and verification; this is the gate **seam** — it
-     * unconditionally blocks completion of any location-tied activity until
-     * GPS wires in the real check-in test. When GPS lands, replace this branch
-     * with `await gpsService.hasValidCheckin(user.id, activity.locationId)`.
+     * check-in before it can be marked complete. GPS-02.1 wires the real test:
+     * the agent must have a check-in verifying this follow-up. When `locationId`
+     * is null the branch is skipped and completion proceeds normally.
      *
-     * AC4 is satisfied automatically: when `locationId` is null the branch is
-     * not taken and completion proceeds normally.
+     * Geofencing the check-in against the expected location's coordinates awaits
+     * the location catalogue (deferred); existence of the agent's check-in is
+     * the current verification.
      */
-    if (activity.locationId !== null) {
+    if (
+      activity.locationId !== null &&
+      !(await this.gps.hasValidCheckIn(user.id, activity.id))
+    ) {
       throw new ConflictException(LOCATION_GATE_MESSAGE);
     }
 

@@ -68,6 +68,7 @@ export class CallLogService {
       ...callScopeWhere(user),
       startedAt: { gte: start, lt: end },
       ...(query.outcome ? { outcome: query.outcome } : {}),
+      ...(query.agentId ? { agentId: query.agentId } : {}),
       ...this.searchWhere(query.search),
     };
 

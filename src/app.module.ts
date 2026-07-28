@@ -6,6 +6,7 @@ import { AppService } from './app.service';
 import { ActivitiesModule } from './activities/activities.module';
 import { AuthModule } from './auth/auth.module';
 import { CallsModule } from './calls/calls.module';
+import { GpsModule } from './gps/gps.module';
 import { HealthModule } from './health/health.module';
 import { LeadsModule } from './leads/leads.module';
 import { LeadsBoardModule } from './leads/board/leads-board.module';
@@ -36,6 +37,7 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     ActivitiesModule,
     AuthModule,
     CallsModule,
+    GpsModule,
     HealthModule,
     LeadsModule,
     LeadsBoardModule,

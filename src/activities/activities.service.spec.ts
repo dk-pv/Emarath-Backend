@@ -6,6 +6,7 @@ import {
 import { ActivityType, Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import { GpsService } from '../gps/gps.service';
 import { ActivitiesService, LOCATION_GATE_MESSAGE } from './activities.service';
 import { CreateActivityDto } from './dto/create-activity.dto';
 
@@ -71,7 +72,14 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     resolve: jest.fn().mockResolvedValue({ id: 'u1', role }),
   } as unknown as CurrentUserService;
 
-  const service = new ActivitiesService(prisma, currentUser);
+  // The GPS gate (ACT-10.1 / GPS-02.1): no valid check-in by default, so a
+  // location-tied completion is blocked unless a test says otherwise.
+  const gpsHasValidCheckIn = jest.fn().mockResolvedValue(false);
+  const gps = {
+    hasValidCheckIn: gpsHasValidCheckIn,
+  } as unknown as GpsService;
+
+  const service = new ActivitiesService(prisma, currentUser, gps);
   return {
     service,
     leadFindFirst,
@@ -80,6 +88,7 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     activityCount,
     activityFindFirst,
     activityUpdate,
+    gpsHasValidCheckIn,
   };
 }
 
@@ -458,6 +467,27 @@ describe('ActivitiesService.complete', () => {
 
     // must not throw
     await expect(service.complete(ACT_ID)).resolves.toBeDefined();
+    expect(activityUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  // GPS-02.1 AC3: a valid check-in satisfies the location gate.
+  it('completes a location-tied activity once the agent has a valid check-in (GPS-02.1)', async () => {
+    const LOC_ID = '55555555-5555-5555-5555-555555555555';
+    const { service, activityFindFirst, activityUpdate, gpsHasValidCheckIn } =
+      makeService();
+    activityFindFirst.mockResolvedValue({
+      id: ACT_ID,
+      completedAt: null,
+      locationId: LOC_ID,
+      lead: { name: 'Acme' },
+    });
+    gpsHasValidCheckIn.mockResolvedValue(true);
+    activityUpdate.mockResolvedValue(
+      activityRow({ completedAt: new Date('2026-07-24T10:00:00.000Z') }),
+    );
+
+    await expect(service.complete(ACT_ID)).resolves.toBeDefined();
+    expect(gpsHasValidCheckIn).toHaveBeenCalledWith('u1', ACT_ID);
     expect(activityUpdate).toHaveBeenCalledTimes(1);
   });
 });

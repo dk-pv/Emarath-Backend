@@ -60,6 +60,9 @@ model User {
   activityAssignments ActivityAssignee[]
   /// CALL-01.1: calls made or received by this agent.
   calls               Call[]
+  /// GPS-01.1: field check-ins and passive tracking points for this agent.
+  checkIns            CheckIn[]
+  locationPoints      LocationPoint[]
 
   @@map("users")
 }
@@ -434,6 +437,8 @@ model Activity {
 
   lead      Lead               @relation(fields: [leadId], references: [id], onDelete: Cascade)
   assignees ActivityAssignee[]
+  /// GPS-01.1: the field check-ins that verify this follow-up (ACT-10.1 gate).
+  checkIns  CheckIn[]
 
   /// Overdue/Today/Tomorrow/All bucketing compares dueAt to day boundaries.
   @@index([dueAt])
@@ -501,12 +506,67 @@ model Call {
   updatedAt DateTime  @updatedAt @map("updated_at")
   deletedAt DateTime? @map("deleted_at")
 
-  lead  Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  agent User @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// Restrict, not Cascade: the app soft-deletes, so a hard delete of a lead or
+  /// agent must not silently erase their call history/analytics.
+  lead  Lead @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  agent User @relation(fields: [agentId], references: [id], onDelete: Restrict)
 
   /// The backlog requires an index on date/time and agent.
   @@index([startedAt])
   @@index([agentId, startedAt])
   @@index([leadId, deletedAt])
   @@map("calls")
+}
+
+/// A field visit (GPS-01.1). One row per visit: the check-in time/coordinates,
+/// plus the check-out time/coordinates once the agent leaves (both nullable
+/// until then). May verify a location-tied follow-up (ACT-10.1 gate) via
+/// `activityId`. Coordinates are Decimal(9,6) — ~0.1 m precision, signed, and
+/// exact (never float drift on a comparison). No PostGIS: the backlog's queries
+/// are by agent and period, which a btree index serves.
+model CheckIn {
+  id          String    @id @default(uuid()) @db.Uuid
+  agentId     String    @map("agent_id") @db.Uuid
+  checkInAt   DateTime  @map("check_in_at")
+  checkInLat  Decimal   @map("check_in_lat") @db.Decimal(9, 6)
+  checkInLng  Decimal   @map("check_in_lng") @db.Decimal(9, 6)
+  checkOutAt  DateTime? @map("check_out_at")
+  checkOutLat Decimal?  @map("check_out_lat") @db.Decimal(9, 6)
+  checkOutLng Decimal?  @map("check_out_lng") @db.Decimal(9, 6)
+  /// The follow-up this visit verifies; null when the check-in is not tied to one.
+  activityId  String?   @map("activity_id") @db.Uuid
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  agent    User      @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// SetNull, not Cascade: deleting the follow-up must not erase the proof the
+  /// visit happened.
+  activity Activity? @relation(fields: [activityId], references: [id], onDelete: SetNull)
+
+  /// AC4: query a field agent's visits over a period.
+  @@index([agentId, checkInAt])
+  @@index([activityId])
+  @@map("check_ins")
+}
+
+/// A passive automatic-tracking location point (GPS-01.1) — a stream of pings per
+/// field agent. Append-only telemetry, so no soft-delete; a purge is a retention
+/// policy, not a per-row delete.
+model LocationPoint {
+  id         String   @id @default(uuid()) @db.Uuid
+  agentId    String   @map("agent_id") @db.Uuid
+  recordedAt DateTime @map("recorded_at")
+  lat        Decimal  @db.Decimal(9, 6)
+  lng        Decimal  @db.Decimal(9, 6)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  agent User @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  /// AC2/AC4: an agent's track over a period.
+  @@index([agentId, recordedAt])
+  @@map("location_points")
 }

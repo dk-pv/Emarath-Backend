@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ActivitiesController } from './activities.controller';
 import { ActivitiesService } from './activities.service';
+import { GpsModule } from '../gps/gps.module';
 
 /**
  * The Activities feature. ACT-01.1 landed the data model; ACT-03.1 adds the
@@ -9,6 +10,7 @@ import { ActivitiesService } from './activities.service';
  * from AuthModule) are injected, so no imports are needed.
  */
 @Module({
+  imports: [GpsModule],
   controllers: [ActivitiesController],
   providers: [ActivitiesService],
 })

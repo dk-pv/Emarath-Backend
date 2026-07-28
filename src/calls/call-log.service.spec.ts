@@ -16,6 +16,7 @@ const TO = '2026-07-28T00:00:00.000Z';
 
 type Where = {
   outcome?: CallOutcome;
+  agentId?: string;
   startedAt?: { gte: Date; lt: Date };
   lead?: Record<string, unknown>;
   OR?: unknown[];
@@ -129,6 +130,15 @@ describe('CallLogService.getLog', () => {
       where: Where;
     };
     expect(where.lead).toMatchObject({ deletedAt: null, status: 'HOT' });
+  });
+
+  it('filters by agent when supplied (CALL-06.1)', async () => {
+    const { service, callFindMany } = makeService();
+    await service.getLog(query({ agentId: USER_ID }));
+    const { where } = (callFindMany.mock.calls as unknown[][])[0][0] as {
+      where: Where;
+    };
+    expect(where.agentId).toBe(USER_ID);
   });
 
   it('scopes the log to the caller for a sales agent (AC5)', async () => {
