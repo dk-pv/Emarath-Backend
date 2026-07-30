@@ -98,6 +98,17 @@ export class AuthService {
     return { accessToken, refreshToken, user: toPublicUser(user) };
   }
 
+  /**
+   * End the session (AUTH-01.5 AC1): revoke the presented refresh token's family so it can
+   * no longer refresh (AC4). Idempotent — an absent or unknown token is a no-op, so logout
+   * never fails and may be called repeatedly. The controller clears the cookies (AC2/AC3).
+   */
+  async logout(rawToken?: string): Promise<void> {
+    if (rawToken) {
+      await this.refreshTokens.revokeByRawToken(rawToken);
+    }
+  }
+
   /** The access token carries user id + role claims (AUTH-01.3 AC2). */
   private signAccessToken(userId: string, role: UserRole): Promise<string> {
     return this.jwt.signAsync({ sub: userId, role });

@@ -24,6 +24,7 @@ function makeService(row: typeof USER_ROW | null) {
   const verify = jest.fn();
   const rotate = jest.fn().mockResolvedValue('rotated-refresh-token');
   const revokeFamily = jest.fn().mockResolvedValue(undefined);
+  const revokeByRawToken = jest.fn().mockResolvedValue(undefined);
   const prisma = { user: { findFirst } } as unknown as PrismaService;
   const jwt = { signAsync } as unknown as JwtService;
   const refreshTokens = {
@@ -31,6 +32,7 @@ function makeService(row: typeof USER_ROW | null) {
     verify,
     rotate,
     revokeFamily,
+    revokeByRawToken,
   } as unknown as RefreshTokenService;
   return {
     service: new AuthService(prisma, jwt, refreshTokens),
@@ -40,6 +42,7 @@ function makeService(row: typeof USER_ROW | null) {
     verify,
     rotate,
     revokeFamily,
+    revokeByRawToken,
   };
 }
 
@@ -154,5 +157,19 @@ describe('AuthService.refresh (AUTH-01.3)', () => {
     );
     expect(revokeFamily).toHaveBeenCalledWith('fam1');
     expect(rotate).not.toHaveBeenCalled();
+  });
+});
+
+describe('AuthService.logout (AUTH-01.5)', () => {
+  it('revokes the presented token’s family (AC1/AC4)', async () => {
+    const { service, revokeByRawToken } = makeService(USER_ROW);
+    await service.logout('raw-refresh');
+    expect(revokeByRawToken).toHaveBeenCalledWith('raw-refresh');
+  });
+
+  it('is a no-op when no token is presented (idempotent, never fails)', async () => {
+    const { service, revokeByRawToken } = makeService(USER_ROW);
+    await expect(service.logout(undefined)).resolves.toBeUndefined();
+    expect(revokeByRawToken).not.toHaveBeenCalled();
   });
 });

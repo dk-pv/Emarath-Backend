@@ -144,6 +144,28 @@ describe('RefreshTokenService (AUTH-01.3)', () => {
     expect(updateArgs.data.revokedAt).toBeInstanceOf(Date);
   });
 
+  it('revokeByRawToken() revokes the token’s family (AUTH-01.5 logout)', async () => {
+    const { service, findUnique, updateMany } = makeService();
+    findUnique.mockResolvedValue({ id: 't', familyId: 'fam-3' });
+    await service.revokeByRawToken('raw');
+
+    const lookup = (findUnique.mock.calls as unknown[][])[0][0] as {
+      where: { tokenHash: string };
+    };
+    expect(lookup.where.tokenHash).toBe(sha('raw')); // looked up by hash, not raw
+    const args = (updateMany.mock.calls as unknown[][])[0][0] as {
+      where: { familyId: string };
+    };
+    expect(args.where.familyId).toBe('fam-3');
+  });
+
+  it('revokeByRawToken() is a no-op for an unknown token (idempotent logout)', async () => {
+    const { service, findUnique, updateMany } = makeService();
+    findUnique.mockResolvedValue(null);
+    await expect(service.revokeByRawToken('gone')).resolves.toBeUndefined();
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
   it('revokeFamily() revokes every live token in the family', async () => {
     const { service, updateMany } = makeService();
     await service.revokeFamily('fam-2');

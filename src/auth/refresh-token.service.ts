@@ -107,6 +107,20 @@ export class RefreshTokenService {
     return rawToken;
   }
 
+  /**
+   * Revoke the presented token's whole family (AUTH-01.5 logout): the device session ends,
+   * so no token in the lineage — including the one just rotated in — can refresh again
+   * (AC4). Idempotent: an unknown token (already logged out, tampered, or none) is a no-op.
+   */
+  async revokeByRawToken(rawToken: string): Promise<void> {
+    const row = await this.prisma.refreshToken.findUnique({
+      where: { tokenHash: this.hash(rawToken) },
+    });
+    if (row) {
+      await this.revokeFamily(row.familyId);
+    }
+  }
+
   /** Revoke every still-live token in a family (reuse response; logout reuses this in 01.5). */
   async revokeFamily(familyId: string): Promise<void> {
     await this.prisma.refreshToken.updateMany({

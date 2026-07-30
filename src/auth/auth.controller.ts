@@ -14,6 +14,7 @@ import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
 import { AuthService, type PublicUser } from './auth.service';
 import { LoginDto } from './dto/login.dto';
+import { Public } from './public.decorator';
 import type { AuthConfig } from '../config/auth.config';
 import type { AppConfig } from '../config/configuration';
 
@@ -21,11 +22,12 @@ const ACCESS_COOKIE = 'access_token';
 const REFRESH_COOKIE = 'refresh_token';
 
 /**
- * Authentication routes (AUTH-01.2 login + AUTH-01.3 refresh). Rate-limited with
- * @nestjs/throttler (the ThrottlerGuard here is the rate-limiter, NOT the JWT route
- * guard, which is AUTH-01.4). Logout is AUTH-01.5.
+ * Authentication routes (AUTH-01.2 login + AUTH-01.3 refresh). `@Public()` — these are
+ * how a caller obtains a session, so the JwtAuthGuard (AUTH-01.4) must not gate them;
+ * they stay rate-limited by the ThrottlerGuard. Logout is AUTH-01.5.
  */
 @Controller('auth')
+@Public()
 @UseGuards(ThrottlerGuard)
 export class AuthController {
   constructor(
@@ -74,6 +76,23 @@ export class AuthController {
   }
 
   /**
+   * End the session (AUTH-01.5). Revokes the presented refresh token's family so it can no
+   * longer refresh (AC1/AC4), then clears both cookies (AC2). Idempotent — succeeds with no
+   * cookies present and when called repeatedly, and never leaks whether a token existed.
+   */
+  @Post('logout')
+  @HttpCode(HttpStatus.OK)
+  async logout(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ success: true }> {
+    const cookies = (req.cookies ?? {}) as Record<string, string | undefined>;
+    await this.auth.logout(cookies[REFRESH_COOKIE]);
+    this.clearSessionCookies(res);
+    return { success: true };
+  }
+
+  /**
    * Deliver both tokens as HttpOnly cookies. The access cookie is sent to every `/api`
    * route; the refresh cookie is scoped to `/api/auth`, so it only rides along to the
    * auth routes that consume it.
@@ -100,6 +119,26 @@ export class AuthController {
       ...base,
       path: `/${app.apiPrefix}/auth`,
       maxAge: auth.refreshTtlSec * 1000,
+    });
+  }
+
+  /**
+   * Clear both session cookies. Path + attributes must match `setSessionCookies` exactly,
+   * or the browser keeps the originals (a cookie is identified by name + path).
+   */
+  private clearSessionCookies(res: Response): void {
+    const auth = this.config.getOrThrow<AuthConfig>('auth');
+    const app = this.config.getOrThrow<AppConfig>('app');
+    const base = {
+      httpOnly: true,
+      secure: auth.cookieSecure,
+      sameSite: auth.cookieSameSite,
+    } as const;
+
+    res.clearCookie(ACCESS_COOKIE, { ...base, path: `/${app.apiPrefix}` });
+    res.clearCookie(REFRESH_COOKIE, {
+      ...base,
+      path: `/${app.apiPrefix}/auth`,
     });
   }
 }

@@ -1,20 +1,24 @@
 import { Global, Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { CurrentUserService } from './current-user';
-import { DevelopmentCurrentUserService } from './development-current-user.service';
+import { JwtCurrentUserService } from './jwt-current-user.service';
+import { JwtAuthGuard } from './jwt-auth.guard';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { RefreshTokenService } from './refresh-token.service';
 import type { AuthConfig } from '../config/auth.config';
 
 /**
- * Owns "who is asking" and, from AUTH-01.2, login.
+ * Owns "who is asking", login and session refresh.
  *
- * The CurrentUserService binding below is the single seam AUTH-01.3 replaces with a
- * JWT-backed implementation. JwtModule signs the access token; ThrottlerModule rate-
- * limits login (AC3). Refresh, guards and logout are later tasks.
+ * From AUTH-01.4, CurrentUserService is JWT-backed: the global JwtAuthGuard verifies the
+ * access cookie and populates the per-request identity, and JwtCurrentUserService reads
+ * it — the CurrentUserService abstraction is unchanged, so no feature module edits.
+ * JwtModule signs/verifies the access token; ThrottlerModule rate-limits login. Logout is
+ * AUTH-01.5.
  */
 @Global()
 @Module({
@@ -45,7 +49,8 @@ import type { AuthConfig } from '../config/auth.config';
   providers: [
     AuthService,
     RefreshTokenService,
-    { provide: CurrentUserService, useClass: DevelopmentCurrentUserService },
+    { provide: CurrentUserService, useClass: JwtCurrentUserService },
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
   ],
   exports: [CurrentUserService],
 })
