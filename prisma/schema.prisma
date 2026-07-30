@@ -39,23 +39,33 @@ enum UserRole {
   MARKETING_ANALYST
 }
 
-/// Minimum slice of AUTH-01.1 needed for LEAD-01.1 AC4 (multi-agent assignment).
-/// AUTH-01.1 is NOT complete here: credentials, hashing and login are its own
-/// task and add to this model rather than reshape it.
+/// The user account (AUTH-01.1). Stores credentials (email + username + a one-way
+/// password hash), one profile field (name), exactly one role and one optional team
+/// (AC1/AC3). `email` and `username` are both unique so a duplicate of either is
+/// rejected at creation (AC5). Passwords are stored only as a bcrypt hash (AC4) —
+/// never plaintext. Login, sessions and the JWT identity are AUTH-01.2/01.3, which
+/// consume this model without reshaping it.
 model User {
-  id        String    @id @default(uuid()) @db.Uuid
-  name      String    @db.VarChar(120)
-  email     String    @unique @db.VarChar(180)
-  role      UserRole
+  id           String    @id @default(uuid()) @db.Uuid
+  name         String    @db.VarChar(120)
+  email        String    @unique @db.VarChar(180)
+  /// Second credential AC5 dedupes alongside email.
+  username     String    @unique @db.VarChar(120)
+  /// bcrypt hash (AC4). Never the plaintext password.
+  passwordHash String    @map("password_hash") @db.VarChar(255)
+  role         UserRole
+  /// Whether the account may log in (AUTH-01.2 AC4). Disabled accounts are rejected
+  /// at login with the same generic error as bad credentials.
+  isActive     Boolean   @default(true) @map("is_active")
   /// Team association, used later for role scoping (AUTH-01.1 AC1/AC3).
-  team      String?   @db.VarChar(120)
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  deletedAt DateTime? @map("deleted_at")
+  team         String?   @db.VarChar(120)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  deletedAt    DateTime? @map("deleted_at")
 
-  assignments     LeadAssignment[]
-  importJobs      ImportJob[]
-  viewPreferences UserViewPreference[]
+  assignments         LeadAssignment[]
+  importJobs          ImportJob[]
+  viewPreferences     UserViewPreference[]
   /// ACT-01.1 (ACT-06.1): activities this user is assigned to work.
   activityAssignments ActivityAssignee[]
   /// CALL-01.1: calls made or received by this agent.
@@ -63,8 +73,38 @@ model User {
   /// GPS-01.1: field check-ins and passive tracking points for this agent.
   checkIns            CheckIn[]
   locationPoints      LocationPoint[]
+  /// AUTH-01.3: refresh-token sessions (one lineage per device).
+  refreshTokens       RefreshToken[]
 
   @@map("users")
+}
+
+/// A refresh-token session (AUTH-01.3, ADR-0029 §3). The token itself is an opaque
+/// random value delivered to the client; only its sha-256 hash is stored here, so a DB
+/// read never yields a usable token. `familyId` is the rotation lineage — one family per
+/// login, i.e. per device (multi-device sessions are independent families). On refresh
+/// the presented row is revoked (`revokedAt` + `replacedById`) and a new row is issued in
+/// the same family; presenting an already-revoked token revokes the whole family (reuse =
+/// theft). No soft-delete: a session is either live or revoked.
+model RefreshToken {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  /// sha-256 hex of the opaque token; the raw value is never stored.
+  tokenHash    String    @unique @map("token_hash") @db.VarChar(64)
+  familyId     String    @map("family_id") @db.Uuid
+  expiresAt    DateTime  @map("expires_at")
+  revokedAt    DateTime? @map("revoked_at")
+  /// The row that superseded this one on rotation (audit/theft trail).
+  replacedById String?   @map("replaced_by_id") @db.Uuid
+  userAgent    String?   @map("user_agent") @db.VarChar(512)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
 }
 
 /// Core lead record (LEAD-01.1).
@@ -126,11 +166,11 @@ model Lead {
   ///
   /// Quantities are decimal because Workpex renders them "1.00" in the QTY
   /// column — an integer would silently truncate a half-unit order.
-  product      String?  @db.VarChar(180)
-  productQty   Decimal? @map("product_qty") @db.Decimal(12, 2)
+  product     String?  @db.VarChar(180)
+  productQty  Decimal? @map("product_qty") @db.Decimal(12, 2)
   /// Free text, unlike `product`, which is a dropdown. Workpex's own asymmetry.
-  product2     String?  @db.VarChar(180)
-  product2Qty  Decimal? @map("product2_qty") @db.Decimal(12, 2)
+  product2    String?  @db.VarChar(180)
+  product2Qty Decimal? @map("product2_qty") @db.Decimal(12, 2)
 
   /// Date only — Workpex captures no time of day for a booking.
   bookingDate DateTime? @map("booking_date") @db.Date
@@ -486,21 +526,21 @@ enum CallOutcome {
 /// A call record (CALL-01.1). Data originates from a connected PBX (3CX),
 /// so each attempt is its own row. Supports day-over-day trend analysis.
 model Call {
-  id        String        @id @default(uuid()) @db.Uuid
+  id         String        @id @default(uuid()) @db.Uuid
   /// The PBX's own call id (CALL-02.1). Ingestion is idempotent on this key so a
   /// replayed 3CX event is not stored twice (AC5). Nullable because CALL-01.1 rows
   /// and any future manual sources have no external id.
-  externalId String?      @unique @map("external_id") @db.VarChar(128)
-  leadId    String        @map("lead_id") @db.Uuid
-  agentId   String        @map("agent_id") @db.Uuid
-  phone     String        @db.VarChar(32)
-  startedAt DateTime      @map("started_at")
-  direction CallDirection
-  outcome   CallOutcome
+  externalId String?       @unique @map("external_id") @db.VarChar(128)
+  leadId     String        @map("lead_id") @db.Uuid
+  agentId    String        @map("agent_id") @db.Uuid
+  phone      String        @db.VarChar(32)
+  startedAt  DateTime      @map("started_at")
+  direction  CallDirection
+  outcome    CallOutcome
   /// Duration in seconds.
-  duration  Int           @default(0)
-  leadNotes String?       @map("lead_notes") @db.Text
-  callNotes String?       @map("call_notes") @db.Text
+  duration   Int           @default(0)
+  leadNotes  String?       @map("lead_notes") @db.Text
+  callNotes  String?       @map("call_notes") @db.Text
 
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")

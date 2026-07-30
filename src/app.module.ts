@@ -1,12 +1,14 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import appConfig from './config/configuration';
+import authConfig from './config/auth.config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { ActivitiesModule } from './activities/activities.module';
 import { AuthModule } from './auth/auth.module';
 import { CallsModule } from './calls/calls.module';
 import { GpsModule } from './gps/gps.module';
+import { GpsExportModule } from './gps/export/gps-export.module';
 import { HealthModule } from './health/health.module';
 import { LeadsModule } from './leads/leads.module';
 import { LeadsBoardModule } from './leads/board/leads-board.module';
@@ -27,7 +29,7 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     ConfigModule.forRoot({
       isGlobal: true,
       cache: true,
-      load: [appConfig],
+      load: [appConfig, authConfig],
       // Environment is selected via NODE_ENV, without code changes.
       // Files are optional; on hosted platforms (Render/Vercel) values come
       // from real environment variables. Load order: most specific wins.
@@ -38,6 +40,7 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     AuthModule,
     CallsModule,
     GpsModule,
+    GpsExportModule,
     HealthModule,
     LeadsModule,
     LeadsBoardModule,

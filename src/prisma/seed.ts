@@ -14,6 +14,7 @@
  * straight off ts-node. `npm run db:seed` builds first for that reason.
  */
 import 'dotenv/config';
+import bcrypt from 'bcryptjs';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient, UserRole } from '../generated/prisma/client';
 
@@ -50,51 +51,67 @@ const STAGES: ReadonlyArray<{ name: string; color: string }> = [
 
 /**
  * One account per role, so role scoping (LEAD-02.1 AC3) has something to scope
- * against the moment it lands. Names are placeholders for real staff records.
+ * against the moment it lands, and all five backlog roles are seeded (AUTH-01.1
+ * AC2). Names are placeholders for real staff records.
  */
 const USERS: ReadonlyArray<{
   name: string;
   email: string;
+  username: string;
   role: UserRole;
   team: string | null;
 }> = [
   {
     name: 'Emarath Admin',
     email: 'admin@emarath.local',
+    username: 'admin',
     role: UserRole.SUPERADMIN,
     team: null,
   },
   {
     name: 'Sales Manager',
     email: 'manager@emarath.local',
+    username: 'manager',
     role: UserRole.SALES_MANAGER,
     team: 'Sales',
   },
   {
     name: 'Sales Agent One',
     email: 'agent1@emarath.local',
+    username: 'agent1',
     role: UserRole.SALES_AGENT,
     team: 'Sales',
   },
   {
     name: 'Sales Agent Two',
     email: 'agent2@emarath.local',
+    username: 'agent2',
     role: UserRole.SALES_AGENT,
     team: 'Sales',
   },
   {
     name: 'Customer Service Agent',
     email: 'service@emarath.local',
+    username: 'service',
     role: UserRole.CUSTOMER_SERVICE_AGENT,
     team: 'Support',
   },
   {
     name: 'Marketing Analyst',
     email: 'marketing@emarath.local',
+    username: 'marketing',
     role: UserRole.MARKETING_ANALYST,
     team: 'Marketing',
   },
 ];
+
+/**
+ * The dev password every seeded account is given (AUTH-01.1 AC4 stores it only as a
+ * bcrypt hash). These are system seed accounts, not real users, so the password is a
+ * known dev value — overridable via SEED_USER_PASSWORD. Login itself is AUTH-01.2.
+ */
+const SEED_PASSWORD = process.env['SEED_USER_PASSWORD'] ?? 'ChangeMe123!';
+const BCRYPT_ROUNDS = 10;
 
 async function main(): Promise<void> {
   const connectionString = process.env['DATABASE_URL_UNPOOLED'];
@@ -108,11 +125,23 @@ async function main(): Promise<void> {
 
   try {
     for (const user of USERS) {
+      // Each account gets a fresh bcrypt hash of the dev password (AC4). A new salt
+      // per run is expected and harmless — these are system seed accounts, so the
+      // seed is the source of truth for their credentials.
+      const passwordHash = bcrypt.hashSync(SEED_PASSWORD, BCRYPT_ROUNDS);
       await prisma.user.upsert({
         where: { email: user.email },
-        // Role and team are corrected on re-run; the account itself is left alone.
-        update: { name: user.name, role: user.role, team: user.team },
-        create: user,
+        // Role, team and credentials are corrected on re-run (this also replaces the
+        // migration's fail-closed sentinel hash on pre-existing rows); the account
+        // row itself is never deleted.
+        update: {
+          name: user.name,
+          username: user.username,
+          role: user.role,
+          team: user.team,
+          passwordHash,
+        },
+        create: { ...user, passwordHash },
       });
     }
     console.log(`[seed] ${USERS.length} users upserted.`);
