@@ -1,5 +1,7 @@
 import { Body, Controller, HttpCode, Post } from '@nestjs/common';
 import { LeadsBulkService } from './leads-bulk.service';
+import { Roles } from '../../auth/roles.decorator';
+import { UserRole } from '../../generated/prisma/client';
 import {
   BulkActionResponse,
   BulkDeleteDto,
@@ -17,8 +19,13 @@ import {
 export class LeadsBulkController {
   constructor(private readonly service: LeadsBulkService) {}
 
-  /** POST /api/leads/bulk/reassign — reassign the selected leads to one agent. */
+  /**
+   * POST /api/leads/bulk/reassign — reassign the selected leads to one agent.
+   * Reassignment is a managers-and-admins tool (AUTH-02.2); other roles are 403'd here,
+   * matching the hidden UI control.
+   */
   @Post('reassign')
+  @Roles(UserRole.SUPERADMIN, UserRole.SALES_MANAGER)
   @HttpCode(200)
   reassign(@Body() dto: BulkReassignDto): Promise<BulkActionResponse> {
     return this.service.reassign(dto);

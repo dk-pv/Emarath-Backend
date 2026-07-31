@@ -8,6 +8,8 @@ import {
   Post,
 } from '@nestjs/common';
 import { LeadRowActionsService } from './leads-row-actions.service';
+import { Roles } from '../../auth/roles.decorator';
+import { UserRole } from '../../generated/prisma/client';
 import { LeadListItem } from '../dto/lead-response.dto';
 import {
   ReassignLeadDto,
@@ -35,8 +37,12 @@ export class LeadRowActionsController {
     return this.service.duplicate(id);
   }
 
-  /** POST /api/leads/:id/reassign — reassign this lead to one agent (AC3). */
+  /**
+   * POST /api/leads/:id/reassign — reassign this lead to one agent (AC3).
+   * Managers-and-admins only (AUTH-02.2), the server block behind the hidden row control.
+   */
   @Post(':id/reassign')
+  @Roles(UserRole.SUPERADMIN, UserRole.SALES_MANAGER)
   @HttpCode(200)
   reassign(
     @Param('id', ParseUUIDPipe) id: string,

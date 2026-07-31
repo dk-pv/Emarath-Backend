@@ -6,10 +6,18 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { CurrentUserService } from './current-user';
 import { JwtCurrentUserService } from './jwt-current-user.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
+import { RolesGuard } from './roles.guard';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { RefreshTokenService } from './refresh-token.service';
+import { PasswordResetService } from './password-reset.service';
+import {
+  LogMailerService,
+  MailerService,
+  ResendMailerService,
+} from './mailer.service';
 import type { AuthConfig } from '../config/auth.config';
+import type { MailConfig } from '../config/mail.config';
 
 /**
  * Owns "who is asking", login and session refresh.
@@ -49,8 +57,26 @@ import type { AuthConfig } from '../config/auth.config';
   providers: [
     AuthService,
     RefreshTokenService,
+    PasswordResetService,
+    // The mail transport is chosen by environment (ADR-0031): log in development/test,
+    // Resend in staging/production. Selecting one adapter here keeps feature code unaware
+    // of the provider — a swap is one branch, not a code change.
+    {
+      provide: MailerService,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService): MailerService => {
+        const { provider } = config.getOrThrow<MailConfig>('mail');
+        return provider === 'resend'
+          ? new ResendMailerService(config)
+          : new LogMailerService();
+      },
+    },
     { provide: CurrentUserService, useClass: JwtCurrentUserService },
+    // Order matters: JwtAuthGuard authenticates and sets request.user, then RolesGuard
+    // authorises against @Roles() metadata (AUTH-02.2). Global guards run in the order
+    // they are registered here.
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: RolesGuard },
   ],
   exports: [CurrentUserService],
 })

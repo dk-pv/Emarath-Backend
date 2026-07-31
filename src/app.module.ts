@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import appConfig from './config/configuration';
 import authConfig from './config/auth.config';
+import mailConfig from './config/mail.config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { ActivitiesModule } from './activities/activities.module';
@@ -29,7 +30,7 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     ConfigModule.forRoot({
       isGlobal: true,
       cache: true,
-      load: [appConfig, authConfig],
+      load: [appConfig, authConfig, mailConfig],
       // Environment is selected via NODE_ENV, without code changes.
       // Files are optional; on hosted platforms (Render/Vercel) values come
       // from real environment variables. Load order: most specific wins.

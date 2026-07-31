@@ -32,13 +32,22 @@ export function leadScopeWhere(
         assignments: { some: { userId: user.id } },
       };
 
-    // Everyone else reads the full lead set today. Team-based narrowing for
-    // managers is deliberately absent: AUTH-01.1 defines team as scoping used
-    // "later", and inventing a policy now would be a guess with security
-    // consequences. Widening a scope later is safe; discovering an invented one
-    // leaked data is not.
-    case UserRole.SUPERADMIN:
+    // A sales manager sees their team's leads (AUTH-02.1, ADR-0030 §3/§8): any
+    // lead assigned to a user on the manager's team. A manager with no team falls
+    // back to own-only (§7) — never matching on a null team, which would sweep in
+    // every teamless user.
     case UserRole.SALES_MANAGER:
+      return {
+        ...visible,
+        assignments: user.team
+          ? { some: { user: { team: user.team } } }
+          : { some: { userId: user.id } },
+      };
+
+    // Admin is organization-wide; Customer Service and Marketing remain org-wide
+    // by the approved default (ADR-0030 §2.2 — a Product-Owner decision, left
+    // unchanged here). Widening a scope later is safe; an invented one is not.
+    case UserRole.SUPERADMIN:
     case UserRole.CUSTOMER_SERVICE_AGENT:
     case UserRole.MARKETING_ANALYST:
       return visible;

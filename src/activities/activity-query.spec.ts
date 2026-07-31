@@ -27,10 +27,40 @@ describe('activityScopeWhere', () => {
     ).toEqual({ deletedAt: null, assignees: { some: { userId: 'u1' } } });
   });
 
-  it('does not restrict other roles by assignment', () => {
+  // AUTH-02.1 / ADR-0030: a manager sees their team's activities.
+  it('restricts a sales manager to activities assigned to a same-team user', () => {
     expect(
-      activityScopeWhere({ id: 'u1', role: UserRole.SALES_MANAGER }),
-    ).toEqual({ deletedAt: null });
+      activityScopeWhere({
+        id: 'mgr-1',
+        role: UserRole.SALES_MANAGER,
+        team: 'Sales',
+      }),
+    ).toEqual({
+      deletedAt: null,
+      assignees: { some: { user: { team: 'Sales' } } },
+    });
+  });
+
+  it('falls a null-team manager back to own-only (ADR-0030 §7)', () => {
+    expect(
+      activityScopeWhere({
+        id: 'mgr-1',
+        role: UserRole.SALES_MANAGER,
+        team: null,
+      }),
+    ).toEqual({ deletedAt: null, assignees: { some: { userId: 'mgr-1' } } });
+  });
+
+  it('leaves admin / customer-service / marketing organization-wide', () => {
+    for (const role of [
+      UserRole.SUPERADMIN,
+      UserRole.CUSTOMER_SERVICE_AGENT,
+      UserRole.MARKETING_ANALYST,
+    ]) {
+      expect(activityScopeWhere({ id: 'u1', role })).toEqual({
+        deletedAt: null,
+      });
+    }
   });
 
   it('drops the not-deleted filter but keeps role scope when includeDeleted', () => {
@@ -40,9 +70,16 @@ describe('activityScopeWhere', () => {
         { includeDeleted: true },
       ),
     ).toEqual({ assignees: { some: { userId: 'u1' } } });
+    // A manager keeps the team predicate; only the delete filter drops.
     expect(
       activityScopeWhere(
-        { id: 'u1', role: UserRole.SALES_MANAGER },
+        { id: 'mgr-1', role: UserRole.SALES_MANAGER, team: 'Sales' },
+        { includeDeleted: true },
+      ),
+    ).toEqual({ assignees: { some: { user: { team: 'Sales' } } } });
+    expect(
+      activityScopeWhere(
+        { id: 'u1', role: UserRole.SUPERADMIN },
         { includeDeleted: true },
       ),
     ).toEqual({});

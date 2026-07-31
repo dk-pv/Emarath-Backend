@@ -7,14 +7,16 @@ import { UserRole } from '../generated/prisma/client';
  * what they may see, not their profile. Keeping it narrow stops feature code
  * reaching for fields that a token will not carry.
  *
- * `team` is absent on purpose. Users have one (AUTH-01.1), but no rule reads it
- * yet — team-based narrowing for managers is explicitly deferred — and a field
- * nothing consumes invites scoping code to be written against a value that has
- * never been populated or tested. It arrives with the rule that needs it.
+ * `team` is the caller's team label (AUTH-02.1 / ADR-0030 §4) — the manager
+ * team-scoping rule's one consumer. It travels as a signed access-token claim,
+ * so resolving it costs no DB read; `null` when the user has no team. Optional
+ * so the many `{ id, role }` literals in tests still type-check — production
+ * requests always set it (value or null) via the guard.
  */
 export interface CurrentUser {
   id: string;
   role: UserRole;
+  team?: string | null;
 }
 
 /**

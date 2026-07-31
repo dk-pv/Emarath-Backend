@@ -27,8 +27,18 @@ export function activityScopeWhere(
     case UserRole.SALES_AGENT:
       return { ...visible, assignees: { some: { userId: user.id } } };
 
-    case UserRole.SUPERADMIN:
+    // A sales manager sees their team's activities (AUTH-02.1, ADR-0030 §3/§8):
+    // any activity assigned to a same-team user. No team → own-only (§7).
     case UserRole.SALES_MANAGER:
+      return {
+        ...visible,
+        assignees: user.team
+          ? { some: { user: { team: user.team } } }
+          : { some: { userId: user.id } },
+      };
+
+    // Admin org-wide; Customer Service and Marketing org-wide by default (§2.2).
+    case UserRole.SUPERADMIN:
     case UserRole.CUSTOMER_SERVICE_AGENT:
     case UserRole.MARKETING_ANALYST:
       return visible;

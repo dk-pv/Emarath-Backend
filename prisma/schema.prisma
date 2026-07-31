@@ -75,6 +75,8 @@ model User {
   locationPoints      LocationPoint[]
   /// AUTH-01.3: refresh-token sessions (one lineage per device).
   refreshTokens       RefreshToken[]
+  /// AUTH-03.1: outstanding/used password-reset tokens.
+  passwordResetTokens PasswordResetToken[]
 
   @@map("users")
 }
@@ -105,6 +107,29 @@ model RefreshToken {
   @@index([userId])
   @@index([familyId])
   @@map("refresh_tokens")
+}
+
+/// A single-use password-reset token (AUTH-03.1, ADR-0031). Like RefreshToken, the raw
+/// token is an opaque random value delivered only in the emailed link; the DB stores only
+/// its sha-256 hash, so a read never yields a usable token. `usedAt` marks it spent
+/// (single-use); `expiresAt` bounds its life. Requesting a reset invalidates the user's
+/// earlier unused tokens, so at most one link is ever live. No soft-delete: a token is
+/// live, used or expired. Completing a reset additionally revokes the user's refresh
+/// sessions, so old sessions cannot outlive the password change.
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  /// sha-256 hex of the opaque token; the raw value is never stored.
+  tokenHash String    @unique @map("token_hash") @db.VarChar(64)
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
 }
 
 /// Core lead record (LEAD-01.1).

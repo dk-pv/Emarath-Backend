@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import type { Response } from 'express';
 import ExcelJS from 'exceljs';
-import { UserRole } from '../../generated/prisma/client';
+import { Prisma, UserRole } from '../../generated/prisma/client';
 import { CurrentUserService } from '../../auth/current-user';
 import { PrismaService } from '../../prisma/prisma.service';
 import { activityScopeWhere } from '../../activities/activity-scope';
+import { gpsAgentWhere } from '../gps-scope';
 // Reuse the leads export's RFC-4180 CSV escaper rather than re-implement it — the
 // one place CSV quoting lives, shared across every export.
 import { csvCell } from '../../leads/export/leads-export.columns';
@@ -61,12 +62,15 @@ export class GpsExportService {
   private async collect(query: ExportGpsQueryDto): Promise<GpsExportRow[]> {
     const user = await this.currentUser.resolve();
 
-    // Same scoping the summary/locations reads apply: a sales agent is pinned to
-    // their own records; other roles may narrow to one Team Member.
-    const agentIdScope =
-      user.role === UserRole.SALES_AGENT
-        ? user.id
-        : (query.userId ?? undefined);
+    // Same scoping the summary/locations reads apply (AUTH-02.1, ADR-0030 §6): agent →
+    // self, manager → team, admin/others → all; the userId filter is intersected with
+    // scope, never allowed to widen it. `assigneeNarrow` applies that narrowing to the
+    // activity read, AND-ed so it cannot override the team scope.
+    const agentWhere = gpsAgentWhere(user, query.userId);
+    const assigneeNarrow: Prisma.ActivityWhereInput =
+      query.userId && user.role !== UserRole.SALES_AGENT
+        ? { assignees: { some: { userId: query.userId } } }
+        : {};
 
     const { from, to } = resolveGpsBounds(query);
     const hasWindow = Boolean(from || to);
@@ -79,7 +83,7 @@ export class GpsExportService {
     const [checkIns, points, activities] = await Promise.all([
       this.prisma.checkIn.findMany({
         where: {
-          agentId: agentIdScope,
+          agent: agentWhere,
           deletedAt: null,
           OR: [{ checkInAt: timeFilter }, { checkOutAt: timeFilter }],
         },
@@ -97,23 +101,23 @@ export class GpsExportService {
         take: MAX_EXPORT_ROWS,
       }),
       this.prisma.locationPoint.findMany({
-        where: { agentId: agentIdScope, recordedAt: timeFilter },
+        where: { agent: agentWhere, recordedAt: timeFilter },
         select: { agentId: true, recordedAt: true, lat: true, lng: true },
         orderBy: { recordedAt: 'desc' },
         take: MAX_EXPORT_ROWS,
       }),
       this.prisma.activity.findMany({
         where: {
-          ...activityScopeWhere(user),
-          ...(agentIdScope
-            ? { assignees: { some: { userId: agentIdScope } } }
-            : {}),
-          completedAt: timeFilter ?? { not: null },
+          AND: [
+            activityScopeWhere(user),
+            assigneeNarrow,
+            { completedAt: timeFilter ?? { not: null } },
+          ],
         },
         select: {
           completedAt: true,
           checkIns: {
-            where: { deletedAt: null, agentId: agentIdScope },
+            where: { deletedAt: null, agent: agentWhere },
             select: { checkInLat: true, checkInLng: true, agentId: true },
             take: 1,
           },

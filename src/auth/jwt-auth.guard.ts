@@ -19,6 +19,7 @@ const JWT_AUDIENCE = 'emarath-app';
 interface AccessTokenPayload {
   sub?: string;
   role?: UserRole;
+  team?: string | null;
 }
 
 /**
@@ -71,7 +72,13 @@ export class JwtAuthGuard implements CanActivate {
       throw new UnauthorizedException('Invalid session.');
     }
 
-    const user: CurrentUser = { id: payload.sub, role: payload.role };
+    // team rides as a signed claim (ADR-0030 §4). A token issued before AUTH-02.1 has none,
+    // so `team` is null and a manager falls back to own-only (§7) until the next refresh.
+    const user: CurrentUser = {
+      id: payload.sub,
+      role: payload.role,
+      team: payload.team ?? null,
+    };
     request.user = user;
     const store = authContext.getStore();
     if (store) {

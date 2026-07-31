@@ -8,7 +8,7 @@ import { ExportGpsQueryDto } from './dto/export-gps-query.dto';
 const AGENT_ID = '22222222-2222-2222-2222-222222222222';
 const dec = (n: number) => ({ toNumber: () => n });
 
-function makeService(role = 'SALES_AGENT') {
+function makeService(role = 'SALES_AGENT', team: string | null = null) {
   const checkInFindMany = jest.fn().mockResolvedValue([]);
   const pointFindMany = jest.fn().mockResolvedValue([]);
   const activityFindMany = jest.fn().mockResolvedValue([]);
@@ -23,7 +23,7 @@ function makeService(role = 'SALES_AGENT') {
     user: { findMany: userFindMany },
   } as unknown as PrismaService;
   const currentUser = {
-    resolve: jest.fn().mockResolvedValue({ id: AGENT_ID, role }),
+    resolve: jest.fn().mockResolvedValue({ id: AGENT_ID, role, team }),
   } as unknown as CurrentUserService;
 
   return {
@@ -124,21 +124,44 @@ describe('GpsExportService (GPS-08.1)', () => {
     await service.export(dto(), res);
 
     const where = (checkInFindMany.mock.calls as unknown[][])[0][0] as {
-      where: { agentId: string };
+      where: { agent: unknown };
     };
-    expect(where.where.agentId).toBe(AGENT_ID);
+    expect(where.where.agent).toEqual({ id: AGENT_ID });
   });
 
-  it('lets a non-agent role narrow to a chosen Team Member (AC2)', async () => {
-    const { service, checkInFindMany } = makeService('SALES_MANAGER');
+  it('scopes a SALES_MANAGER to their team (AUTH-02.1)', async () => {
+    const { service, checkInFindMany } = makeService('SALES_MANAGER', 'Sales');
+    const { res } = fakeRes();
+    await service.export(dto(), res);
+
+    const where = (checkInFindMany.mock.calls as unknown[][])[0][0] as {
+      where: { agent: unknown };
+    };
+    expect(where.where.agent).toEqual({ team: 'Sales' });
+  });
+
+  it('intersects a manager Team Member filter with the team, never widening it (§6.2)', async () => {
+    const { service, checkInFindMany } = makeService('SALES_MANAGER', 'Sales');
     const other = '99999999-9999-4999-8999-999999999999';
     const { res } = fakeRes();
     await service.export(dto({ userId: other }), res);
 
     const where = (checkInFindMany.mock.calls as unknown[][])[0][0] as {
-      where: { agentId: string };
+      where: { agent: unknown };
     };
-    expect(where.where.agentId).toBe(other);
+    expect(where.where.agent).toEqual({ id: other, team: 'Sales' });
+  });
+
+  it('lets an admin narrow to any chosen user (AC2)', async () => {
+    const { service, checkInFindMany } = makeService('SUPERADMIN');
+    const other = '99999999-9999-4999-8999-999999999999';
+    const { res } = fakeRes();
+    await service.export(dto({ userId: other }), res);
+
+    const where = (checkInFindMany.mock.calls as unknown[][])[0][0] as {
+      where: { agent: unknown };
+    };
+    expect(where.where.agent).toEqual({ id: other });
   });
 
   it('rejects an inverted period via the shared resolver (AC5 safety)', async () => {

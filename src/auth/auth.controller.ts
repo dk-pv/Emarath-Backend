@@ -14,6 +14,8 @@ import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
 import { AuthService, type PublicUser } from './auth.service';
 import { LoginDto } from './dto/login.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { Public } from './public.decorator';
 import type { AuthConfig } from '../config/auth.config';
 import type { AppConfig } from '../config/configuration';
@@ -89,6 +91,34 @@ export class AuthController {
     const cookies = (req.cookies ?? {}) as Record<string, string | undefined>;
     await this.auth.logout(cookies[REFRESH_COOKIE]);
     this.clearSessionCookies(res);
+    return { success: true };
+  }
+
+  /**
+   * Begin password recovery (AUTH-03.1 AC1/AC2). Always returns the same generic success,
+   * whether or not the email is registered, so the response never reveals account
+   * existence. Public + rate-limited like the other auth routes.
+   */
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  async forgotPassword(
+    @Body() dto: ForgotPasswordDto,
+  ): Promise<{ success: true }> {
+    await this.auth.requestPasswordReset(dto.email);
+    return { success: true };
+  }
+
+  /**
+   * Complete password recovery (AUTH-03.1 AC3/AC4/AC5). A valid, unused, unexpired token
+   * sets the new password and revokes existing sessions; a used/expired/invalid token is a
+   * generic 401, and a weak password is a 400 from the DTO.
+   */
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  async resetPassword(
+    @Body() dto: ResetPasswordDto,
+  ): Promise<{ success: true }> {
+    await this.auth.resetPassword(dto.token, dto.password);
     return { success: true };
   }
 

@@ -128,4 +128,16 @@ export class RefreshTokenService {
       data: { revokedAt: new Date() },
     });
   }
+
+  /**
+   * Revoke every still-live session for a user across all devices (AUTH-03.1): a password
+   * reset ends every existing session, so a token stolen before the reset cannot outlive
+   * it. Idempotent — a user with no live sessions is a no-op.
+   */
+  async revokeAllForUser(userId: string): Promise<void> {
+    await this.prisma.refreshToken.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+  }
 }

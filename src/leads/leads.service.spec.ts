@@ -41,12 +41,16 @@ const BASE_DTO: CreateLeadDto = {
   paymentMethod: 'COD',
 };
 
-function makeService(role: UserRole = UserRole.SUPERADMIN, userId = 'me') {
+function makeService(
+  role: UserRole = UserRole.SUPERADMIN,
+  userId = 'me',
+  team: string | null = null,
+) {
   const create = jest.fn().mockResolvedValue(FAKE_ROW);
   const findById = jest.fn();
   const repository = { create, findById } as unknown as LeadsRepository;
   const currentUser = {
-    resolve: jest.fn().mockResolvedValue({ id: userId, role }),
+    resolve: jest.fn().mockResolvedValue({ id: userId, role, team }),
   } as unknown as CurrentUserService;
   const service = new LeadsService(repository, currentUser);
   const dataOf = (call = 0): Prisma.LeadCreateInput =>
@@ -136,6 +140,42 @@ describe('LeadsService.findById', () => {
     findById.mockResolvedValue(null);
 
     await expect(service.findById('nope')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  // AUTH-02.1 / ADR-0030: the by-id read composes the manager team scope, so an
+  // out-of-team id never matches (AC4) and the detail read narrows like the list (AC5).
+  it('composes the manager team predicate into the by-id query', async () => {
+    const { service, findById } = makeService(
+      UserRole.SALES_MANAGER,
+      'mgr-1',
+      'Sales',
+    );
+    findById.mockResolvedValue(FAKE_ROW);
+
+    await service.findById('lead-1');
+
+    const where = (findById.mock.calls as unknown[][])[0][0] as {
+      AND: [Record<string, unknown>, { id: string }];
+    };
+    expect(where.AND[0]).toEqual({
+      deletedAt: null,
+      assignments: { some: { user: { team: 'Sales' } } },
+    });
+    expect(where.AND[1]).toEqual({ id: 'lead-1' });
+  });
+
+  it('denies a manager an out-of-team lead by id with a 404 (AC4)', async () => {
+    const { service, findById } = makeService(
+      UserRole.SALES_MANAGER,
+      'mgr-1',
+      'Sales',
+    );
+    // The scoped query matches no row for an out-of-team id.
+    findById.mockResolvedValue(null);
+
+    await expect(service.findById('other-team-lead')).rejects.toBeInstanceOf(
       NotFoundException,
     );
   });

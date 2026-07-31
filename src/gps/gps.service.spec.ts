@@ -265,7 +265,10 @@ describe('GpsService.getSummary', () => {
     const where = (count.mock.calls as unknown[][])[0][0] as {
       where: Record<string, unknown>;
     };
-    expect(where.where).toMatchObject({ agentId: AGENT_ID, deletedAt: null });
+    expect(where.where).toMatchObject({
+      agent: { id: AGENT_ID },
+      deletedAt: null,
+    });
   });
 
   it('GPS-04.1: applies period filter when dateFrom and dateTo are provided', async () => {

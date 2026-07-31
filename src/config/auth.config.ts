@@ -16,6 +16,8 @@ export interface AuthConfig {
   jwtAccessTtlSec: number;
   /** Refresh-token lifetime in seconds (long-lived — ADR §3.2). */
   refreshTtlSec: number;
+  /** Password-reset link lifetime in seconds (AUTH-03.1 — single-use + short-lived). */
+  resetTokenTtlSec: number;
   /** Max login attempts per window (AUTH-01.2 AC3). */
   loginRateLimit: number;
   /** Rate-limit window in milliseconds. */
@@ -47,6 +49,10 @@ export default registerAs('auth', (): AuthConfig => {
       10,
     ),
     refreshTtlSec: Number.parseInt(process.env.REFRESH_TTL_SEC ?? '604800', 10),
+    resetTokenTtlSec: Number.parseInt(
+      process.env.RESET_TOKEN_TTL_SEC ?? '3600',
+      10,
+    ),
     loginRateLimit: Number.parseInt(process.env.LOGIN_RATE_LIMIT ?? '10', 10),
     loginRateTtlMs: Number.parseInt(
       process.env.LOGIN_RATE_TTL_MS ?? '60000',

@@ -12,6 +12,7 @@ import { RecordLocationPointDto } from './dto/record-location-point.dto';
 import { GpsSummaryFilterDto } from './dto/gps-summary-filter.dto';
 import { resolveGpsBounds } from './gps-period';
 import { activityScopeWhere } from '../activities/activity-scope';
+import { gpsAgentWhere } from './gps-scope';
 
 /** A field visit as returned by the API; coordinates are plain numbers. */
 export type CheckInRecord = {
@@ -224,14 +225,15 @@ export class GpsService {
   async getSummary(dto: GpsSummaryFilterDto): Promise<GpsSummaryRecord> {
     const user = await this.currentUser.resolve();
 
-    // 1. Determine agentId filter based on role and query param.
-    // SALES_AGENT can only see themselves. Others can optionally filter by a specific userId.
-    const agentIdScope =
-      user.role === UserRole.SALES_AGENT
-        ? user.id
-        : dto.userId
-          ? dto.userId
-          : undefined;
+    // 1. Scope by role (AUTH-02.1, ADR-0030 §6): agent → self, manager → team, admin/others
+    // → all. The dashboard's userId filter is intersected with scope, never allowed to widen
+    // it. `assigneeNarrow` applies the same optional userId narrowing to the activity count,
+    // AND-ed with the team scope so it can never override it.
+    const agentWhere = gpsAgentWhere(user, dto.userId);
+    const assigneeNarrow: Prisma.ActivityWhereInput =
+      dto.userId && user.role !== UserRole.SALES_AGENT
+        ? { assignees: { some: { userId: dto.userId } } }
+        : {};
 
     // 2. Build time bounds (validated: rejects an inverted or oversized window)
     const { from, to } = resolveGpsBounds(dto);
@@ -253,7 +255,7 @@ export class GpsService {
       // Total Check-ins
       this.prisma.checkIn.count({
         where: {
-          agentId: agentIdScope,
+          agent: agentWhere,
           deletedAt: null,
           checkInAt: checkInTimeFilter,
         },
@@ -264,7 +266,7 @@ export class GpsService {
       // rather than counting every (still-open) check-in.
       this.prisma.checkIn.count({
         where: {
-          agentId: agentIdScope,
+          agent: agentWhere,
           deletedAt: null,
           checkOutAt: checkOutTimeFilter ?? { not: null },
         },
@@ -273,7 +275,7 @@ export class GpsService {
       // Location Check-Ins (tied to an activity)
       this.prisma.checkIn.count({
         where: {
-          agentId: agentIdScope,
+          agent: agentWhere,
           deletedAt: null,
           checkInAt: checkInTimeFilter,
           activityId: { not: null },
@@ -283,21 +285,25 @@ export class GpsService {
       // Automatic Tracking (location points)
       this.prisma.locationPoint.count({
         where: {
-          agentId: agentIdScope,
+          agent: agentWhere,
           recordedAt: recordedTimeFilter,
         },
       }),
 
-      // Follow-up Completions
+      // Follow-up Completions. AND-ed (not spread) so the optional userId narrowing
+      // intersects the team scope from activityScopeWhere instead of overriding its
+      // `assignees` predicate.
       this.prisma.activity.count({
         where: {
-          ...activityScopeWhere(user),
-          ...(agentIdScope
-            ? { assignees: { some: { userId: agentIdScope } } }
-            : {}),
-          completedAt: completedTimeFilter
-            ? completedTimeFilter
-            : { not: null },
+          AND: [
+            activityScopeWhere(user),
+            assigneeNarrow,
+            {
+              completedAt: completedTimeFilter
+                ? completedTimeFilter
+                : { not: null },
+            },
+          ],
         },
       }),
     ]);
@@ -319,12 +325,11 @@ export class GpsService {
   async getLocations(dto: GpsSummaryFilterDto): Promise<GpsPinRecord[]> {
     const user = await this.currentUser.resolve();
 
-    const agentIdScope =
-      user.role === UserRole.SALES_AGENT
-        ? user.id
-        : dto.userId
-          ? dto.userId
-          : undefined;
+    const agentWhere = gpsAgentWhere(user, dto.userId);
+    const assigneeNarrow: Prisma.ActivityWhereInput =
+      dto.userId && user.role !== UserRole.SALES_AGENT
+        ? { assignees: { some: { userId: dto.userId } } }
+        : {};
 
     const { from, to } = resolveGpsBounds(dto);
 
@@ -334,7 +339,7 @@ export class GpsService {
       // Fetch check-ins for CHECK_IN, LOCATION_CHECK_IN, and CHECK_OUT pins
       this.prisma.checkIn.findMany({
         where: {
-          agentId: agentIdScope,
+          agent: agentWhere,
           deletedAt: null,
           OR: [{ checkInAt: timeFilter }, { checkOutAt: timeFilter }],
         },
@@ -346,7 +351,7 @@ export class GpsService {
       // Fetch automatic tracking points
       this.prisma.locationPoint.findMany({
         where: {
-          agentId: agentIdScope,
+          agent: agentWhere,
           recordedAt: timeFilter,
         },
         select: LOCATION_POINT_SELECT,
@@ -354,22 +359,23 @@ export class GpsService {
         take: PIN_QUERY_LIMIT,
       }),
 
-      // Fetch completed activities and their check-in coordinates
+      // Fetch completed activities and their check-in coordinates. AND-ed so the userId
+      // narrowing intersects (never overrides) the team scope from activityScopeWhere.
       this.prisma.activity.findMany({
         where: {
-          ...activityScopeWhere(user),
-          ...(agentIdScope
-            ? { assignees: { some: { userId: agentIdScope } } }
-            : {}),
-          completedAt: timeFilter ? timeFilter : { not: null },
+          AND: [
+            activityScopeWhere(user),
+            assigneeNarrow,
+            { completedAt: timeFilter ? timeFilter : { not: null } },
+          ],
         },
         select: {
           id: true,
           completedAt: true,
           checkIns: {
-            // Scope to the visible agent so a shared follow-up never pins a
+            // Scope to the visible agent(s) so a shared follow-up never pins a
             // co-assignee's coordinates to the caller.
-            where: { deletedAt: null, agentId: agentIdScope },
+            where: { deletedAt: null, agent: agentWhere },
             select: { checkInLat: true, checkInLng: true, agentId: true },
             take: 1, // Only need one set of coordinates to pin it
           },

@@ -66,11 +66,37 @@ describe('JwtAuthGuard (AUTH-01.4)', () => {
       return authContext.getStore()?.user;
     });
 
-    expect(request.user).toEqual({ id: 'user-1', role: UserRole.SALES_AGENT });
-    expect(storeUser).toEqual({ id: 'user-1', role: UserRole.SALES_AGENT });
+    // A token without a team claim (pre-AUTH-02.1) resolves team to null.
+    expect(request.user).toEqual({
+      id: 'user-1',
+      role: UserRole.SALES_AGENT,
+      team: null,
+    });
+    expect(storeUser).toEqual({
+      id: 'user-1',
+      role: UserRole.SALES_AGENT,
+      team: null,
+    });
     expect(verifyAsync).toHaveBeenCalledWith('good', {
       issuer: 'emarath-api',
       audience: 'emarath-app',
+    });
+  });
+
+  it("carries the token's team claim onto the resolved user (AUTH-02.1)", async () => {
+    const verify = jest.fn().mockResolvedValue({
+      sub: 'mgr-1',
+      role: UserRole.SALES_MANAGER,
+      team: 'Sales',
+    });
+    const { guard } = makeGuard({ isPublic: false, verify });
+    const { context, request } = ctx({ access_token: 'good' });
+
+    await expect(guard.canActivate(context)).resolves.toBe(true);
+    expect(request.user).toEqual({
+      id: 'mgr-1',
+      role: UserRole.SALES_MANAGER,
+      team: 'Sales',
     });
   });
 
