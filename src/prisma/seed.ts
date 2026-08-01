@@ -1,9 +1,10 @@
 /**
- * Prisma seed script.
+ * Prisma seed script (development only).
  *
- * Seeds the agent accounts LEAD-01.1 AC4 assigns leads to. This is the minimum
- * slice of AUTH-01.1 that LEAD-01.1 needs — credentials, hashing and login are
- * AUTH-01.1/AUTH-01.2's own scope and are deliberately absent.
+ * Seeds one login per backlog role plus the default stage catalogue, so the app is
+ * usable end-to-end in development: real credentials, bcrypt-hashed exactly as the
+ * app hashes them (AUTH-01.1 AC4), ready for login (AUTH-01.2). Guarded against
+ * NODE_ENV=production; real users are created through the app, never here.
  *
  * Idempotent: upserts by email, so re-running never duplicates an account and
  * never deletes one. Safe to run against a database that already holds leads.
@@ -50,9 +51,15 @@ const STAGES: ReadonlyArray<{ name: string; color: string }> = [
 ];
 
 /**
- * One account per role, so role scoping (LEAD-02.1 AC3) has something to scope
- * against the moment it lands, and all five backlog roles are seeded (AUTH-01.1
+ * One development login per role, so role scoping (LEAD-02.1 AC3) has something to
+ * scope against and every backlog role is reachable from the login screen (AUTH-01.1
  * AC2). Names are placeholders for real staff records.
+ *
+ * The passwords here are **development seed defaults**, not application secrets: they
+ * exist only in this seed (dev tooling), never in the running app, and the app stores
+ * them solely as bcrypt hashes (AUTH-01.1 AC4). Any single value can be overridden for
+ * a shared/CI database via SEED_USER_PASSWORD (applies to every account). The seed
+ * refuses to run when NODE_ENV=production (see `main`).
  */
 const USERS: ReadonlyArray<{
   name: string;
@@ -60,60 +67,70 @@ const USERS: ReadonlyArray<{
   username: string;
   role: UserRole;
   team: string | null;
+  password: string;
 }> = [
   {
     name: 'Emarath Admin',
-    email: 'admin@emarath.local',
+    email: 'admin@emarath.com',
     username: 'admin',
     role: UserRole.SUPERADMIN,
     team: null,
+    password: 'Admin@123',
   },
   {
     name: 'Sales Manager',
-    email: 'manager@emarath.local',
+    email: 'manager@emarath.com',
     username: 'manager',
     role: UserRole.SALES_MANAGER,
     team: 'Sales',
+    password: 'Manager@123',
   },
   {
     name: 'Sales Agent One',
-    email: 'agent1@emarath.local',
+    email: 'agent1@emarath.com',
     username: 'agent1',
     role: UserRole.SALES_AGENT,
     team: 'Sales',
+    password: 'Agent@123',
   },
   {
     name: 'Sales Agent Two',
-    email: 'agent2@emarath.local',
+    email: 'agent2@emarath.com',
     username: 'agent2',
     role: UserRole.SALES_AGENT,
     team: 'Sales',
+    password: 'Agent@123',
   },
   {
     name: 'Customer Service Agent',
-    email: 'service@emarath.local',
-    username: 'service',
+    email: 'cs@emarath.com',
+    username: 'cs',
     role: UserRole.CUSTOMER_SERVICE_AGENT,
     team: 'Support',
+    password: 'Cs@123',
   },
   {
     name: 'Marketing Analyst',
-    email: 'marketing@emarath.local',
+    email: 'marketing@emarath.com',
     username: 'marketing',
     role: UserRole.MARKETING_ANALYST,
     team: 'Marketing',
+    password: 'Marketing@123',
   },
 ];
 
-/**
- * The dev password every seeded account is given (AUTH-01.1 AC4 stores it only as a
- * bcrypt hash). These are system seed accounts, not real users, so the password is a
- * known dev value — overridable via SEED_USER_PASSWORD. Login itself is AUTH-01.2.
- */
-const SEED_PASSWORD = process.env['SEED_USER_PASSWORD'] ?? 'ChangeMe123!';
+/** bcrypt work factor — must match the app (auth.service.ts BCRYPT_ROUNDS) so seeded
+ * hashes are indistinguishable from production ones. */
 const BCRYPT_ROUNDS = 10;
 
 async function main(): Promise<void> {
+  // Development-only: real users are created through the app, never this seed.
+  if (process.env['NODE_ENV'] === 'production') {
+    throw new Error(
+      'The seed is development-only and must not run in production.',
+    );
+  }
+
   const connectionString = process.env['DATABASE_URL_UNPOOLED'];
   if (!connectionString) {
     throw new Error('DATABASE_URL_UNPOOLED is not set.');
@@ -123,28 +140,43 @@ async function main(): Promise<void> {
     adapter: new PrismaPg({ connectionString }),
   });
 
+  // Collected for the post-seed credential printout below.
+  const credentials: Array<{
+    role: UserRole;
+    email: string;
+    password: string;
+  }> = [];
+
   try {
-    for (const user of USERS) {
-      // Each account gets a fresh bcrypt hash of the dev password (AC4). A new salt
-      // per run is expected and harmless — these are system seed accounts, so the
-      // seed is the source of truth for their credentials.
-      const passwordHash = bcrypt.hashSync(SEED_PASSWORD, BCRYPT_ROUNDS);
+    for (const { password, ...profile } of USERS) {
+      // A shared override wins for every account (CI/shared DB); otherwise each uses
+      // its documented dev default. Hashed exactly as the app hashes a password.
+      const plainPassword = process.env['SEED_USER_PASSWORD'] ?? password;
+      const passwordHash = bcrypt.hashSync(plainPassword, BCRYPT_ROUNDS);
+      // Upsert by username → idempotent: username is the stable identity, so re-running
+      // (or re-homing an account's email, e.g. an earlier @emarath.local seed) never
+      // duplicates or deletes a row. Email, role, team and credentials are corrected on
+      // every run (also replaces the migration's fail-closed sentinel hash).
       await prisma.user.upsert({
-        where: { email: user.email },
-        // Role, team and credentials are corrected on re-run (this also replaces the
-        // migration's fail-closed sentinel hash on pre-existing rows); the account
-        // row itself is never deleted.
+        where: { username: profile.username },
         update: {
-          name: user.name,
-          username: user.username,
-          role: user.role,
-          team: user.team,
+          name: profile.name,
+          email: profile.email,
+          role: profile.role,
+          team: profile.team,
           passwordHash,
         },
-        create: { ...user, passwordHash },
+        create: { ...profile, passwordHash },
+      });
+      credentials.push({
+        role: profile.role,
+        email: profile.email,
+        password: plainPassword,
       });
     }
     console.log(`[seed] ${USERS.length} users upserted.`);
+    console.log('\n[seed] Development login credentials:');
+    console.table(credentials);
 
     // Upsert by (pipeline, name): re-running corrects colour/order without ever
     // duplicating a stage or resetting one a user has since renamed away.

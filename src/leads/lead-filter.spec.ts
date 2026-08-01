@@ -112,4 +112,55 @@ describe('leadFilterWhere', () => {
     ]);
     expect(leadFilterWhere({ unassigned: false })).toEqual([]);
   });
+
+  // ── LEAD-04.1 activity presets (reuse the Activities bucket predicate) ─────────
+
+  const boundaries = {
+    todayStart: new Date('2026-08-01T00:00:00.000Z'),
+    todayEnd: new Date('2026-08-02T00:00:00.000Z'),
+    tomorrowEnd: new Date('2026-08-03T00:00:00.000Z'),
+  };
+
+  it("Today's Follow Ups: leads with an open activity due today", () => {
+    expect(
+      leadFilterWhere({ todaysFollowUps: true, dayBoundaries: boundaries }),
+    ).toEqual([
+      {
+        activities: {
+          some: {
+            deletedAt: null,
+            completedAt: null,
+            dueAt: { gte: boundaries.todayStart, lt: boundaries.todayEnd },
+          },
+        },
+      },
+    ]);
+  });
+
+  it('Overdue Leads: leads with an open activity due before today', () => {
+    expect(
+      leadFilterWhere({ overdue: true, dayBoundaries: boundaries }),
+    ).toEqual([
+      {
+        activities: {
+          some: {
+            deletedAt: null,
+            completedAt: null,
+            dueAt: { lt: boundaries.todayStart },
+          },
+        },
+      },
+    ]);
+  });
+
+  it('No Activity Leads: leads with no non-deleted activity', () => {
+    expect(leadFilterWhere({ noActivity: true })).toEqual([
+      { activities: { none: { deletedAt: null } } },
+    ]);
+  });
+
+  it('ignores window presets when the day boundaries are absent', () => {
+    expect(leadFilterWhere({ todaysFollowUps: true })).toEqual([]);
+    expect(leadFilterWhere({ overdue: true })).toEqual([]);
+  });
 });

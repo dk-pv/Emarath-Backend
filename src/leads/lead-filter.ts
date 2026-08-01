@@ -1,4 +1,8 @@
 import { Prisma } from '../generated/prisma/client';
+import {
+  activityBucketWhere,
+  type DayBoundaries,
+} from '../activities/activity-buckets';
 
 /**
  * Coerces a filter query param into a clean string array (LEAD-03.2).
@@ -32,6 +36,18 @@ export interface LeadFilters {
   createdTo?: string;
   /** LEAD-04.1 Unassigned preset: leads carrying no assignment. */
   unassigned?: boolean;
+  /**
+   * LEAD-04.1 activity presets. `todaysFollowUps`/`overdue` reuse the Activities
+   * worklist bucket predicate (`activityBucketWhere`) against the lead's activities,
+   * so "today"/"overdue" mean exactly what the worklist means and can never drift;
+   * `dayBoundaries` are the client's timezone instants those buckets compare to.
+   * `noActivity` needs no boundary. Role scope stays with `leadScopeWhere` — the
+   * inner activity predicate is only an existence test, never `activityScopeWhere`.
+   */
+  todaysFollowUps?: boolean;
+  overdue?: boolean;
+  noActivity?: boolean;
+  dayBoundaries?: DayBoundaries;
 }
 
 /**
@@ -86,6 +102,38 @@ export function leadFilterWhere(filters: LeadFilters): Prisma.LeadWhereInput[] {
   // which is the correct role-scoped result, not a special case.
   if (filters.unassigned) {
     conditions.push({ assignments: { none: {} } });
+  }
+
+  // Activity presets (LEAD-04.1). A lead matches when it HAS an activity in the
+  // bucket ("today"/"overdue") — reusing the Activities worklist predicate so the
+  // two views can never diverge — or, for No Activity, when it has none. The inner
+  // `deletedAt: null` excludes soft-deleted activities (the bucket predicate omits
+  // it, since the worklist applies it via `activityScopeWhere`). These AND with
+  // `leadScopeWhere`, so an agent still sees only their own leads.
+  if (filters.dayBoundaries) {
+    if (filters.todaysFollowUps) {
+      conditions.push({
+        activities: {
+          some: {
+            deletedAt: null,
+            ...activityBucketWhere('today', filters.dayBoundaries),
+          },
+        },
+      });
+    }
+    if (filters.overdue) {
+      conditions.push({
+        activities: {
+          some: {
+            deletedAt: null,
+            ...activityBucketWhere('overdue', filters.dayBoundaries),
+          },
+        },
+      });
+    }
+  }
+  if (filters.noActivity) {
+    conditions.push({ activities: { none: { deletedAt: null } } });
   }
 
   return conditions;

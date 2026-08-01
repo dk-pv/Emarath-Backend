@@ -1,5 +1,6 @@
 import { Prisma } from '../generated/prisma/client';
 import { CurrentUser } from '../auth/current-user';
+import { type DayBoundaries } from '../activities/activity-buckets';
 import { leadScopeWhere } from './lead-scope';
 import { leadSearchWhere } from './lead-search';
 import { leadFilterWhere } from './lead-filter';
@@ -20,6 +21,13 @@ export interface LeadWhereQuery {
   createdFrom?: string;
   createdTo?: string;
   unassigned?: boolean;
+  /** LEAD-04.1 activity presets and the client's day boundaries (ISO instants). */
+  todaysFollowUps?: boolean;
+  overdue?: boolean;
+  noActivity?: boolean;
+  todayStart?: string;
+  todayEnd?: string;
+  tomorrowEnd?: string;
 }
 
 /**
@@ -43,6 +51,18 @@ export function buildLeadWhere(
   const search = leadSearchWhere(query.search);
   if (search) conditions.push(search);
 
+  // The client's timezone day boundaries (LEAD-04.1 activity presets), present only
+  // when a Today's-Follow-Ups / Overdue preset is active; passed to the reused
+  // `activityBucketWhere` as the exact instants the Activities worklist compares to.
+  const dayBoundaries: DayBoundaries | undefined =
+    query.todayStart && query.todayEnd && query.tomorrowEnd
+      ? {
+          todayStart: new Date(query.todayStart),
+          todayEnd: new Date(query.todayEnd),
+          tomorrowEnd: new Date(query.tomorrowEnd),
+        }
+      : undefined;
+
   conditions.push(
     ...leadFilterWhere({
       source: query.source,
@@ -53,6 +73,10 @@ export function buildLeadWhere(
       createdFrom: query.createdFrom,
       createdTo: query.createdTo,
       unassigned: query.unassigned,
+      todaysFollowUps: query.todaysFollowUps,
+      overdue: query.overdue,
+      noActivity: query.noActivity,
+      dayBoundaries,
     }),
   );
 

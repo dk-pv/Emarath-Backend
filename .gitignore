@@ -11,6 +11,9 @@ node_modules
 # test coverage
 /coverage
 
+# local file storage (dev adapter, FND-05.2)
+/.storage
+
 # environment files (never commit real secrets)
 .env
 .env.*

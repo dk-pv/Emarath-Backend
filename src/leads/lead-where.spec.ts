@@ -32,4 +32,35 @@ describe('buildLeadWhere', () => {
       deletedAt: { not: null },
     });
   });
+
+  it('applies an activity preset ANDed with scope, from the client boundaries (LEAD-04.1)', () => {
+    const where = buildLeadWhere(agent, {
+      overdue: true,
+      todayStart: '2026-08-01T00:00:00.000Z',
+      todayEnd: '2026-08-02T00:00:00.000Z',
+      tomorrowEnd: '2026-08-03T00:00:00.000Z',
+    });
+
+    const conditions = where.AND as Record<string, unknown>[];
+    // Scope is still first and unchanged — leadScopeWhere, never activityScopeWhere.
+    expect(conditions[0]).toEqual({
+      deletedAt: null,
+      assignments: { some: { userId: 'agent-1' } },
+    });
+    expect(conditions).toContainEqual({
+      activities: {
+        some: {
+          deletedAt: null,
+          completedAt: null,
+          dueAt: { lt: new Date('2026-08-01T00:00:00.000Z') },
+        },
+      },
+    });
+  });
+
+  it('ignores a window preset when the day boundaries are missing', () => {
+    expect(buildLeadWhere(admin, { overdue: true })).toEqual({
+      deletedAt: null,
+    });
+  });
 });

@@ -222,4 +222,48 @@ export class ListLeadsQueryDto {
   @IsBoolean({ message: 'archived must be a boolean' })
   @IsOptional()
   archived?: boolean;
+
+  /**
+   * Activity Quick Filter presets (LEAD-04.1). The three day boundaries are ISO
+   * instants the client computes in its own timezone (the shared `dayBoundaries`
+   * helper — the same contract the Activities worklist sends), so "today"/"overdue"
+   * follow the user's calendar. `todaysFollowUps`/`overdue` select the Activities
+   * bucket predicate, reused via `activityBucketWhere`; `noActivity` needs no
+   * boundary. They ride the same list pipeline, so they also apply to the export.
+   */
+  @Transform(({ value }: { value: unknown }): unknown =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsDateString({}, { message: 'todayStart must be an ISO date' })
+  @IsOptional()
+  todayStart?: string;
+
+  @Transform(({ value }: { value: unknown }): unknown =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsDateString({}, { message: 'todayEnd must be an ISO date' })
+  @IsOptional()
+  todayEnd?: string;
+
+  @Transform(({ value }: { value: unknown }): unknown =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsDateString({}, { message: 'tomorrowEnd must be an ISO date' })
+  @IsOptional()
+  tomorrowEnd?: string;
+
+  @Transform(toOptionalBoolean)
+  @IsBoolean({ message: 'todaysFollowUps must be a boolean' })
+  @IsOptional()
+  todaysFollowUps?: boolean;
+
+  @Transform(toOptionalBoolean)
+  @IsBoolean({ message: 'overdue must be a boolean' })
+  @IsOptional()
+  overdue?: boolean;
+
+  @Transform(toOptionalBoolean)
+  @IsBoolean({ message: 'noActivity must be a boolean' })
+  @IsOptional()
+  noActivity?: boolean;
 }
