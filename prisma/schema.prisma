@@ -77,6 +77,10 @@ model User {
   refreshTokens       RefreshToken[]
   /// AUTH-03.1: outstanding/used password-reset tokens.
   passwordResetTokens PasswordResetToken[]
+  /// DOC-01.1: documents this user uploaded (the "Uploaded By" audit trail).
+  uploadedDocuments   Document[]
+  /// DOC-01.1: per-document access grants naming this user.
+  documentAccess      DocumentAccess[]
 
   @@map("users")
 }
@@ -634,4 +638,74 @@ model LocationPoint {
   /// AC2/AC4: an agent's track over a period.
   @@index([agentId, recordedAt])
   @@map("location_points")
+}
+
+/// A company-wide document (DOC-01.1). A general-purpose repository — product
+/// images, catalogs — independent of any single lead or module (AC4): it carries no
+/// lead/activity FK by design.
+///
+/// The bytes live in the storage backend, never the DB: `storageKey` is the
+/// StorageService object key (FND-05.2), and `sizeBytes`/`contentType` are the
+/// `StoredObject` metadata that layer returns (AC5). `title` is the human "File Name"
+/// the Add drawer captures ("Product Images"); `fileName` is the uploaded file's own
+/// name ("LUMINUX3IN1 COMBO.png"), shown as "Attachment" and used as the download
+/// name — the two are distinct in `documents-list-default-single-row.png`. `category`
+/// is the optional category/folder (AC2): a nullable string via the lookup convention
+/// (ADR-0032), no Category table until FND-04.2. Per-document access is the separate
+/// `DocumentAccess` whitelist (AC3). Upload/list/download are DOC-02.1+ — absent here.
+model Document {
+  id          String  @id @default(uuid()) @db.Uuid
+  title       String  @db.VarChar(255)
+  fileName    String  @map("file_name") @db.VarChar(255)
+  /// The StorageService object key — the "file reference" (AC1). Never a public URL;
+  /// access is always through a signed download minted later (DOC-02.x).
+  storageKey  String  @map("storage_key") @db.VarChar(512)
+  sizeBytes   Int     @map("size_bytes")
+  /// MIME type from the storage layer; the UI derives the short "png"/"pdf" label.
+  contentType String  @map("content_type") @db.VarChar(160)
+  /// Optional category/folder (AC2). Null = uncategorised.
+  category    String? @db.VarChar(120)
+  /// "Uploaded By" (AC1) — the uploader, an immutable audit fact.
+  uploaderId  String  @map("uploader_id") @db.Uuid
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  /// Restrict, not Cascade: the app soft-deletes, so a hard delete of the uploader
+  /// must never erase a document or its ownership (matches Call → agent).
+  uploader User             @relation(fields: [uploaderId], references: [id], onDelete: Restrict)
+  access   DocumentAccess[]
+
+  /// A user's documents, excluding soft-deleted (the "Uploaded By" scope).
+  @@index([uploaderId, deletedAt])
+  /// The category/folder filter (DOC-06.1).
+  @@index([category, deletedAt])
+  /// The type filter — the "All Documents" dropdown (DOC-06.1).
+  @@index([contentType, deletedAt])
+  /// The list opens newest-first by "Date and Time".
+  @@index([createdAt(sort: Desc)])
+  @@map("documents")
+}
+
+/// Per-document access grant (DOC-01.1 AC3) — the "Select Users" whitelist from the
+/// Add Document drawer. An explicit join mirroring ActivityAssignee: one row per
+/// (document, user) granted access, so a document can be shared with many users and
+/// "documents shared with me" reads from the user side. No soft delete — a grant is
+/// added or removed, and it Cascades away with its document.
+model DocumentAccess {
+  id         String   @id @default(uuid()) @db.Uuid
+  documentId String   @map("document_id") @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// A user is granted access to a document once or not at all.
+  @@unique([documentId, userId])
+  /// "documents shared with me" — the per-user access lookup.
+  @@index([userId])
+  @@map("document_access")
 }
