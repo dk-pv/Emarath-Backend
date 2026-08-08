@@ -28,6 +28,16 @@ export class PrismaService
 
   constructor(config: ConfigService) {
     const connectionString = config.get<string>('DATABASE_URL');
+    // Fail fast on a missing connection string in production, mirroring the JWT
+    // secret gate: an unset DATABASE_URL is a deploy misconfiguration that should
+    // block boot with a clear message, not silently serve an app that errors on
+    // every query. (Transient DB *outages* stay non-fatal — see onModuleInit.)
+    if (
+      config.get<string>('app.environment') === 'production' &&
+      !connectionString
+    ) {
+      throw new Error('DATABASE_URL must be set in production.');
+    }
     super({ adapter: new PrismaPg({ connectionString }) });
   }
 
