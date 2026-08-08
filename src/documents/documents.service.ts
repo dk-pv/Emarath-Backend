@@ -3,12 +3,36 @@ import { Prisma } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { documentScopeWhere } from './document-scope';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import {
+  ListDocumentsQueryDto,
+  type DocumentSortColumn,
+} from './dto/list-documents-query.dto';
+import {
+  DOCUMENT_LIST_SELECT,
   DOCUMENT_SELECT,
+  DocumentListResponse,
   DocumentResponse,
+  toDocumentListItem,
   toDocumentResponse,
 } from './dto/document-response.dto';
+
+/**
+ * Maps a validated sort column to a Prisma `orderBy`. `uploadedBy` orders by the
+ * uploader's name through the relation; every other column is a direct field. A
+ * stable `id` tiebreak is appended so a row can't swap pages between two equal keys.
+ */
+function documentOrderBy(
+  sort: DocumentSortColumn,
+  direction: 'asc' | 'desc',
+): Prisma.DocumentOrderByWithRelationInput[] {
+  const primary: Prisma.DocumentOrderByWithRelationInput =
+    sort === 'uploadedBy'
+      ? { uploader: { name: direction } }
+      : { [sort]: direction };
+  return [primary, { id: 'asc' }];
+}
 
 /**
  * Document writes (DOC-02.1). Injects the shared `StorageService` — the single upload
@@ -22,6 +46,45 @@ export class DocumentsService {
     private readonly storage: StorageService,
     private readonly currentUser: CurrentUserService,
   ) {}
+
+  /**
+   * One scoped page of documents plus the total (DOC-03.1).
+   *
+   * The scope is applied in the `where` (AC4), so pagination, sorting and the count
+   * all run over the same restricted set — a caller can never page, sort or count
+   * past the documents they may access. The page and its total run in one
+   * transaction (the Leads findPage rule) so a concurrent upload can't make the
+   * count disagree with the page. Each row carries a fresh short-lived signed link
+   * minted from `storageKey` (AC2); the key itself is never returned.
+   */
+  async list(query: ListDocumentsQueryDto): Promise<DocumentListResponse> {
+    const user = await this.currentUser.resolve();
+    const where = documentScopeWhere(user);
+
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.document.findMany({
+        where,
+        select: DOCUMENT_LIST_SELECT,
+        orderBy: documentOrderBy(query.sort, query.direction),
+        skip: (query.page - 1) * query.size,
+        take: query.size,
+      }),
+      this.prisma.document.count({ where }),
+    ]);
+
+    const items = await Promise.all(
+      rows.map(async (row) =>
+        toDocumentListItem(
+          row,
+          await this.storage.getSignedDownloadUrl(row.storageKey, {
+            downloadName: row.fileName,
+          }),
+        ),
+      ),
+    );
+
+    return { rows: items, total };
+  }
 
   /**
    * Uploads a document (DOC-02.1).

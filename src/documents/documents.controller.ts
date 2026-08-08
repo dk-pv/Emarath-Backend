@@ -1,19 +1,31 @@
 import {
   Body,
   Controller,
+  Get,
   Post,
+  Query,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { DocumentsService } from './documents.service';
 import { CreateDocumentDto } from './dto/create-document.dto';
-import { DocumentResponse } from './dto/document-response.dto';
+import { ListDocumentsQueryDto } from './dto/list-documents-query.dto';
+import {
+  DocumentListResponse,
+  DocumentResponse,
+} from './dto/document-response.dto';
 
 /** Thin by design: validation is the DTO's job, storage and scoping the service's. */
 @Controller('documents')
 export class DocumentsController {
   constructor(private readonly documents: DocumentsService) {}
+
+  /** GET /api/documents — one scoped page of documents plus the total (DOC-03.1). */
+  @Get()
+  list(@Query() query: ListDocumentsQueryDto): Promise<DocumentListResponse> {
+    return this.documents.list(query);
+  }
 
   /**
    * POST /api/documents — upload a company-wide document (DOC-02.1). Multipart: the `file`

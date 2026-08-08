@@ -62,3 +62,59 @@ export function toDocumentResponse(
     downloadUrl,
   };
 }
+
+/**
+ * The projection one document list row needs (DOC-03.1). Narrower than the create
+ * response — no `access` list — but keeps `storageKey` to mint the signed link;
+ * the key itself is never returned to the client.
+ */
+export const DOCUMENT_LIST_SELECT = {
+  id: true,
+  title: true,
+  fileName: true,
+  storageKey: true,
+  sizeBytes: true,
+  contentType: true,
+  createdAt: true,
+  uploader: { select: { id: true, name: true } },
+} satisfies Prisma.DocumentSelect;
+
+type DocumentListRow = Prisma.DocumentGetPayload<{
+  select: typeof DOCUMENT_LIST_SELECT;
+}>;
+
+/** One document as the list endpoint returns it (DOC-03.1 AC1). */
+export interface DocumentListItem {
+  id: string;
+  /** "File Name" column — the user-entered display title. */
+  title: string;
+  /** "Attachment" column — the uploaded file's own name. */
+  fileName: string;
+  sizeBytes: number;
+  contentType: string;
+  createdAt: string;
+  uploadedBy: DocumentUserRef;
+  /** Short-lived signed link to the stored file (AC2). Never a raw storage key. */
+  downloadUrl: string;
+}
+
+export interface DocumentListResponse {
+  rows: DocumentListItem[];
+  total: number;
+}
+
+export function toDocumentListItem(
+  row: DocumentListRow,
+  downloadUrl: string,
+): DocumentListItem {
+  return {
+    id: row.id,
+    title: row.title,
+    fileName: row.fileName,
+    sizeBytes: row.sizeBytes,
+    contentType: row.contentType,
+    createdAt: row.createdAt.toISOString(),
+    uploadedBy: row.uploader,
+    downloadUrl,
+  };
+}
