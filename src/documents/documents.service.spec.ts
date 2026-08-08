@@ -241,6 +241,52 @@ describe('DocumentsService', () => {
     ]);
   });
 
+  it('ANDs the file-type filter into the scope, matching on the extension', async () => {
+    await service.list(listQuery({ type: 'png' }));
+
+    const scope = {
+      deletedAt: null,
+      OR: [
+        { uploaderId: 'user-1' },
+        { access: { some: { userId: 'user-1' } } },
+      ],
+    };
+    const expected = {
+      AND: [
+        scope,
+        { OR: [{ fileName: { endsWith: '.png', mode: 'insensitive' } }] },
+      ],
+    };
+    // The narrowed where gates page AND count, so a filtered total can't disagree.
+    expect(findManyArg().where).toEqual(expected);
+    const countArg = (
+      prisma.document.count.mock.calls as unknown[][]
+    )[0][0] as { where: Record<string, unknown> };
+    expect(countArg.where).toEqual(expected);
+  });
+
+  it('matches both .jpg and .jpeg for the JPG filter', async () => {
+    await service.list(listQuery({ type: 'jpg' }));
+    const and = (findManyArg().where as { AND: Record<string, unknown>[] }).AND;
+    expect(and[1]).toEqual({
+      OR: [
+        { fileName: { endsWith: '.jpg', mode: 'insensitive' } },
+        { fileName: { endsWith: '.jpeg', mode: 'insensitive' } },
+      ],
+    });
+  });
+
+  it('leaves the where as the bare scope when no type is selected (AC3)', async () => {
+    await service.list(listQuery());
+    expect(findManyArg().where).toEqual({
+      deletedAt: null,
+      OR: [
+        { uploaderId: 'user-1' },
+        { access: { some: { userId: 'user-1' } } },
+      ],
+    });
+  });
+
   // --- DOC-04.1 edit (rename + access) ---
 
   const updateArg = (): { where: unknown; data: Record<string, unknown> } =>

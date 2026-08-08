@@ -14,6 +14,7 @@ import { UpdateDocumentDto } from './dto/update-document.dto';
 import {
   ListDocumentsQueryDto,
   type DocumentSortColumn,
+  type DocumentTypeFilter,
 } from './dto/list-documents-query.dto';
 import {
   DOCUMENT_LIST_SELECT,
@@ -44,6 +45,24 @@ function documentOrderBy(
 }
 
 /**
+ * The "All Documents" file-type filter as a query fragment (DOC-06.1). Matches on the
+ * file's own extension — the value the "Type" column displays — case-insensitively, so
+ * the filter and the column always agree (the stored MIME is un-normalised browser
+ * input and would disagree for octet-stream office files). `jpg` covers both `.jpg`
+ * and `.jpeg`, mirroring the single "JPG" option the reference dropdown shows.
+ */
+function documentTypeWhere(
+  type: DocumentTypeFilter,
+): Prisma.DocumentWhereInput {
+  const extensions = type === 'jpg' ? ['.jpg', '.jpeg'] : [`.${type}`];
+  return {
+    OR: extensions.map((extension) => ({
+      fileName: { endsWith: extension, mode: 'insensitive' as const },
+    })),
+  };
+}
+
+/**
  * Document writes (DOC-02.1). Injects the shared `StorageService` — the single upload
  * implementation every future module reuses — plus `PrismaService`; no repository, for the
  * same reason Activities has none (one put plus one nested create).
@@ -68,7 +87,13 @@ export class DocumentsService {
    */
   async list(query: ListDocumentsQueryDto): Promise<DocumentListResponse> {
     const user = await this.currentUser.resolve();
-    const where = documentScopeWhere(user);
+    const scope = documentScopeWhere(user);
+    // The type filter ANDs into the scoped where, so it can only ever narrow what the
+    // caller may already see (AC2) — never widen it. Unset means every permitted
+    // document (AC3), leaving the DOC-03.1 query unchanged.
+    const where: Prisma.DocumentWhereInput = query.type
+      ? { AND: [scope, documentTypeWhere(query.type)] }
+      : scope;
 
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.document.findMany({

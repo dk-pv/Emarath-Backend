@@ -20,6 +20,28 @@ export const DOCUMENT_SORT_COLUMNS = [
 
 export type DocumentSortColumn = (typeof DOCUMENT_SORT_COLUMNS)[number];
 
+/**
+ * The file types the "All Documents" dropdown filters by (DOC-06.1), from
+ * `documents-all-documents-dropdown-open-option-hover.png` — the same set the upload
+ * policy allows (`STORAGE_ALLOWED_EXTENSIONS`), with `jpeg` folded into `jpg`. A
+ * whitelist so an unknown value is a 400, never a passthrough into the query. The
+ * match is on the file's own extension (what the "Type" column shows), not the stored
+ * MIME, which is un-normalised browser input. (The reference's "Last Modified" entry
+ * is deferred — its behaviour is not captured by any screenshot.)
+ */
+export const DOCUMENT_TYPE_FILTERS = [
+  'xlsx',
+  'png',
+  'jpg',
+  'pdf',
+  'docx',
+  'txt',
+  'csv',
+  'svg',
+] as const;
+
+export type DocumentTypeFilter = (typeof DOCUMENT_TYPE_FILTERS)[number];
+
 export const DEFAULT_PAGE_SIZE = 25;
 
 /** Guards the database against a caller asking for an unbounded page. */
@@ -53,4 +75,14 @@ export class ListDocumentsQueryDto {
   @IsIn(['asc', 'desc'], { message: 'direction must be asc or desc' })
   @IsOptional()
   direction: 'asc' | 'desc' = 'desc';
+
+  /** The active "All Documents" file-type filter; unset means every permitted document. */
+  @Transform(({ value }: { value: unknown }): unknown =>
+    typeof value === 'string' ? value.toLowerCase() : value,
+  )
+  @IsIn(DOCUMENT_TYPE_FILTERS, {
+    message: `type must be one of: ${DOCUMENT_TYPE_FILTERS.join(', ')}`,
+  })
+  @IsOptional()
+  type?: DocumentTypeFilter;
 }
