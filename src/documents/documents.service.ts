@@ -1,10 +1,16 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
-import { Prisma } from '../generated/prisma/client';
-import { CurrentUserService } from '../auth/current-user';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { Prisma, UserRole } from '../generated/prisma/client';
+import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { documentScopeWhere } from './document-scope';
 import { CreateDocumentDto } from './dto/create-document.dto';
+import { UpdateDocumentDto } from './dto/update-document.dto';
 import {
   ListDocumentsQueryDto,
   type DocumentSortColumn,
@@ -17,6 +23,9 @@ import {
   toDocumentListItem,
   toDocumentResponse,
 } from './dto/document-response.dto';
+
+const DOCUMENT_OUT_OF_SCOPE =
+  'That document does not exist or is not in your scope.';
 
 /**
  * Maps a validated sort column to a Prisma `orderBy`. `uploadedBy` orders by the
@@ -146,6 +155,100 @@ export class DocumentsService {
       throw error;
     }
 
+    const downloadUrl = await this.storage.getSignedDownloadUrl(
+      row.storageKey,
+      {
+        downloadName: row.fileName,
+      },
+    );
+    return toDocumentResponse(row, downloadUrl);
+  }
+
+  /**
+   * One scoped document with its access list, for the Edit drawer to load current
+   * values (DOC-04.1). Scoped like the list, so an out-of-scope, unknown or
+   * soft-deleted id is a 404 — never a cross-scope read.
+   */
+  async findById(id: string): Promise<DocumentResponse> {
+    const user = await this.currentUser.resolve();
+    const row = await this.prisma.document.findFirst({
+      where: { AND: [documentScopeWhere(user), { id }] },
+      select: DOCUMENT_SELECT,
+    });
+    if (!row) throw new NotFoundException(DOCUMENT_OUT_OF_SCOPE);
+    return this.signedResponse(row);
+  }
+
+  /**
+   * Renames a document and/or replaces its access whitelist (DOC-04.1).
+   *
+   * Authorization is two-layered and server-side: the row is first read through the
+   * caller's scope, so a document they cannot see is a 404 (no existence leak; this
+   * also excludes soft-deleted rows). Then editing is gated to the owner or a
+   * SUPERADMIN — a user merely granted view access gets a 403, never a silent
+   * write. Knowing the id is never enough.
+   *
+   * The whitelist is replaced wholesale in one nested write (`deleteMany` then
+   * `create`), which Prisma runs atomically, so metadata and access can't land in
+   * an inconsistent state and the resulting grants are exactly the set sent — no
+   * unrelated user is kept or added. Ids are de-duplicated to respect the
+   * (document, user) uniqueness; a non-existent user fails the foreign key and is a
+   * clear 400, not a 500. The file bytes (fileName/storageKey) are never touched.
+   */
+  async update(id: string, dto: UpdateDocumentDto): Promise<DocumentResponse> {
+    const user = await this.currentUser.resolve();
+
+    const existing = await this.prisma.document.findFirst({
+      where: { AND: [documentScopeWhere(user), { id }] },
+      select: { id: true, uploaderId: true },
+    });
+    if (!existing) throw new NotFoundException(DOCUMENT_OUT_OF_SCOPE);
+    this.assertCanEdit(user, existing.uploaderId);
+
+    const data: Prisma.DocumentUpdateInput = {};
+    if (dto.title !== undefined) data.title = dto.title;
+    if (dto.userIds !== undefined) {
+      const userIds = [...new Set(dto.userIds)];
+      data.access = {
+        deleteMany: {},
+        create: userIds.map((userId) => ({
+          user: { connect: { id: userId } },
+        })),
+      };
+    }
+
+    try {
+      const row = await this.prisma.document.update({
+        where: { id },
+        data,
+        select: DOCUMENT_SELECT,
+      });
+      return this.signedResponse(row);
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === 'P2003' || error.code === 'P2025')
+      ) {
+        throw new BadRequestException(
+          'One or more selected users do not exist.',
+        );
+      }
+      throw error;
+    }
+  }
+
+  /** Only the uploader (owner) or a SUPERADMIN may edit; a view grant is not enough. */
+  private assertCanEdit(user: CurrentUser, uploaderId: string): void {
+    if (user.role === UserRole.SUPERADMIN || uploaderId === user.id) return;
+    throw new ForbiddenException(
+      'You do not have permission to edit this document.',
+    );
+  }
+
+  /** Maps a full document row to the response with a fresh short-lived signed link. */
+  private async signedResponse(
+    row: Prisma.DocumentGetPayload<{ select: typeof DOCUMENT_SELECT }>,
+  ): Promise<DocumentResponse> {
     const downloadUrl = await this.storage.getSignedDownloadUrl(
       row.storageKey,
       {

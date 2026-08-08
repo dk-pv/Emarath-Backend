@@ -2,6 +2,9 @@ import {
   Body,
   Controller,
   Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
   Post,
   Query,
   UploadedFile,
@@ -11,6 +14,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { DocumentsService } from './documents.service';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import { ListDocumentsQueryDto } from './dto/list-documents-query.dto';
+import { UpdateDocumentDto } from './dto/update-document.dto';
 import {
   DocumentListResponse,
   DocumentResponse,
@@ -25,6 +29,21 @@ export class DocumentsController {
   @Get()
   list(@Query() query: ListDocumentsQueryDto): Promise<DocumentListResponse> {
     return this.documents.list(query);
+  }
+
+  /** GET /api/documents/:id — one scoped document, loaded by the Edit drawer (DOC-04.1). */
+  @Get(':id')
+  findOne(@Param('id', ParseUUIDPipe) id: string): Promise<DocumentResponse> {
+    return this.documents.findById(id);
+  }
+
+  /** PATCH /api/documents/:id — rename and/or change access (DOC-04.1). */
+  @Patch(':id')
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateDocumentDto,
+  ): Promise<DocumentResponse> {
+    return this.documents.update(id, dto);
   }
 
   /**

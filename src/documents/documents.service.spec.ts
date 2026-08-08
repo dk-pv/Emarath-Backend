@@ -1,4 +1,8 @@
-import { BadRequestException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { DocumentsService } from './documents.service';
@@ -46,7 +50,13 @@ const listRow = {
 describe('DocumentsService', () => {
   let service: DocumentsService;
   let prisma: {
-    document: { create: jest.Mock; findMany: jest.Mock; count: jest.Mock };
+    document: {
+      create: jest.Mock;
+      findMany: jest.Mock;
+      count: jest.Mock;
+      findFirst: jest.Mock;
+      update: jest.Mock;
+    };
     $transaction: jest.Mock;
   };
   let storage: {
@@ -62,6 +72,10 @@ describe('DocumentsService', () => {
         create: jest.fn().mockResolvedValue(storedRow),
         findMany: jest.fn().mockReturnValue('findMany-op'),
         count: jest.fn().mockReturnValue('count-op'),
+        findFirst: jest
+          .fn()
+          .mockResolvedValue({ id: 'doc-1', uploaderId: 'user-1' }),
+        update: jest.fn().mockResolvedValue(storedRow),
       },
       // The service composes [findMany, count] and awaits them together; the mock
       // resolves the tuple so the two ops need no real client.
@@ -223,5 +237,124 @@ describe('DocumentsService', () => {
       { uploader: { name: 'asc' } },
       { id: 'asc' },
     ]);
+  });
+
+  // --- DOC-04.1 edit (rename + access) ---
+
+  const updateArg = (): { where: unknown; data: Record<string, unknown> } =>
+    (prisma.document.update.mock.calls as unknown[][])[0][0] as {
+      where: unknown;
+      data: Record<string, unknown>;
+    };
+
+  const asOwner = () =>
+    currentUser.resolve.mockResolvedValue({
+      id: 'user-1',
+      role: 'SALES_MANAGER',
+    });
+
+  it('lets the owner rename and replace access, deduping ids', async () => {
+    asOwner();
+    prisma.document.findFirst.mockResolvedValue({
+      id: 'doc-1',
+      uploaderId: 'user-1',
+    });
+
+    await service.update('doc-1', {
+      title: 'Renamed',
+      userIds: ['u2', 'u2', 'u3'],
+    });
+
+    expect(updateArg().where).toEqual({ id: 'doc-1' });
+    expect(updateArg().data).toEqual({
+      title: 'Renamed',
+      access: {
+        deleteMany: {},
+        create: [
+          { user: { connect: { id: 'u2' } } },
+          { user: { connect: { id: 'u3' } } },
+        ],
+      },
+    });
+    // The scope predicate must gate the read (excludes deleted + cross-scope rows).
+    expect((prisma.document.findFirst.mock.calls as unknown[][])[0][0]).toEqual(
+      {
+        where: {
+          AND: [
+            {
+              deletedAt: null,
+              OR: [
+                { uploaderId: 'user-1' },
+                { access: { some: { userId: 'user-1' } } },
+              ],
+            },
+            { id: 'doc-1' },
+          ],
+        },
+        select: { id: true, uploaderId: true },
+      },
+    );
+  });
+
+  it('touches access only when userIds is provided (title-only edit)', async () => {
+    asOwner();
+    await service.update('doc-1', { title: 'Just a rename' });
+    expect(updateArg().data).toEqual({ title: 'Just a rename' });
+  });
+
+  it('forbids a view-only grantee (not the owner) from editing', async () => {
+    asOwner(); // caller is user-1…
+    prisma.document.findFirst.mockResolvedValue({
+      id: 'doc-1',
+      uploaderId: 'someone-else', // …but not the owner
+    });
+
+    await expect(
+      service.update('doc-1', { title: 'Hijack' }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(prisma.document.update).not.toHaveBeenCalled();
+  });
+
+  it('404s (never edits) a document the caller cannot see, incl. deleted or foreign', async () => {
+    asOwner();
+    prisma.document.findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.update('doc-1', { title: 'x' }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(prisma.document.update).not.toHaveBeenCalled();
+  });
+
+  it('lets a SUPERADMIN edit any document they can see', async () => {
+    currentUser.resolve.mockResolvedValue({ id: 'admin', role: 'SUPERADMIN' });
+    prisma.document.findFirst.mockResolvedValue({
+      id: 'doc-1',
+      uploaderId: 'someone-else',
+    });
+
+    await service.update('doc-1', { title: 'Admin edit' });
+    expect(prisma.document.update).toHaveBeenCalled();
+  });
+
+  it('rejects a non-existent user in the access set with a clear 400', async () => {
+    asOwner();
+    prisma.document.update.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('fk', {
+        code: 'P2003',
+        clientVersion: 'x',
+      }),
+    );
+
+    await expect(
+      service.update('doc-1', { userIds: ['ghost'] }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('findById scopes the read and 404s an out-of-scope id', async () => {
+    asOwner();
+    prisma.document.findFirst.mockResolvedValue(null);
+    await expect(service.findById('doc-1')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
   });
 });
