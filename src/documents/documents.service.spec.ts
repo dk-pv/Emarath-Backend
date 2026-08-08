@@ -287,6 +287,53 @@ describe('DocumentsService', () => {
     });
   });
 
+  // --- DOC-07.1 search (by name) ---
+
+  const scopeWhere = {
+    deletedAt: null,
+    OR: [{ uploaderId: 'user-1' }, { access: { some: { userId: 'user-1' } } }],
+  };
+
+  it('searches by name (title), case-insensitive partial, ANDed into scope', async () => {
+    await service.list(listQuery({ search: 'combo' }));
+
+    const expected = {
+      AND: [scopeWhere, { title: { contains: 'combo', mode: 'insensitive' } }],
+    };
+    // Search gates page AND count over the same scoped where.
+    expect(findManyArg().where).toEqual(expected);
+    const countArg = (
+      prisma.document.count.mock.calls as unknown[][]
+    )[0][0] as { where: Record<string, unknown> };
+    expect(countArg.where).toEqual(expected);
+  });
+
+  it('escapes LIKE wildcards in the search term', async () => {
+    await service.list(listQuery({ search: '50%_x' }));
+    const and = (findManyArg().where as { AND: Record<string, unknown>[] }).AND;
+    expect(and[1]).toEqual({
+      title: { contains: '50\\%\\_x', mode: 'insensitive' },
+    });
+  });
+
+  it('treats a whitespace-only search as no search (bare scope, AC5)', async () => {
+    await service.list(listQuery({ search: '   ' }));
+    expect(findManyArg().where).toEqual(scopeWhere);
+  });
+
+  it('combines search with the type filter, both ANDed into scope (AC3)', async () => {
+    await service.list(listQuery({ type: 'png', search: 'combo' }));
+    const and = (findManyArg().where as { AND: Record<string, unknown>[] }).AND;
+    // Scope always leads, so search+type can only narrow, never widen visibility.
+    expect(and[0]).toEqual(scopeWhere);
+    expect(and[1]).toEqual({
+      OR: [{ fileName: { endsWith: '.png', mode: 'insensitive' } }],
+    });
+    expect(and[2]).toEqual({
+      title: { contains: 'combo', mode: 'insensitive' },
+    });
+  });
+
   // --- DOC-04.1 edit (rename + access) ---
 
   const updateArg = (): { where: unknown; data: Record<string, unknown> } =>

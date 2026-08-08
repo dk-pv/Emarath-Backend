@@ -63,6 +63,34 @@ function documentTypeWhere(
 }
 
 /**
+ * Escapes the characters LIKE treats as wildcards so a search term matches literally
+ * (mirrors `escapeLike` in Leads). Prisma's `contains` parameterises the value — no
+ * injection — but does not escape `%`/`_`, so "50%" would otherwise match "5…". The
+ * backslash is escaped first, before the escapes it introduces.
+ */
+function escapeLike(term: string): string {
+  return term.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+/**
+ * The rows matching a free-text name search, as a query fragment (DOC-07.1).
+ *
+ * Scope is the backlog's "by name": the document's `title` — the value the "File Name"
+ * column shows — and nothing else (the actual `fileName`/attachment is excluded until a
+ * reference proves it, the same discipline Leads applies). `contains` is an unanchored,
+ * case-insensitive substring (AC1/AC4). Returns `undefined` for an empty or
+ * whitespace-only term, so the caller adds no condition and the filtered list is
+ * returned unchanged (AC5).
+ */
+function documentSearchWhere(
+  term: string | undefined,
+): Prisma.DocumentWhereInput | undefined {
+  const trimmed = term?.trim();
+  if (!trimmed) return undefined;
+  return { title: { contains: escapeLike(trimmed), mode: 'insensitive' } };
+}
+
+/**
  * Document writes (DOC-02.1). Injects the shared `StorageService` — the single upload
  * implementation every future module reuses — plus `PrismaService`; no repository, for the
  * same reason Activities has none (one put plus one nested create).
@@ -88,12 +116,16 @@ export class DocumentsService {
   async list(query: ListDocumentsQueryDto): Promise<DocumentListResponse> {
     const user = await this.currentUser.resolve();
     const scope = documentScopeWhere(user);
-    // The type filter ANDs into the scoped where, so it can only ever narrow what the
-    // caller may already see (AC2) — never widen it. Unset means every permitted
-    // document (AC3), leaving the DOC-03.1 query unchanged.
-    const where: Prisma.DocumentWhereInput = query.type
-      ? { AND: [scope, documentTypeWhere(query.type)] }
-      : scope;
+    // Type filter (DOC-06.1) and name search (DOC-07.1) each AND into the scoped where,
+    // so they can only ever narrow what the caller may already see (DOC-06.1 AC2 /
+    // DOC-07.1 AC2) — never widen it — and combine with each other (AC3). No filter and
+    // no search leaves the DOC-03.1 query unchanged (bare scope).
+    const filters: Prisma.DocumentWhereInput[] = [];
+    if (query.type) filters.push(documentTypeWhere(query.type));
+    const search = documentSearchWhere(query.search);
+    if (search) filters.push(search);
+    const where: Prisma.DocumentWhereInput =
+      filters.length > 0 ? { AND: [scope, ...filters] } : scope;
 
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.document.findMany({

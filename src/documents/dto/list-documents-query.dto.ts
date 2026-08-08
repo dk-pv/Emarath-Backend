@@ -1,5 +1,13 @@
 import { Transform, Type } from 'class-transformer';
-import { IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
+import {
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  Max,
+  MaxLength,
+  Min,
+} from 'class-validator';
 
 /**
  * Columns the list may be ordered by (DOC-03.1 AC3).
@@ -47,6 +55,9 @@ export const DEFAULT_PAGE_SIZE = 25;
 /** Guards the database against a caller asking for an unbounded page. */
 export const MAX_PAGE_SIZE = 100;
 
+/** A search longer than this is never a real query; reject it before the DB (matches Leads). */
+export const MAX_SEARCH_LENGTH = 200;
+
 export class ListDocumentsQueryDto {
   /** 1-based, matching what the pager shows. */
   @Type(() => Number)
@@ -85,4 +96,19 @@ export class ListDocumentsQueryDto {
   })
   @IsOptional()
   type?: DocumentTypeFilter;
+
+  /**
+   * Free-text search over the document name — the "File Name" column, i.e. `title`
+   * (DOC-07.1). Trimmed here so a whitespace-only value arrives empty, which the search
+   * builder treats as "no search" (AC5); length-capped before it can reach the database.
+   */
+  @Transform(({ value }: { value: unknown }): unknown =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsString({ message: 'search must be a string' })
+  @MaxLength(MAX_SEARCH_LENGTH, {
+    message: `search must be at most ${MAX_SEARCH_LENGTH} characters`,
+  })
+  @IsOptional()
+  search?: string;
 }
