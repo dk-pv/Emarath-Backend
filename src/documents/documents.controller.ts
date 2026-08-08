@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
@@ -44,6 +45,12 @@ export class DocumentsController {
     @Body() dto: UpdateDocumentDto,
   ): Promise<DocumentResponse> {
     return this.documents.update(id, dto);
+  }
+
+  /** DELETE /api/documents/:id — permanently remove the document and its file (DOC-05.1). */
+  @Delete(':id')
+  remove(@Param('id', ParseUUIDPipe) id: string): Promise<{ id: string }> {
+    return this.documents.remove(id);
   }
 
   /**

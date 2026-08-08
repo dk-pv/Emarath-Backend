@@ -56,6 +56,7 @@ describe('DocumentsService', () => {
       count: jest.Mock;
       findFirst: jest.Mock;
       update: jest.Mock;
+      delete: jest.Mock;
     };
     $transaction: jest.Mock;
   };
@@ -76,6 +77,7 @@ describe('DocumentsService', () => {
           .fn()
           .mockResolvedValue({ id: 'doc-1', uploaderId: 'user-1' }),
         update: jest.fn().mockResolvedValue(storedRow),
+        delete: jest.fn().mockResolvedValue(undefined),
       },
       // The service composes [findMany, count] and awaits them together; the mock
       // resolves the tuple so the two ops need no real client.
@@ -356,5 +358,88 @@ describe('DocumentsService', () => {
     await expect(service.findById('doc-1')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+
+  // --- DOC-05.1 delete (hard delete: row + stored file) ---
+
+  const scopedRow = (uploaderId: string) => ({
+    id: 'doc-1',
+    uploaderId,
+    storageKey: 'documents/uuid/combo.png',
+  });
+
+  it('lets the owner delete: removes the file then the row, returns the id', async () => {
+    asOwner();
+    prisma.document.findFirst.mockResolvedValue(scopedRow('user-1'));
+
+    const result = await service.remove('doc-1');
+
+    expect(result).toEqual({ id: 'doc-1' });
+    // AC3: the physical object is removed, keyed off the scoped row's storageKey.
+    expect(storage.delete).toHaveBeenCalledWith('documents/uuid/combo.png');
+    expect(prisma.document.delete).toHaveBeenCalledWith({
+      where: { id: 'doc-1' },
+    });
+    // Storage-first so a failed row delete stays retryable (the key lives on the row).
+    expect(storage.delete.mock.invocationCallOrder[0]).toBeLessThan(
+      prisma.document.delete.mock.invocationCallOrder[0],
+    );
+    // The scope predicate gates the read (excludes deleted + cross-scope rows).
+    expect((prisma.document.findFirst.mock.calls as unknown[][])[0][0]).toEqual(
+      {
+        where: {
+          AND: [
+            {
+              deletedAt: null,
+              OR: [
+                { uploaderId: 'user-1' },
+                { access: { some: { userId: 'user-1' } } },
+              ],
+            },
+            { id: 'doc-1' },
+          ],
+        },
+        select: { id: true, uploaderId: true, storageKey: true },
+      },
+    );
+  });
+
+  it('lets a SUPERADMIN delete any document they can see', async () => {
+    currentUser.resolve.mockResolvedValue({ id: 'admin', role: 'SUPERADMIN' });
+    prisma.document.findFirst.mockResolvedValue(scopedRow('someone-else'));
+
+    await service.remove('doc-1');
+    expect(prisma.document.delete).toHaveBeenCalled();
+  });
+
+  it('forbids a view-only grantee from deleting (no file or row touched)', async () => {
+    asOwner(); // caller is user-1…
+    prisma.document.findFirst.mockResolvedValue(scopedRow('someone-else'));
+
+    await expect(service.remove('doc-1')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(storage.delete).not.toHaveBeenCalled();
+    expect(prisma.document.delete).not.toHaveBeenCalled();
+  });
+
+  it('404s a document the caller cannot see (incl. deleted/foreign) and deletes nothing', async () => {
+    asOwner();
+    prisma.document.findFirst.mockResolvedValue(null);
+
+    await expect(service.remove('doc-1')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(storage.delete).not.toHaveBeenCalled();
+    expect(prisma.document.delete).not.toHaveBeenCalled();
+  });
+
+  it('does not remove the row when storage deletion fails (keeps the delete retryable)', async () => {
+    asOwner();
+    prisma.document.findFirst.mockResolvedValue(scopedRow('user-1'));
+    storage.delete.mockRejectedValue(new Error('storage down'));
+
+    await expect(service.remove('doc-1')).rejects.toThrow('storage down');
+    expect(prisma.document.delete).not.toHaveBeenCalled();
   });
 });

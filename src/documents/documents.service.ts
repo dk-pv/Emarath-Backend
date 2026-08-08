@@ -237,6 +237,34 @@ export class DocumentsService {
     }
   }
 
+  /**
+   * Permanently deletes a document — the row and its stored file (DOC-05.1).
+   *
+   * Authorized exactly like {@link update}: read through the caller's scope (an
+   * unseen, foreign or already-deleted id is a 404), then gated to the owner or a
+   * SUPERADMIN (a view grant gets a 403). The stored object is removed first, then
+   * the row (its `DocumentAccess` grants cascade at the database). Storage-first is
+   * deliberate: `StorageService.delete` is idempotent, so a failure after the row
+   * is gone would strand the object forever (the key lives on the row); doing
+   * storage first keeps the whole delete retryable until the bytes are actually
+   * removed (AC3). This is a hard delete per the backlog (AC3/AC4), not the
+   * `deletedAt` soft-delete convention.
+   */
+  async remove(id: string): Promise<{ id: string }> {
+    const user = await this.currentUser.resolve();
+
+    const existing = await this.prisma.document.findFirst({
+      where: { AND: [documentScopeWhere(user), { id }] },
+      select: { id: true, uploaderId: true, storageKey: true },
+    });
+    if (!existing) throw new NotFoundException(DOCUMENT_OUT_OF_SCOPE);
+    this.assertCanEdit(user, existing.uploaderId);
+
+    await this.storage.delete(existing.storageKey);
+    await this.prisma.document.delete({ where: { id } });
+    return { id };
+  }
+
   /** Only the uploader (owner) or a SUPERADMIN may edit; a view grant is not enough. */
   private assertCanEdit(user: CurrentUser, uploaderId: string): void {
     if (user.role === UserRole.SUPERADMIN || uploaderId === user.id) return;
