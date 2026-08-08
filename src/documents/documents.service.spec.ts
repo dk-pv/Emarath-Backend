@@ -57,6 +57,7 @@ describe('DocumentsService', () => {
       findFirst: jest.Mock;
       update: jest.Mock;
       delete: jest.Mock;
+      deleteMany: jest.Mock;
     };
     $transaction: jest.Mock;
   };
@@ -78,6 +79,7 @@ describe('DocumentsService', () => {
           .mockResolvedValue({ id: 'doc-1', uploaderId: 'user-1' }),
         update: jest.fn().mockResolvedValue(storedRow),
         delete: jest.fn().mockResolvedValue(undefined),
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
       // The service composes [findMany, count] and awaits them together; the mock
       // resolves the tuple so the two ops need no real client.
@@ -534,5 +536,102 @@ describe('DocumentsService', () => {
 
     await expect(service.remove('doc-1')).rejects.toThrow('storage down');
     expect(prisma.document.delete).not.toHaveBeenCalled();
+  });
+
+  // --- DOC-08.1 bulk delete (per-item, deletable = owner/SUPERADMIN) ---
+
+  const bulkFindArg = (): { where: { AND: Record<string, unknown>[] } } =>
+    (prisma.document.findMany.mock.calls as unknown[][])[0][0] as {
+      where: { AND: Record<string, unknown>[] };
+    };
+  const deleteManyArg = (): { where: { id: { in: string[] } } } =>
+    (prisma.document.deleteMany.mock.calls as unknown[][])[0][0] as {
+      where: { id: { in: string[] } };
+    };
+
+  it('bulk-deletes only the deletable ids: storage first, then one deleteMany', async () => {
+    asOwner();
+    prisma.document.findMany.mockResolvedValue([
+      { id: 'a', storageKey: 'documents/a/x.png' },
+      { id: 'b', storageKey: 'documents/b/y.pdf' },
+    ]);
+
+    const result = await service.bulkDelete({ ids: ['a', 'b'] });
+
+    // Deletable predicate for a non-admin is owner-only (a view grant is not enough).
+    expect(bulkFindArg().where.AND[0]).toEqual({
+      deletedAt: null,
+      uploaderId: 'user-1',
+    });
+    expect(bulkFindArg().where.AND[1]).toEqual({ id: { in: ['a', 'b'] } });
+    expect(storage.delete).toHaveBeenCalledWith('documents/a/x.png');
+    expect(storage.delete).toHaveBeenCalledWith('documents/b/y.pdf');
+    expect(deleteManyArg().where).toEqual({ id: { in: ['a', 'b'] } });
+    expect(result.summary).toEqual({ total: 2, success: 2, failed: 0 });
+    expect(result.results.every((r) => r.status === 'success')).toBe(true);
+  });
+
+  it('reports ids the caller may not delete as failed and never touches them', async () => {
+    asOwner();
+    // Only 'a' comes back from the scoped query; 'foreign' is not deletable by user-1.
+    prisma.document.findMany.mockResolvedValue([
+      { id: 'a', storageKey: 'documents/a/x.png' },
+    ]);
+
+    const result = await service.bulkDelete({ ids: ['a', 'foreign'] });
+
+    expect(storage.delete).toHaveBeenCalledTimes(1);
+    expect(storage.delete).toHaveBeenCalledWith('documents/a/x.png');
+    expect(deleteManyArg().where).toEqual({ id: { in: ['a'] } });
+    expect(result.summary).toEqual({ total: 2, success: 1, failed: 1 });
+    expect(result.results).toEqual([
+      { id: 'a', status: 'success' },
+      {
+        id: 'foreign',
+        status: 'failed',
+        reason: 'Document not found or not permitted to delete.',
+      },
+    ]);
+  });
+
+  it('de-duplicates the requested ids before acting', async () => {
+    asOwner();
+    prisma.document.findMany.mockResolvedValue([
+      { id: 'a', storageKey: 'documents/a/x.png' },
+    ]);
+
+    const result = await service.bulkDelete({ ids: ['a', 'a', 'a'] });
+    expect(bulkFindArg().where.AND[1]).toEqual({ id: { in: ['a'] } });
+    expect(result.summary.total).toBe(1);
+  });
+
+  it('deletes nothing when no requested id is deletable (all failed)', async () => {
+    asOwner();
+    prisma.document.findMany.mockResolvedValue([]);
+
+    const result = await service.bulkDelete({ ids: ['x', 'y'] });
+    expect(storage.delete).not.toHaveBeenCalled();
+    expect(prisma.document.deleteMany).not.toHaveBeenCalled();
+    expect(result.summary).toEqual({ total: 2, success: 0, failed: 2 });
+  });
+
+  it('lets a SUPERADMIN bulk-delete any document (deletable = not-deleted, any owner)', async () => {
+    currentUser.resolve.mockResolvedValue({ id: 'admin', role: 'SUPERADMIN' });
+    prisma.document.findMany.mockResolvedValue([
+      { id: 'a', storageKey: 'documents/a/x.png' },
+    ]);
+
+    await service.bulkDelete({ ids: ['a'] });
+    expect(bulkFindArg().where.AND[0]).toEqual({ deletedAt: null });
+  });
+
+  it('never returns storageKey in the bulk response', async () => {
+    asOwner();
+    prisma.document.findMany.mockResolvedValue([
+      { id: 'a', storageKey: 'documents/a/secret.png' },
+    ]);
+    const result = await service.bulkDelete({ ids: ['a'] });
+    expect(JSON.stringify(result)).not.toContain('storageKey');
+    expect(JSON.stringify(result)).not.toContain('documents/a/secret.png');
   });
 });

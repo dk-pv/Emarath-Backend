@@ -8,9 +8,14 @@ import { Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
-import { documentScopeWhere } from './document-scope';
+import { documentScopeWhere, documentDeletableWhere } from './document-scope';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
+import {
+  BulkDeleteDocumentsDto,
+  BulkActionResponse,
+  documentBulkResponse,
+} from './dto/bulk-delete-documents.dto';
 import {
   ListDocumentsQueryDto,
   type DocumentSortColumn,
@@ -320,6 +325,38 @@ export class DocumentsService {
     await this.storage.delete(existing.storageKey);
     await this.prisma.document.delete({ where: { id } });
     return { id };
+  }
+
+  /**
+   * Permanently deletes the caller's selected documents — rows and stored files (DOC-08.1).
+   *
+   * The browser's id set is never trusted: the actionable subset is the requested ids that
+   * are both deletable by the caller (owner or SUPERADMIN, via {@link documentDeletableWhere})
+   * and present — computed in one scoped query. Every id outside that set (a view-only grant,
+   * another user's document, an arbitrary or already-deleted id) is reported `failed` and left
+   * untouched, never deleted (AC4). The actionable objects are removed from storage first
+   * (idempotent, so a failure leaves the delete retryable), then their rows go in one
+   * `deleteMany` (DocumentAccess cascades). Hard delete, matching the single delete (DOC-05.1).
+   */
+  async bulkDelete(dto: BulkDeleteDocumentsDto): Promise<BulkActionResponse> {
+    const user = await this.currentUser.resolve();
+    const ids = [...new Set(dto.ids)];
+
+    const actionable = await this.prisma.document.findMany({
+      where: { AND: [documentDeletableWhere(user), { id: { in: ids } }] },
+      select: { id: true, storageKey: true },
+    });
+
+    await Promise.all(
+      actionable.map((row) => this.storage.delete(row.storageKey)),
+    );
+    if (actionable.length > 0) {
+      await this.prisma.document.deleteMany({
+        where: { id: { in: actionable.map((row) => row.id) } },
+      });
+    }
+
+    return documentBulkResponse(ids, new Set(actionable.map((row) => row.id)));
   }
 
   /** Only the uploader (owner) or a SUPERADMIN may edit; a view grant is not enough. */

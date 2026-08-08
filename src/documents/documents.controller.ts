@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -20,6 +21,10 @@ import {
   DocumentListResponse,
   DocumentResponse,
 } from './dto/document-response.dto';
+import {
+  BulkActionResponse,
+  BulkDeleteDocumentsDto,
+} from './dto/bulk-delete-documents.dto';
 
 /** Thin by design: validation is the DTO's job, storage and scoping the service's. */
 @Controller('documents')
@@ -51,6 +56,17 @@ export class DocumentsController {
   @Delete(':id')
   remove(@Param('id', ParseUUIDPipe) id: string): Promise<{ id: string }> {
     return this.documents.remove(id);
+  }
+
+  /**
+   * POST /api/documents/bulk/delete — permanently remove the selected documents (DOC-08.1).
+   * POST (not DELETE) because it carries a body and returns a per-item result; 200, as it
+   * acts on existing documents rather than creating one.
+   */
+  @Post('bulk/delete')
+  @HttpCode(200)
+  bulkDelete(@Body() dto: BulkDeleteDocumentsDto): Promise<BulkActionResponse> {
+    return this.documents.bulkDelete(dto);
   }
 
   /**
