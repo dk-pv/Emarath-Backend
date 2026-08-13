@@ -7,12 +7,15 @@ import { LeadsByStatusController } from './leads-by-status.controller';
 import { LeadsByStatusReportService } from './leads-by-status.service';
 import { LeadsBySourceController } from './leads-by-source.controller';
 import { LeadsBySourceReportService } from './leads-by-source.service';
+import { LeadsByOwnershipController } from './leads-by-ownership.controller';
+import { LeadsByOwnershipReportService } from './leads-by-ownership.service';
 
 /**
  * The Reports feature (RPT-02.1: No Activity Leads; RPT-02.2: Today Leads; RPT-02.3: Leads By
- * Status; RPT-02.4: Leads By Source). PrismaService and CurrentUserService are global, and the
- * reports reuse the leads module's `buildLeadWhere` for scope/source/agent/period directly, so
- * no module imports are needed. Later report tasks (RPT-02.5+) add their services here.
+ * Status; RPT-02.4: Leads By Source; RPT-02.5: Leads By Ownership). PrismaService and
+ * CurrentUserService are global, and the reports reuse the leads module's `buildLeadWhere` for
+ * scope/source/agent/period directly, so no module imports are needed. Later report tasks
+ * (RPT-02.6+) add their services here.
  */
 @Module({
   controllers: [
@@ -20,12 +23,14 @@ import { LeadsBySourceReportService } from './leads-by-source.service';
     TodayLeadsController,
     LeadsByStatusController,
     LeadsBySourceController,
+    LeadsByOwnershipController,
   ],
   providers: [
     NoActivityReportService,
     TodayLeadsReportService,
     LeadsByStatusReportService,
     LeadsBySourceReportService,
+    LeadsByOwnershipReportService,
   ],
 })
 export class ReportsModule {}
