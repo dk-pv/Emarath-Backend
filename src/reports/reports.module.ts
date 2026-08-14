@@ -13,13 +13,16 @@ import { ConvertedLeadsController } from './converted-leads.controller';
 import { ConvertedLeadsReportService } from './converted-leads.service';
 import { LostLeadsController } from './lost-leads.controller';
 import { LostLeadsReportService } from './lost-leads.service';
+import { OverdueFollowUpsController } from './overdue-follow-ups.controller';
+import { OverdueFollowUpsReportService } from './overdue-follow-ups.service';
 
 /**
  * The Reports feature (RPT-02.1: No Activity Leads; RPT-02.2: Today Leads; RPT-02.3: Leads By
  * Status; RPT-02.4: Leads By Source; RPT-02.5: Leads By Ownership; RPT-02.6: Converted Leads;
- * RPT-02.7: Lost Leads). PrismaService and CurrentUserService are global, and the reports reuse
- * the leads module's `buildLeadWhere` for scope/source/agent/period directly, so no module imports
- * are needed. Later report tasks add their services here.
+ * RPT-02.7: Lost Leads; RPT-03.2: Overdue Follow Ups). PrismaService and CurrentUserService are
+ * global; the leads reports reuse the leads module's `buildLeadWhere` and the follow-up reports
+ * reuse the activities module's scope/bucket helpers directly (pure functions), so no module
+ * imports are needed. Later report tasks add their services here.
  */
 @Module({
   controllers: [
@@ -30,6 +33,7 @@ import { LostLeadsReportService } from './lost-leads.service';
     LeadsByOwnershipController,
     ConvertedLeadsController,
     LostLeadsController,
+    OverdueFollowUpsController,
   ],
   providers: [
     NoActivityReportService,
@@ -39,6 +43,7 @@ import { LostLeadsReportService } from './lost-leads.service';
     LeadsByOwnershipReportService,
     ConvertedLeadsReportService,
     LostLeadsReportService,
+    OverdueFollowUpsReportService,
   ],
 })
 export class ReportsModule {}
