@@ -14,6 +14,8 @@ import { LeadListItem } from '../dto/lead-response.dto';
 import {
   ReassignLeadDto,
   RowDeleteResponse,
+  SendLeadEmailDto,
+  SendLeadEmailResponse,
   SetLeadStatusDto,
 } from './dto/row-actions.dto';
 
@@ -24,8 +26,8 @@ import {
  * pure read/create surface; the `:id` param is UUID-guarded at the edge, so a
  * malformed id is a 400 before any query runs. Duplicate is a POST that creates a
  * resource (201); reassign, status and delete act on an existing lead (200).
- * There are deliberately no WhatsApp/email routes — those are client deep-links
- * (LEAD-10.2), not a server action.
+ * WhatsApp stays a client wa.me deep-link (LEAD-10.2); Email is a real server send
+ * (`:id/email`, ADR-0032) through the configured MailerService.
  */
 @Controller('leads')
 export class LeadRowActionsController {
@@ -59,6 +61,20 @@ export class LeadRowActionsController {
     @Body() dto: SetLeadStatusDto,
   ): Promise<LeadListItem> {
     return this.service.setStatus(id, dto);
+  }
+
+  /**
+   * POST /api/leads/:id/email — send an email from this lead's row (LEAD-10.2,
+   * ADR-0032). Scoped to a lead the caller can see; the DTO validates recipients.
+   * The From is the server's verified sender, never client-supplied.
+   */
+  @Post(':id/email')
+  @HttpCode(200)
+  sendEmail(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SendLeadEmailDto,
+  ): Promise<SendLeadEmailResponse> {
+    return this.service.sendEmail(id, dto);
   }
 
   /** DELETE /api/leads/:id — permanently remove this lead (AC5). */

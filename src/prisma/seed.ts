@@ -51,6 +51,25 @@ const STAGES: ReadonlyArray<{ name: string; color: string }> = [
 ];
 
 /**
+ * The Add Lead "Tags" options (LEAD-12.1). Tags are database-backed — the dropdown reads the
+ * `Tag` table live — so the reference set is seeded here rather than in config. Verified against
+ * the live Workpex Tags list; the dropdown sorts by name, which matches this (alphabetical) order.
+ */
+const TAGS: readonly string[] = [
+  'BDE RISK',
+  'BDM APPROVED',
+  'CALL 1',
+  'CALL 2',
+  'CALL 3',
+  'CALL 4',
+  'DISPATCHED',
+  'DUPLICATE',
+  'NOT APPROVED',
+  'QC 2 VERIFIED',
+  'QC VERIFIED',
+];
+
+/**
  * One development login per role, so role scoping (LEAD-02.1 AC3) has something to
  * scope against and every backlog role is reachable from the login screen (AUTH-01.1
  * AC2). Names are placeholders for real staff records.
@@ -195,6 +214,17 @@ async function main(): Promise<void> {
       });
     }
     console.log(`[seed] ${STAGES.length} stages upserted.`);
+
+    // Upsert by unique name → idempotent: re-running never duplicates a tag or deletes one a
+    // lead already references (LeadTag FKs stay intact).
+    for (const name of TAGS) {
+      await prisma.tag.upsert({
+        where: { name },
+        update: {},
+        create: { name },
+      });
+    }
+    console.log(`[seed] ${TAGS.length} tags upserted.`);
   } finally {
     await prisma.$disconnect();
   }

@@ -1,6 +1,10 @@
-import { NotFoundException } from '@nestjs/common';
+import {
+  InternalServerErrorException,
+  NotFoundException,
+} from '@nestjs/common';
 import { UserRole } from '../../generated/prisma/client';
 import { CurrentUserService } from '../../auth/current-user';
+import { MailerService } from '../../auth/mailer.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { LeadsBulkService } from '../bulk/leads-bulk.service';
 import { BulkActionResponse } from '../bulk/dto/bulk-actions.dto';
@@ -17,6 +21,7 @@ function listRow(overrides: Record<string, unknown> = {}) {
     firstName: null,
     primaryPhone: '900',
     secondaryPhone: null,
+    email: null,
     language: null,
     country: null,
     source: null,
@@ -62,7 +67,10 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     delete: bulkDelete,
   } as unknown as LeadsBulkService;
 
-  const service = new LeadRowActionsService(prisma, currentUser, bulk);
+  const sendMail = jest.fn().mockResolvedValue(undefined);
+  const mailer = { sendMail } as unknown as MailerService;
+
+  const service = new LeadRowActionsService(prisma, currentUser, bulk, mailer);
   return {
     service,
     leadFindFirst,
@@ -71,6 +79,7 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     leadUpdate,
     bulkReassign,
     bulkDelete,
+    sendMail,
   };
 }
 
@@ -202,6 +211,51 @@ describe('LeadRowActionsService.reassign', () => {
       service.reassign(LEAD_ID, { agentId: AGENT_ID }),
     ).rejects.toBeInstanceOf(NotFoundException);
     expect(leadFindUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe('LeadRowActionsService.sendEmail', () => {
+  const payload = {
+    to: ['someone@example.com'],
+    cc: ['cc@example.com'],
+    subject: 'Hi',
+    message: 'Body',
+  };
+
+  it('sends via the mailer for an in-scope lead and reports sent', async () => {
+    const { service, leadFindFirst, sendMail } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+
+    const res = await service.sendEmail(LEAD_ID, payload);
+
+    expect(res).toEqual({ sent: true });
+    expect(sendMail).toHaveBeenCalledWith({
+      to: payload.to,
+      cc: payload.cc,
+      bcc: undefined,
+      subject: 'Hi',
+      text: 'Body',
+    });
+  });
+
+  it('404s (and never sends) for an out-of-scope lead', async () => {
+    const { service, leadFindFirst, sendMail } = makeService();
+    leadFindFirst.mockResolvedValue(null);
+
+    await expect(service.sendEmail(LEAD_ID, payload)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a provider failure as a 500 so the composer can retry', async () => {
+    const { service, leadFindFirst, sendMail } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    sendMail.mockRejectedValue(new Error('provider down'));
+
+    await expect(service.sendEmail(LEAD_ID, payload)).rejects.toBeInstanceOf(
+      InternalServerErrorException,
+    );
   });
 });
 

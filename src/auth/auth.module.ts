@@ -78,6 +78,8 @@ import type { MailConfig } from '../config/mail.config';
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
   ],
-  exports: [CurrentUserService],
+  // MailerService is exported (AuthModule is @Global) so outreach features reuse the one
+  // configured transport — the Lead Email composer (ADR-0032) injects it, no second mailer.
+  exports: [CurrentUserService, MailerService],
 })
 export class AuthModule {}

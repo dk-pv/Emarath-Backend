@@ -11,14 +11,28 @@ export interface PasswordResetEmail {
 }
 
 /**
- * Outbound mail port (AUTH-03.1, ADR-0031). An abstract class so it can be a Nest
- * injection token: AuthService depends on this type and the module binds the environment's
- * adapter (log in development, Resend in staging/production). Deliberately narrow — the
- * only message the backlog needs is the password-reset link; a general `sendMail` would be
- * speculative surface.
+ * A free-form outbound email (ADR-0032) — the Lead Email composer's payload. `from`
+ * is NOT here: it is always the transport's configured, provider-verified sender
+ * (`MAIL_FROM`), never caller-supplied, so a client cannot spoof the From header.
+ */
+export interface OutboundEmail {
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  text: string;
+}
+
+/**
+ * Outbound mail port (AUTH-03.1 / ADR-0032). An abstract class so it can be a Nest
+ * injection token: callers depend on this type and the module binds the environment's
+ * adapter (log in development, Resend in staging/production). `sendPasswordReset` is the
+ * auth link; `sendMail` is the general composer send the Lead Email action (ADR-0032)
+ * reuses rather than standing up a second transport.
  */
 export abstract class MailerService {
   abstract sendPasswordReset(email: PasswordResetEmail): Promise<void>;
+  abstract sendMail(email: OutboundEmail): Promise<void>;
 }
 
 /**
@@ -33,6 +47,18 @@ export class LogMailerService extends MailerService {
 
   sendPasswordReset(email: PasswordResetEmail): Promise<void> {
     this.logger.log(`Password reset link for ${email.to}: ${email.resetUrl}`);
+    return Promise.resolve();
+  }
+
+  sendMail(email: OutboundEmail): Promise<void> {
+    // Dev/test: log instead of sending, so the composer is fully testable with no
+    // network, credentials or verified domain. The body is user-typed, not a secret.
+    this.logger.log(
+      `Email to ${email.to.join(', ')}` +
+        (email.cc?.length ? ` cc ${email.cc.join(', ')}` : '') +
+        (email.bcc?.length ? ` bcc ${email.bcc.join(', ')}` : '') +
+        ` — subject "${email.subject}"`,
+    );
     return Promise.resolve();
   }
 }
@@ -73,6 +99,23 @@ export class ResendMailerService extends MailerService {
       // an account exists (AC2).
       this.logger.error(`Resend send failed: ${error.message}`);
       throw new Error('Failed to send password reset email.');
+    }
+  }
+
+  async sendMail(email: OutboundEmail): Promise<void> {
+    // `from` is the verified `MAIL_FROM`, never caller-supplied — Resend rejects an
+    // unverified sender, so a spoofed From cannot go out (and cannot be `yopmail`/`gmail`).
+    const { error } = await this.resend.emails.send({
+      from: this.from,
+      to: email.to,
+      cc: email.cc?.length ? email.cc : undefined,
+      bcc: email.bcc?.length ? email.bcc : undefined,
+      subject: email.subject,
+      text: email.text,
+    });
+    if (error) {
+      this.logger.error(`Resend send failed: ${error.message}`);
+      throw new Error('Failed to send the email.');
     }
   }
 }

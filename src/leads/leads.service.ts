@@ -35,16 +35,26 @@ export class LeadsService {
 
   async list(query: ListLeadsQueryDto): Promise<LeadListResponse> {
     const user = await this.currentUser.resolve();
+    const where = this.buildWhere(user, query);
 
-    const { rows, total } = await this.repository.findPage({
-      where: this.buildWhere(user, query),
+    // The caller's pins within this exact view drive the pinned-first order
+    // (ADR-0031). Resolved per-request from the current user, never the client.
+    const pinnedIds = await this.repository.pinnedLeadIds(user.id, where);
+
+    const { pinnedRows, unpinnedRows, total } = await this.repository.findPage({
+      where,
       sort: query.sort,
       direction: query.direction,
       skip: (query.page - 1) * query.size,
       take: query.size,
+      pinnedIds,
     });
 
-    return { rows: rows.map(toLeadListItem), total };
+    const rows = [
+      ...pinnedRows.map((row) => toLeadListItem(row, true)),
+      ...unpinnedRows.map((row) => toLeadListItem(row, false)),
+    ];
+    return { rows, total };
   }
 
   /**
@@ -64,6 +74,31 @@ export class LeadsService {
       );
     }
     return toLeadListItem(lead);
+  }
+
+  /**
+   * Pins or unpins a lead for the current caller (ADR-0031, LEAD-10.2).
+   *
+   * Personal, not shared: it only reorders the caller's own list, so the pin is
+   * keyed by the server-resolved user — a client cannot pin as someone else.
+   * Scoped like every single-lead op: an out-of-scope, unknown or soft-deleted
+   * id is a 404, never a cross-scope write. Idempotent — pinning an already
+   * pinned lead (or unpinning an unpinned one) is a no-op — and returns the lead
+   * in its resulting state so the row can reflect it.
+   */
+  async setPinned(id: string, pinned: boolean): Promise<LeadListItem> {
+    const user = await this.currentUser.resolve();
+    const lead = await this.repository.findById({
+      AND: [leadScopeWhere(user), { id }],
+    });
+    if (!lead) {
+      throw new NotFoundException(
+        'That lead does not exist or is not in your scope.',
+      );
+    }
+    if (pinned) await this.repository.pin(user.id, id);
+    else await this.repository.unpin(user.id, id);
+    return toLeadListItem(lead, pinned);
   }
 
   /**
@@ -129,26 +164,27 @@ export class LeadsService {
       firstName: dto.firstName ?? null,
       primaryPhone: dto.primaryPhone,
       secondaryPhone: dto.secondaryPhone ?? null,
-      language: dto.language,
-      country: dto.country,
+      email: dto.email ?? null,
+      language: dto.language ?? null,
+      country: dto.country ?? null,
       source: dto.source ?? null,
       status: dto.status || 'New',
       pipeline: dto.pipeline || 'Lead Pipeline',
-      product: dto.product,
+      product: dto.product ?? null,
       productQty: dto.productQty ?? null,
       product2: dto.product2 ?? null,
       product2Qty: dto.product2Qty ?? null,
       bookingDate: dto.bookingDate ? new Date(dto.bookingDate) : null,
       category: dto.category || 'Default',
-      actualAmount: dto.actualAmount,
+      actualAmount: dto.actualAmount ?? null,
       forecastedAmount: dto.forecastedAmount ?? null,
-      paymentMethod: dto.paymentMethod,
+      paymentMethod: dto.paymentMethod ?? null,
       state: dto.state ?? null,
       street: dto.street ?? null,
       city: dto.city ?? null,
       nationalCode: dto.nationalCode ?? null,
-      callStatus: dto.callStatus,
-      callAttempts: dto.callAttempts,
+      callStatus: dto.callStatus ?? null,
+      callAttempts: dto.callAttempts ?? 0,
       whatsappAttempts: dto.msgAttempts ?? 0,
       assignments: assigneeIds.size
         ? {

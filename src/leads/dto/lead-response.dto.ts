@@ -13,6 +13,7 @@ export interface LeadListItem {
   firstName: string | null;
   primaryPhone: string;
   secondaryPhone: string | null;
+  email: string | null;
   language: string | null;
   country: string | null;
   source: string | null;
@@ -28,6 +29,14 @@ export interface LeadListItem {
   createdAt: string;
   assignedAgents: { id: string; name: string }[];
   tags: { id: string; name: string }[];
+  /**
+   * Whether the CURRENT caller has pinned this lead (ADR-0031) — personal, not
+   * shared. Not a column on the lead: it is derived per-request from `lead_pins`,
+   * so it is passed in rather than read off `row`. Defaults false, so the many
+   * mappers that never surface a pin (Kanban card, Activities' nested lead, the
+   * status/tag/reassign responses) need no change.
+   */
+  isPinned: boolean;
 }
 
 /** Page plus total (CLAUDE.md §8) — mirrors the frontend's `ListResult`. */
@@ -47,6 +56,7 @@ export const LEAD_LIST_SELECT = {
   firstName: true,
   primaryPhone: true,
   secondaryPhone: true,
+  email: true,
   language: true,
   country: true,
   source: true,
@@ -75,13 +85,14 @@ function toDateOnly(value: Date | null): string | null {
   return value ? value.toISOString().slice(0, 10) : null;
 }
 
-export function toLeadListItem(row: LeadRow): LeadListItem {
+export function toLeadListItem(row: LeadRow, isPinned = false): LeadListItem {
   return {
     id: row.id,
     name: row.name,
     firstName: row.firstName,
     primaryPhone: row.primaryPhone,
     secondaryPhone: row.secondaryPhone,
+    email: row.email,
     language: row.language,
     country: row.country,
     source: row.source,
@@ -97,5 +108,6 @@ export function toLeadListItem(row: LeadRow): LeadListItem {
     createdAt: row.createdAt.toISOString(),
     assignedAgents: row.assignments.map((a) => a.user),
     tags: row.tags.map((t) => t.tag),
+    isPinned,
   };
 }

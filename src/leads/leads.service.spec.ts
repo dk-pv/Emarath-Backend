@@ -48,14 +48,21 @@ function makeService(
 ) {
   const create = jest.fn().mockResolvedValue(FAKE_ROW);
   const findById = jest.fn();
-  const repository = { create, findById } as unknown as LeadsRepository;
+  const pin = jest.fn().mockResolvedValue(undefined);
+  const unpin = jest.fn().mockResolvedValue(undefined);
+  const repository = {
+    create,
+    findById,
+    pin,
+    unpin,
+  } as unknown as LeadsRepository;
   const currentUser = {
     resolve: jest.fn().mockResolvedValue({ id: userId, role, team }),
   } as unknown as CurrentUserService;
   const service = new LeadsService(repository, currentUser);
   const dataOf = (call = 0): Prisma.LeadCreateInput =>
     (create.mock.calls[call] as [Prisma.LeadCreateInput])[0];
-  return { service, create, findById, dataOf };
+  return { service, create, findById, pin, unpin, dataOf };
 }
 
 describe('LeadsService.create', () => {
@@ -106,6 +113,27 @@ describe('LeadsService.create', () => {
     expect(dataOf(0).whatsappAttempts).toBe(0);
     await service.create({ ...BASE_DTO, msgAttempts: 3 });
     expect(dataOf(1).whatsappAttempts).toBe(3);
+  });
+
+  // Verified Workpex behaviour: only Name and Primary Phone are truly required (Status/Pipeline
+  // default). The rest are optional and must persist as null (callAttempts as 0), never rejected.
+  it('creates from the minimal required fields, nulling the optional ones', async () => {
+    const { service, dataOf } = makeService();
+    await service.create({
+      name: 'Ahmed',
+      primaryPhone: '971500000000',
+    });
+    const data = dataOf();
+    expect(data.product).toBeNull();
+    expect(data.language).toBeNull();
+    expect(data.country).toBeNull();
+    expect(data.callStatus).toBeNull();
+    expect(data.actualAmount).toBeNull();
+    expect(data.paymentMethod).toBeNull();
+    expect(data.callAttempts).toBe(0);
+    expect(data.status).toBe('New');
+    expect(data.pipeline).toBe('Lead Pipeline');
+    expect(data.category).toBe('Default');
   });
 });
 
@@ -178,5 +206,63 @@ describe('LeadsService.findById', () => {
     await expect(service.findById('other-team-lead')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+});
+
+// ADR-0031: per-user pin. Personal (keyed by the server-resolved user), scoped
+// like every single-lead op, and idempotent.
+describe('LeadsService.setPinned', () => {
+  it('pins for the resolved caller and returns the lead pinned', async () => {
+    const { service, findById, pin, unpin } = makeService(
+      UserRole.SALES_AGENT,
+      'agent-1',
+    );
+    findById.mockResolvedValue(FAKE_ROW);
+
+    const lead = await service.setPinned('lead-1', true);
+
+    expect(pin).toHaveBeenCalledWith('agent-1', 'lead-1');
+    expect(unpin).not.toHaveBeenCalled();
+    expect(lead.isPinned).toBe(true);
+  });
+
+  it('unpins for the resolved caller and returns the lead unpinned', async () => {
+    const { service, findById, pin, unpin } = makeService(
+      UserRole.SALES_AGENT,
+      'agent-1',
+    );
+    findById.mockResolvedValue(FAKE_ROW);
+
+    const lead = await service.setPinned('lead-1', false);
+
+    expect(unpin).toHaveBeenCalledWith('agent-1', 'lead-1');
+    expect(pin).not.toHaveBeenCalled();
+    expect(lead.isPinned).toBe(false);
+  });
+
+  it('scopes the lookup by role AND id before writing a pin', async () => {
+    const { service, findById } = makeService(UserRole.SALES_AGENT, 'agent-1');
+    findById.mockResolvedValue(FAKE_ROW);
+
+    await service.setPinned('lead-1', true);
+
+    const where = (findById.mock.calls as unknown[][])[0][0] as {
+      AND: [{ assignments: unknown }, { id: string }];
+    };
+    expect(where.AND[0]).toMatchObject({
+      assignments: { some: { userId: 'agent-1' } },
+    });
+    expect(where.AND[1]).toEqual({ id: 'lead-1' });
+  });
+
+  it('404s (and never writes) when the lead is out of scope or missing', async () => {
+    const { service, findById, pin, unpin } = makeService();
+    findById.mockResolvedValue(null);
+
+    await expect(service.setPinned('nope', true)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(pin).not.toHaveBeenCalled();
+    expect(unpin).not.toHaveBeenCalled();
   });
 });

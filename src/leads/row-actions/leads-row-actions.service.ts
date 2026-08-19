@@ -1,6 +1,11 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  InternalServerErrorException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma } from '../../generated/prisma/client';
 import { CurrentUserService } from '../../auth/current-user';
+import { MailerService } from '../../auth/mailer.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { leadScopeWhere } from '../lead-scope';
 import {
@@ -13,6 +18,8 @@ import { OUT_OF_SCOPE_REASON } from '../bulk/dto/bulk-actions.dto';
 import {
   ReassignLeadDto,
   RowDeleteResponse,
+  SendLeadEmailDto,
+  SendLeadEmailResponse,
   SetLeadStatusDto,
 } from './dto/row-actions.dto';
 
@@ -27,6 +34,7 @@ const LEAD_COPY_SELECT = {
   firstName: true,
   primaryPhone: true,
   secondaryPhone: true,
+  email: true,
   language: true,
   country: true,
   source: true,
@@ -61,9 +69,9 @@ const LEAD_COPY_SELECT = {
  * see; anything else is a 404, never a cross-scope mutation. Reassign and delete
  * delegate to `LeadsBulkService` with a single id rather than re-implementing the
  * scoped, transactional logic (no duplication — the bulk path is the one place
- * those two effects live). WhatsApp and email are absent by decision: they are
- * client-side deep-links (wa.me / mailto) resolved in LEAD-10.2, and real
- * sending belongs to the Integrations module, so there is no server action here.
+ * those two effects live). WhatsApp stays a client-side wa.me deep-link (LEAD-10.2);
+ * Email is a real server send (`sendEmail`, ADR-0032) reusing the configured
+ * MailerService transport rather than a mailto.
  */
 @Injectable()
 export class LeadRowActionsService {
@@ -71,6 +79,7 @@ export class LeadRowActionsService {
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
     private readonly bulk: LeadsBulkService,
+    private readonly mailer: MailerService,
   ) {}
 
   /**
@@ -150,6 +159,44 @@ export class LeadRowActionsService {
       select: LEAD_LIST_SELECT,
     });
     return toLeadListItem(updated);
+  }
+
+  /**
+   * Sends an email from a lead's row (LEAD-10.2, ADR-0032). Scoped like every row
+   * action: the lead is loaded through the caller's scope first, so a lead they
+   * cannot see is a 404 and never a channel to send through. Recipients, subject
+   * and body are the caller's; the From is the transport's verified sender, never
+   * client-supplied. A provider failure surfaces as a 500 so the composer keeps the
+   * drawer open for a retry rather than silently dropping the send.
+   */
+  async sendEmail(
+    id: string,
+    dto: SendLeadEmailDto,
+  ): Promise<SendLeadEmailResponse> {
+    const user = await this.currentUser.resolve();
+
+    const lead = await this.prisma.lead.findFirst({
+      where: { AND: [leadScopeWhere(user), { id }] },
+      select: { id: true },
+    });
+    if (!lead) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+
+    try {
+      await this.mailer.sendMail({
+        to: dto.to,
+        cc: dto.cc,
+        bcc: dto.bcc,
+        subject: dto.subject ?? '',
+        text: dto.message ?? '',
+      });
+    } catch {
+      // The transport already logged the provider's reason; surface a clean failure
+      // so the composer shows an error and offers a retry without leaking internals.
+      throw new InternalServerErrorException(
+        'The email could not be sent. Please try again.',
+      );
+    }
+    return { sent: true };
   }
 
   /**

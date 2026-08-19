@@ -64,6 +64,8 @@ model User {
   deletedAt    DateTime? @map("deleted_at")
 
   assignments         LeadAssignment[]
+  /// ADR-0031: this user's personal lead pins (their own float-to-top list).
+  leadPins            LeadPin[]
   importJobs          ImportJob[]
   viewPreferences     UserViewPreference[]
   /// ACT-01.1 (ACT-06.1): activities this user is assigned to work.
@@ -153,6 +155,10 @@ model Lead {
   firstName      String? @map("first_name") @db.VarChar(120)
   primaryPhone   String  @map("primary_phone") @db.VarChar(32)
   secondaryPhone String? @map("secondary_phone") @db.VarChar(32)
+  /// Optional contact email (ADR-0032). Nullable — most Workpex leads have none —
+  /// so it stays a create-form concern, not a NOT NULL. Backs the row Email
+  /// composer's To prefill and is the recipient a sent lead email defaults to.
+  email          String? @db.VarChar(180)
   language       String? @db.VarChar(64)
   country        String? @db.VarChar(64)
 
@@ -250,6 +256,9 @@ model Lead {
   activities  Activity[]
   /// CALL-01.1: call records linked to this lead.
   calls       Call[]
+  /// Per-user pins (ADR-0031): one row per user who has pinned this lead so it
+  /// floats to the top of their own list. Personal, never shared.
+  pins        LeadPin[]
 
   /// AC2: the fields the list and board filter and group by are indexed.
   /// Each is paired with deletedAt because every query must exclude soft-deleted
@@ -287,6 +296,28 @@ model LeadAssignment {
   /// Drives "leads assigned to me", the agent's default view of the list.
   @@index([userId])
   @@map("lead_assignments")
+}
+
+/// A per-user pin on a lead (ADR-0031). Pinning is personal — one user's pin must
+/// never reorder another user's list — so it lives on this join rather than as a
+/// flag on the lead. Unpinning hard-deletes the row: a pin is either present or
+/// absent, and re-pinning must not have to revive a tombstone, so there is no
+/// soft-delete here (the same rule RefreshToken follows).
+model LeadPin {
+  id        String   @id @default(uuid()) @db.Uuid
+  leadId    String   @map("lead_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// A user pins a lead once or not at all; the pin/unpin upsert toggles on this.
+  @@unique([leadId, userId])
+  /// Drives "my pinned leads float to the top of my list".
+  @@index([userId])
+  @@map("lead_pins")
 }
 
 /// A reusable tag (LEAD-01.3 AC1). Workpex shows them as chips on the lead row —

@@ -3,6 +3,7 @@ import {
   ArrayMaxSize,
   IsArray,
   IsDateString,
+  IsEmail,
   IsInt,
   IsNotEmpty,
   IsNumberString,
@@ -17,12 +18,15 @@ import {
 /**
  * The New Lead form's payload (LEAD-06.1).
  *
- * The form's required fields are enforced here, not in the schema: the columns
- * stay nullable because imported/real Workpex rows leave them blank, so "required"
- * is a rule about *this create form* (see the Lead model's comment). Amounts and
- * quantities arrive as numeric strings and reach Prisma unchanged, preserving the
- * Decimal precision the columns exist for. Empty optional strings are normalised
- * to undefined so a blank field is "not set", never a validation error.
+ * Required fields are enforced here, not in the schema: the columns stay nullable because
+ * imported/real Workpex rows leave them blank, so "required" is a rule about *this create form*
+ * (see the Lead model's comment). Verified against a live Workpex tenant, only **Name** and
+ * **Primary Phone** are hard-required; **Status** and **Pipeline** are effectively required but
+ * carry server defaults ("New" / "Lead Pipeline"), so an omitted value is filled, not rejected.
+ * Everything else — Product, Language, Call Status/Attempts, Country, Amounts, Payment Method — is
+ * optional. Amounts and quantities arrive as numeric strings and reach Prisma unchanged,
+ * preserving Decimal precision. Empty optional strings are normalised to undefined so a blank
+ * field is "not set", never a validation error.
  */
 const trim = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' ? value.trim() : value;
@@ -60,6 +64,13 @@ export class CreateLeadDto {
   @IsOptional()
   secondaryPhone?: string;
 
+  /** Optional; validated as an email when present (ADR-0032). */
+  @Transform(emptyToUndefined)
+  @IsEmail({}, { message: 'Email must be a valid email address' })
+  @MaxLength(180)
+  @IsOptional()
+  email?: string;
+
   @IsArray()
   @IsUUID('all', {
     each: true,
@@ -95,11 +106,11 @@ export class CreateLeadDto {
   @IsOptional()
   complaintReason?: string;
 
-  @Transform(trim)
+  @Transform(emptyToUndefined)
   @IsString()
-  @IsNotEmpty({ message: 'Product is required' })
   @MaxLength(180)
-  product!: string;
+  @IsOptional()
+  product?: string;
 
   @Transform(emptyToUndefined)
   @IsNumberString({}, { message: 'QTY must be a number' })
@@ -117,11 +128,11 @@ export class CreateLeadDto {
   @IsOptional()
   product2Qty?: string;
 
-  @Transform(trim)
+  @Transform(emptyToUndefined)
   @IsString()
-  @IsNotEmpty({ message: 'Language is required' })
   @MaxLength(64)
-  language!: string;
+  @IsOptional()
+  language?: string;
 
   @Transform(emptyToUndefined)
   @IsString()
@@ -129,17 +140,18 @@ export class CreateLeadDto {
   @IsOptional()
   source?: string;
 
-  @Transform(trim)
+  @Transform(emptyToUndefined)
   @IsString()
-  @IsNotEmpty({ message: 'Call Status is required' })
   @MaxLength(64)
-  callStatus!: string;
+  @IsOptional()
+  callStatus?: string;
 
   @Type(() => Number)
-  @IsInt({ message: 'Number of call attempts is required' })
+  @IsInt()
   @Min(0)
   @Max(MAX_ATTEMPTS)
-  callAttempts!: number;
+  @IsOptional()
+  callAttempts?: number;
 
   @Type(() => Number)
   @IsInt()
@@ -148,11 +160,11 @@ export class CreateLeadDto {
   @IsOptional()
   msgAttempts?: number;
 
-  @Transform(trim)
+  @Transform(emptyToUndefined)
   @IsString()
-  @IsNotEmpty({ message: 'Country is required' })
   @MaxLength(64)
-  country!: string;
+  @IsOptional()
+  country?: string;
 
   @Transform(emptyToUndefined)
   @IsString()
@@ -190,19 +202,19 @@ export class CreateLeadDto {
   @IsOptional()
   category?: string;
 
-  @Transform(trim)
-  @IsNotEmpty({ message: 'Actual Amount is required' })
+  @Transform(emptyToUndefined)
   @IsNumberString({}, { message: 'Actual Amount must be a number' })
-  actualAmount!: string;
+  @IsOptional()
+  actualAmount?: string;
 
   @Transform(emptyToUndefined)
   @IsNumberString({}, { message: 'Forecasted Amount must be a number' })
   @IsOptional()
   forecastedAmount?: string;
 
-  @Transform(trim)
+  @Transform(emptyToUndefined)
   @IsString()
-  @IsNotEmpty({ message: 'Payment Method is required' })
   @MaxLength(64)
-  paymentMethod!: string;
+  @IsOptional()
+  paymentMethod?: string;
 }

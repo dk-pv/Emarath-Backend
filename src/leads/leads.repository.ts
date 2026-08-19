@@ -3,6 +3,7 @@ import { Prisma, UserRole } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { LEAD_LIST_SELECT } from './dto/lead-response.dto';
 import { LeadSortColumn } from './dto/list-leads-query.dto';
+import { pinnedPageSlice } from './pinned-page';
 
 export interface FindLeadsArgs {
   where: Prisma.LeadWhereInput;
@@ -10,6 +11,12 @@ export interface FindLeadsArgs {
   direction: 'asc' | 'desc';
   skip: number;
   take: number;
+  /**
+   * The caller's pinned lead ids that match this `where` (ADR-0031). The page is
+   * ordered pinned-first: these ids form the first block, everyone else the
+   * second. Empty when nothing is pinned, which reduces to the plain list.
+   */
+  pinnedIds: string[];
 }
 
 /**
@@ -43,21 +50,79 @@ export class LeadsRepository {
     return this.prisma.lead.findFirst({ where, select: LEAD_LIST_SELECT });
   }
 
-  async findPage({ where, sort, direction, skip, take }: FindLeadsArgs) {
-    const [rows, total] = await this.prisma.$transaction([
+  async findPage({
+    where,
+    sort,
+    direction,
+    skip,
+    take,
+    pinnedIds,
+  }: FindLeadsArgs) {
+    // id breaks ties: without it, rows sharing a sort value can swap between
+    // pages and a lead is shown twice while another is never shown at all.
+    const orderBy: Prisma.LeadOrderByWithRelationInput[] = [
+      { [sort]: direction },
+      { id: 'asc' },
+    ];
+
+    // Pinned leads sort ahead of the rest (ADR-0031). Prisma cannot orderBy a
+    // per-user relation, so the page is two ordered blocks — pinned ids `in`,
+    // then `notIn` — and `pinnedPageSlice` works out each block's window. The
+    // total is the whole set, so pagination is unchanged. All in one transaction
+    // so a lead created mid-read cannot make the two pages and the count disagree.
+    const { pinnedSkip, pinnedTake, unpinnedSkip, unpinnedTake } =
+      pinnedPageSlice(skip, take, pinnedIds.length);
+
+    const [pinnedRows, unpinnedRows, total] = await this.prisma.$transaction([
       this.prisma.lead.findMany({
-        where,
+        where: { AND: [where, { id: { in: pinnedIds } }] },
         select: LEAD_LIST_SELECT,
-        // id breaks ties: without it, rows sharing a sort value can swap between
-        // pages and a lead is shown twice while another is never shown at all.
-        orderBy: [{ [sort]: direction }, { id: 'asc' }],
-        skip,
-        take,
+        orderBy,
+        skip: pinnedSkip,
+        take: pinnedTake,
+      }),
+      this.prisma.lead.findMany({
+        where: { AND: [where, { id: { notIn: pinnedIds } }] },
+        select: LEAD_LIST_SELECT,
+        orderBy,
+        skip: unpinnedSkip,
+        take: unpinnedTake,
       }),
       this.prisma.lead.count({ where }),
     ]);
 
-    return { rows, total };
+    return { pinnedRows, unpinnedRows, total };
+  }
+
+  /**
+   * The caller's pinned lead ids that fall within a scoped, filtered `where`
+   * (ADR-0031). `lead: where` reuses the exact list predicate, so a pinned lead
+   * that a search or filter excludes is not counted — the pinned block and the
+   * page stay in step. Ordering is applied by `findPage`, not here.
+   */
+  async pinnedLeadIds(
+    userId: string,
+    where: Prisma.LeadWhereInput,
+  ): Promise<string[]> {
+    const rows = await this.prisma.leadPin.findMany({
+      where: { userId, lead: where },
+      select: { leadId: true },
+    });
+    return rows.map((row) => row.leadId);
+  }
+
+  /** Pins a lead for one user (ADR-0031). Idempotent — re-pinning is a no-op. */
+  async pin(userId: string, leadId: string): Promise<void> {
+    await this.prisma.leadPin.upsert({
+      where: { leadId_userId: { leadId, userId } },
+      update: {},
+      create: { leadId, userId },
+    });
+  }
+
+  /** Unpins a lead for one user. Idempotent — unpinning what is not pinned is a no-op. */
+  async unpin(userId: string, leadId: string): Promise<void> {
+    await this.prisma.leadPin.deleteMany({ where: { userId, leadId } });
   }
 
   /**

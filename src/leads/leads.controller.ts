@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
@@ -44,6 +45,23 @@ export class LeadsController {
   @Post()
   create(@Body() dto: CreateLeadDto): Promise<LeadListItem> {
     return this.leads.create(dto);
+  }
+
+  /**
+   * POST /api/leads/:id/pin — pin a lead for the current caller (ADR-0031). A
+   * sub-resource, so the static routes above are never captured as an id. The
+   * caller is resolved server-side; the body carries no user. Returns the lead
+   * in its pinned state.
+   */
+  @Post(':id/pin')
+  pin(@Param('id', ParseUUIDPipe) id: string): Promise<LeadListItem> {
+    return this.leads.setPinned(id, true);
+  }
+
+  /** DELETE /api/leads/:id/pin — unpin a lead for the current caller (ADR-0031). */
+  @Delete(':id/pin')
+  unpin(@Param('id', ParseUUIDPipe) id: string): Promise<LeadListItem> {
+    return this.leads.setPinned(id, false);
   }
 
   /**
