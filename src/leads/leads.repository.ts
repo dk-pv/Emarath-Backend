@@ -117,7 +117,11 @@ export class LeadsRepository {
           });
         } else {
           await tx.complaint.create({
-            data: { lead: { connect: { id } }, details: complaintReason, status: 'Open' },
+            data: {
+              lead: { connect: { id } },
+              details: complaintReason,
+              status: 'Open',
+            },
           });
         }
       }
@@ -268,6 +272,36 @@ export class LeadsRepository {
     return rows
       .map((row) => row.tag)
       .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /**
+   * A lead's assignment rows for its detail timeline: who it is assigned to and
+   * when (the row's createdAt doubles as Workpex's "Assigned Date"). The caller
+   * scope-checks the lead first, so this reads by leadId only.
+   */
+  async assignmentsForTimeline(leadId: string) {
+    return this.prisma.leadAssignment.findMany({
+      where: { leadId },
+      select: { id: true, createdAt: true, user: { select: { name: true } } },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  /**
+   * A lead's notes for its detail timeline (LEAD-10.2, ADR-0035): author, body and
+   * when, newest first, excluding soft-deleted. Scope is verified by the caller.
+   */
+  async notesForTimeline(leadId: string) {
+    return this.prisma.leadNote.findMany({
+      where: { leadId, deletedAt: null },
+      select: {
+        id: true,
+        createdAt: true,
+        body: true,
+        author: { select: { name: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   /** One user's id and name, for the agent's own single filter option. */

@@ -77,6 +77,8 @@ function makeService(
   const update = jest.fn().mockResolvedValue(FAKE_ROW);
   const pin = jest.fn().mockResolvedValue(undefined);
   const unpin = jest.fn().mockResolvedValue(undefined);
+  const assignmentsForTimeline = jest.fn().mockResolvedValue([]);
+  const notesForTimeline = jest.fn().mockResolvedValue([]);
   const repository = {
     create,
     findById,
@@ -84,6 +86,8 @@ function makeService(
     update,
     pin,
     unpin,
+    assignmentsForTimeline,
+    notesForTimeline,
   } as unknown as LeadsRepository;
   const currentUser = {
     resolve: jest.fn().mockResolvedValue({ id: userId, role, team }),
@@ -103,8 +107,64 @@ function makeService(
     unpin,
     dataOf,
     updateArgsOf,
+    assignmentsForTimeline,
+    notesForTimeline,
   };
 }
+
+describe('LeadsService.getTimeline', () => {
+  it('404s (and never aggregates) an out-of-scope lead', async () => {
+    const { service, findById, assignmentsForTimeline, notesForTimeline } =
+      makeService();
+    findById.mockResolvedValue(null);
+
+    await expect(service.getTimeline('lead-1')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(assignmentsForTimeline).not.toHaveBeenCalled();
+    expect(notesForTimeline).not.toHaveBeenCalled();
+  });
+
+  it('merges created + assignments + notes newest-first for an in-scope lead', async () => {
+    const { service, findById, assignmentsForTimeline, notesForTimeline } =
+      makeService();
+    findById.mockResolvedValue({
+      ...FAKE_ROW,
+      id: 'lead-1',
+      createdAt: new Date('2026-08-19T14:15:00.000Z'),
+    });
+    assignmentsForTimeline.mockResolvedValue([
+      {
+        id: 'a1',
+        createdAt: new Date('2026-08-19T16:00:00.000Z'),
+        user: { name: 'ADEEB C' },
+      },
+    ]);
+    notesForTimeline.mockResolvedValue([
+      {
+        id: 'n1',
+        createdAt: new Date('2026-08-20T11:39:00.000Z'),
+        body: 'hello',
+        author: { name: 'Ahamed' },
+      },
+    ]);
+
+    const events = await service.getTimeline('lead-1');
+
+    // Newest first: the note (Aug 20) precedes the assignment and creation (Aug 19).
+    expect(events.map((e) => e.type)).toEqual(['note', 'assigned', 'created']);
+    expect(events[0]).toMatchObject({
+      type: 'note',
+      authorName: 'Ahamed',
+      body: 'hello',
+    });
+    expect(events[1]).toMatchObject({
+      type: 'assigned',
+      assigneeName: 'ADEEB C',
+    });
+    expect(events[2]).toMatchObject({ type: 'created' });
+  });
+});
 
 describe('LeadsService.create', () => {
   it('applies Workpex defaults for status, pipeline and category (AC3/AC4)', async () => {
@@ -298,9 +358,9 @@ describe('LeadsService.update', () => {
     const { service, findById, update } = makeService();
     findById.mockResolvedValue(null);
 
-    await expect(service.update('nope', { ...BASE_DTO })).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    await expect(
+      service.update('nope', { ...BASE_DTO }),
+    ).rejects.toBeInstanceOf(NotFoundException);
     expect(update).not.toHaveBeenCalled();
   });
 
@@ -333,7 +393,10 @@ describe('LeadsService.update', () => {
     );
     findById.mockResolvedValue(FAKE_ROW);
 
-    await service.update('lead-1', { ...BASE_DTO, assignedAgentIds: ['other'] });
+    await service.update('lead-1', {
+      ...BASE_DTO,
+      assignedAgentIds: ['other'],
+    });
 
     expect(updateArgsOf().assigneeIds).toContain('agent-1');
   });

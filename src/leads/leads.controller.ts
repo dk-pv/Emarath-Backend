@@ -14,6 +14,7 @@ import {
   LeadEditData,
   LeadListItem,
   LeadListResponse,
+  LeadTimelineEvent,
 } from './dto/lead-response.dto';
 import { LeadFilterOptions } from './dto/lead-filter-options.dto';
 import { CreateLeadDto } from './dto/create-lead.dto';
@@ -90,6 +91,18 @@ export class LeadsController {
     @Body() dto: CreateLeadDto,
   ): Promise<LeadListItem> {
     return this.leads.update(id, dto);
+  }
+
+  /**
+   * GET /api/leads/:id/timeline — the Lead Detail drawer's activity feed (created,
+   * assigned, notes), scoped like the detail read → 404 out of scope. Two-segment
+   * path, declared before the single-segment `:id` so it is never taken as an id.
+   */
+  @Get(':id/timeline')
+  timeline(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<LeadTimelineEvent[]> {
+    return this.leads.getTimeline(id);
   }
 
   /**

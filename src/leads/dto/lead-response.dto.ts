@@ -210,6 +210,52 @@ export function toLeadEditData(row: LeadEditRow): LeadEditData {
   };
 }
 
+/**
+ * One entry in the Lead Detail timeline (Lead Detail drawer). Built by aggregating
+ * data the system actually records — the lead's own `createdAt`, its assignment
+ * rows, and its notes — never a fabricated event. Email sends and the actor who
+ * created/assigned a lead are not tracked today, so those are deliberately absent
+ * rather than invented (partial-but-honest timeline).
+ */
+export type LeadTimelineEvent =
+  | { id: string; type: 'created'; at: string }
+  | { id: string; type: 'assigned'; at: string; assigneeName: string }
+  | { id: string; type: 'note'; at: string; authorName: string; body: string };
+
+/**
+ * Merges a lead's created/assigned/note facts into one newest-first feed. Pure, so
+ * it is unit-tested directly. ISO timestamps sort lexicographically in time order.
+ */
+export function buildLeadTimeline(
+  leadId: string,
+  createdAt: Date,
+  assignments: { id: string; createdAt: Date; user: { name: string } }[],
+  notes: {
+    id: string;
+    createdAt: Date;
+    body: string;
+    author: { name: string };
+  }[],
+): LeadTimelineEvent[] {
+  const events: LeadTimelineEvent[] = [
+    { id: `created:${leadId}`, type: 'created', at: createdAt.toISOString() },
+    ...assignments.map((a) => ({
+      id: `assigned:${a.id}`,
+      type: 'assigned' as const,
+      at: a.createdAt.toISOString(),
+      assigneeName: a.user.name,
+    })),
+    ...notes.map((n) => ({
+      id: `note:${n.id}`,
+      type: 'note' as const,
+      at: n.createdAt.toISOString(),
+      authorName: n.author.name,
+      body: n.body,
+    })),
+  ];
+  return events.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+}
+
 export function toLeadListItem(row: LeadRow, isPinned = false): LeadListItem {
   return {
     id: row.id,

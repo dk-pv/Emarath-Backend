@@ -12,6 +12,8 @@ import {
   LeadEditData,
   LeadListItem,
   LeadListResponse,
+  LeadTimelineEvent,
+  buildLeadTimeline,
   toLeadEditData,
   toLeadListItem,
 } from './dto/lead-response.dto';
@@ -241,6 +243,33 @@ export class LeadsService {
       );
     }
     return toLeadEditData(row);
+  }
+
+  /**
+   * The Lead Detail timeline (Lead Detail drawer). Scoped like every single-lead
+   * read — an out-of-scope/unknown/deleted id is a 404 — then aggregates the facts
+   * the system truly records: the lead's creation, its assignments, and its notes.
+   * Email sends and the actor behind create/assign are not tracked, so they are
+   * absent by design rather than fabricated (partial-but-honest, per the approved
+   * decision). Newest first.
+   */
+  async getTimeline(id: string): Promise<LeadTimelineEvent[]> {
+    const user = await this.currentUser.resolve();
+    const lead = await this.repository.findById({
+      AND: [leadScopeWhere(user), { id }],
+    });
+    if (!lead) {
+      throw new NotFoundException(
+        'That lead does not exist or is not in your scope.',
+      );
+    }
+
+    const [assignments, notes] = await Promise.all([
+      this.repository.assignmentsForTimeline(id),
+      this.repository.notesForTimeline(id),
+    ]);
+
+    return buildLeadTimeline(lead.id, lead.createdAt, assignments, notes);
   }
 
   /**
