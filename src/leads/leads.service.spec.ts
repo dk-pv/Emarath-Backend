@@ -41,6 +41,31 @@ const BASE_DTO: CreateLeadDto = {
   paymentMethod: 'COD',
 };
 
+/** A row shaped for `toLeadEditData` — the wider edit projection. */
+const FAKE_EDIT_ROW = {
+  ...FAKE_ROW,
+  email: 'x@example.com',
+  product: 'MAGIC',
+  productQty: '2',
+  product2: null,
+  product2Qty: null,
+  paymentMethod: 'COD',
+  state: null,
+  street: null,
+  city: null,
+  nationalCode: null,
+  assignments: [{ user: { id: 'agent-1', name: 'Agent One' } }],
+  tags: [{ tagId: 'tag-1' }],
+  complaints: [{ details: 'RETURN' }],
+};
+
+type UpdateArgs = {
+  data: Prisma.LeadUpdateInput;
+  assigneeIds: string[];
+  tagIds: string[];
+  complaintReason: string | null;
+};
+
 function makeService(
   role: UserRole = UserRole.SUPERADMIN,
   userId = 'me',
@@ -48,11 +73,15 @@ function makeService(
 ) {
   const create = jest.fn().mockResolvedValue(FAKE_ROW);
   const findById = jest.fn();
+  const findEditById = jest.fn();
+  const update = jest.fn().mockResolvedValue(FAKE_ROW);
   const pin = jest.fn().mockResolvedValue(undefined);
   const unpin = jest.fn().mockResolvedValue(undefined);
   const repository = {
     create,
     findById,
+    findEditById,
+    update,
     pin,
     unpin,
   } as unknown as LeadsRepository;
@@ -62,7 +91,19 @@ function makeService(
   const service = new LeadsService(repository, currentUser);
   const dataOf = (call = 0): Prisma.LeadCreateInput =>
     (create.mock.calls[call] as [Prisma.LeadCreateInput])[0];
-  return { service, create, findById, pin, unpin, dataOf };
+  const updateArgsOf = (call = 0): UpdateArgs =>
+    (update.mock.calls[call] as [string, UpdateArgs])[1];
+  return {
+    service,
+    create,
+    findById,
+    findEditById,
+    update,
+    pin,
+    unpin,
+    dataOf,
+    updateArgsOf,
+  };
 }
 
 describe('LeadsService.create', () => {
@@ -206,6 +247,110 @@ describe('LeadsService.findById', () => {
     await expect(service.findById('other-team-lead')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+});
+
+describe('LeadsService.getForEdit', () => {
+  it('maps the wide edit projection, renaming whatsappAttempts to msgAttempts', async () => {
+    const { service, findEditById } = makeService();
+    findEditById.mockResolvedValue({ ...FAKE_EDIT_ROW, whatsappAttempts: 4 });
+
+    const data = await service.getForEdit('lead-1');
+
+    expect(data.msgAttempts).toBe(4);
+    expect(data.product).toBe('MAGIC');
+    expect(data.productQty).toBe('2');
+    expect(data.assignedAgents).toEqual([{ id: 'agent-1', name: 'Agent One' }]);
+    expect(data.tagIds).toEqual(['tag-1']);
+    expect(data.complaintReason).toBe('RETURN');
+  });
+
+  it('scopes the read by role AND id', async () => {
+    const { service, findEditById } = makeService(
+      UserRole.SALES_AGENT,
+      'agent-1',
+    );
+    findEditById.mockResolvedValue(FAKE_EDIT_ROW);
+
+    await service.getForEdit('lead-1');
+
+    const where = (findEditById.mock.calls as unknown[][])[0][0] as {
+      AND: [Record<string, unknown>, { id: string }];
+    };
+    expect(where.AND[0]).toMatchObject({
+      assignments: { some: { userId: 'agent-1' } },
+    });
+    expect(where.AND[1]).toEqual({ id: 'lead-1' });
+  });
+
+  it('404s when the lead is out of scope or missing', async () => {
+    const { service, findEditById } = makeService();
+    findEditById.mockResolvedValue(null);
+
+    await expect(service.getForEdit('nope')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+});
+
+describe('LeadsService.update', () => {
+  it('404s (and never writes) when the lead is out of scope or missing', async () => {
+    const { service, findById, update } = makeService();
+    findById.mockResolvedValue(null);
+
+    await expect(service.update('nope', { ...BASE_DTO })).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('maps the payload and full-replaces assignments/tags/complaint', async () => {
+    const { service, findById, updateArgsOf } = makeService();
+    findById.mockResolvedValue(FAKE_ROW);
+
+    await service.update('lead-1', {
+      ...BASE_DTO,
+      msgAttempts: 5,
+      category: undefined,
+      assignedAgentIds: ['u1', 'u2'],
+      tagIds: ['t1'],
+      complaintReason: 'RETURN',
+    });
+
+    const args = updateArgsOf();
+    expect(args.data.whatsappAttempts).toBe(5);
+    // Edit respects a cleared category (null), rather than re-defaulting to "Default".
+    expect(args.data.category).toBeNull();
+    expect(args.assigneeIds).toEqual(['u1', 'u2']);
+    expect(args.tagIds).toEqual(['t1']);
+    expect(args.complaintReason).toBe('RETURN');
+  });
+
+  it('keeps a sales agent on their own lead so an edit cannot hide it', async () => {
+    const { service, findById, updateArgsOf } = makeService(
+      UserRole.SALES_AGENT,
+      'agent-1',
+    );
+    findById.mockResolvedValue(FAKE_ROW);
+
+    await service.update('lead-1', { ...BASE_DTO, assignedAgentIds: ['other'] });
+
+    expect(updateArgsOf().assigneeIds).toContain('agent-1');
+  });
+
+  it('reports a bad agent/tag id (foreign key) as a 400, not a 500', async () => {
+    const { service, findById, update } = makeService();
+    findById.mockResolvedValue(FAKE_ROW);
+    update.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('fk', {
+        code: 'P2003',
+        clientVersion: 'test',
+      }),
+    );
+
+    await expect(
+      service.update('lead-1', { ...BASE_DTO, tagIds: ['nope'] }),
+    ).rejects.toMatchObject({ status: 400 });
   });
 });
 

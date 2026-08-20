@@ -6,10 +6,15 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Put,
   Query,
 } from '@nestjs/common';
 import { LeadsService } from './leads.service';
-import { LeadListItem, LeadListResponse } from './dto/lead-response.dto';
+import {
+  LeadEditData,
+  LeadListItem,
+  LeadListResponse,
+} from './dto/lead-response.dto';
 import { LeadFilterOptions } from './dto/lead-filter-options.dto';
 import { CreateLeadDto } from './dto/create-lead.dto';
 import { ListLeadsQueryDto } from './dto/list-leads-query.dto';
@@ -62,6 +67,29 @@ export class LeadsController {
   @Delete(':id/pin')
   unpin(@Param('id', ParseUUIDPipe) id: string): Promise<LeadListItem> {
     return this.leads.setPinned(id, false);
+  }
+
+  /**
+   * GET /api/leads/:id/edit — the full editable record that prefills the Edit Lead
+   * form (LEAD-06 edit mode). Two-segment path, so it never collides with the
+   * single-segment static routes above. Scoped like the detail read.
+   */
+  @Get(':id/edit')
+  editData(@Param('id', ParseUUIDPipe) id: string): Promise<LeadEditData> {
+    return this.leads.getForEdit(id);
+  }
+
+  /**
+   * PUT /api/leads/:id — update a lead from the Edit Lead form (LEAD-06 edit mode).
+   * Full replace: the form submits every field, so the same CreateLeadDto validates
+   * both create and update. Scoped in the service — an out-of-scope id is a 404.
+   */
+  @Put(':id')
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateLeadDto,
+  ): Promise<LeadListItem> {
+    return this.leads.update(id, dto);
   }
 
   /**

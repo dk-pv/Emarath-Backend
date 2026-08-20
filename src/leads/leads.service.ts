@@ -9,8 +9,10 @@ import { LeadsRepository } from './leads.repository';
 import { leadScopeWhere } from './lead-scope';
 import { buildLeadWhere } from './lead-where';
 import {
+  LeadEditData,
   LeadListItem,
   LeadListResponse,
+  toLeadEditData,
   toLeadListItem,
 } from './dto/lead-response.dto';
 import { LeadFilterOptions } from './dto/lead-filter-options.dto';
@@ -210,6 +212,98 @@ export class LeadsService {
       return toLeadListItem(lead);
     } catch (error) {
       // A bad agent or tag id fails the foreign key; report it as a 400, not 500.
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === 'P2003' || error.code === 'P2025')
+      ) {
+        throw new BadRequestException(
+          'One or more assigned agents or tags do not exist.',
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * The full editable record for the Edit Lead form (LEAD-06 edit mode). Scoped
+   * exactly like findById — an out-of-scope, unknown or soft-deleted id is a 404,
+   * never a cross-scope read — but projected wide enough to prefill every field
+   * the form carries, including the ones the list never shows.
+   */
+  async getForEdit(id: string): Promise<LeadEditData> {
+    const user = await this.currentUser.resolve();
+    const row = await this.repository.findEditById({
+      AND: [leadScopeWhere(user), { id }],
+    });
+    if (!row) {
+      throw new NotFoundException(
+        'That lead does not exist or is not in your scope.',
+      );
+    }
+    return toLeadEditData(row);
+  }
+
+  /**
+   * Updates a lead from the Edit Lead form (LEAD-06 edit mode) — the same form
+   * that creates one, so the payload and defaults match create. Scoped like every
+   * single-lead op: an out-of-scope/unknown id is a 404, never a cross-scope write.
+   * A sales agent stays on their own lead's assignee list (as in create) so an edit
+   * cannot make the lead vanish from its editor's view. Assignments and tags are
+   * full-replaced in a transaction (repository.update); a bad agent/tag id fails the
+   * foreign key and surfaces as a 400, leaving the lead untouched.
+   */
+  async update(id: string, dto: CreateLeadDto): Promise<LeadListItem> {
+    const user = await this.currentUser.resolve();
+    const existing = await this.repository.findById({
+      AND: [leadScopeWhere(user), { id }],
+    });
+    if (!existing) {
+      throw new NotFoundException(
+        'That lead does not exist or is not in your scope.',
+      );
+    }
+
+    const assigneeIds = new Set(dto.assignedAgentIds ?? []);
+    if (user.role === UserRole.SALES_AGENT) assigneeIds.add(user.id);
+
+    const data: Prisma.LeadUpdateInput = {
+      name: dto.name,
+      firstName: dto.firstName ?? null,
+      primaryPhone: dto.primaryPhone,
+      secondaryPhone: dto.secondaryPhone ?? null,
+      email: dto.email ?? null,
+      language: dto.language ?? null,
+      country: dto.country ?? null,
+      source: dto.source ?? null,
+      status: dto.status || 'New',
+      pipeline: dto.pipeline || 'Lead Pipeline',
+      product: dto.product ?? null,
+      productQty: dto.productQty ?? null,
+      product2: dto.product2 ?? null,
+      product2Qty: dto.product2Qty ?? null,
+      bookingDate: dto.bookingDate ? new Date(dto.bookingDate) : null,
+      category: dto.category ?? null,
+      actualAmount: dto.actualAmount ?? null,
+      forecastedAmount: dto.forecastedAmount ?? null,
+      paymentMethod: dto.paymentMethod ?? null,
+      state: dto.state ?? null,
+      street: dto.street ?? null,
+      city: dto.city ?? null,
+      nationalCode: dto.nationalCode ?? null,
+      callStatus: dto.callStatus ?? null,
+      callAttempts: dto.callAttempts ?? 0,
+      whatsappAttempts: dto.msgAttempts ?? 0,
+    };
+
+    try {
+      const lead = await this.repository.update(id, {
+        data,
+        assigneeIds: [...assigneeIds],
+        tagIds: dto.tagIds ?? [],
+        complaintReason: dto.complaintReason ?? null,
+      });
+      return toLeadListItem(lead);
+    } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         (error.code === 'P2003' || error.code === 'P2025')

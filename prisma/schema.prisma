@@ -83,6 +83,8 @@ model User {
   uploadedDocuments   Document[]
   /// DOC-01.1: per-document access grants naming this user.
   documentAccess      DocumentAccess[]
+  /// LEAD-10.2 (ADR-0035): lead notes this user authored via the row "Add Note" action.
+  leadNotes           LeadNote[]
 
   @@map("users")
 }
@@ -259,6 +261,8 @@ model Lead {
   /// Per-user pins (ADR-0031): one row per user who has pinned this lead so it
   /// floats to the top of their own list. Personal, never shared.
   pins        LeadPin[]
+  /// LEAD-10.2 (ADR-0035): free-text notes added from the row "Add Note" action.
+  notes       LeadNote[]
 
   /// AC2: the fields the list and board filter and group by are indexed.
   /// Each is paired with deletedAt because every query must exclude soft-deleted
@@ -380,6 +384,32 @@ model Complaint {
   /// AC2: retrieving a lead's complaints is the only access path there is.
   @@index([leadId, deletedAt])
   @@map("complaints")
+}
+
+/// A free-text note on a lead (LEAD-10.2 "Add Note", ADR-0035). Workpex's row
+/// Add Note action opens a drawer with one textarea; each submit is its own row,
+/// so notes append rather than overwrite a single field.
+///
+/// A dedicated table — never the Call model's `leadNotes`/`callNotes`, which are
+/// per-call (CALL-01.1). A lead note is not tied to a call and must accumulate,
+/// so it is its own entity like Complaint, not a column on the lead. `authorId`
+/// is the resolved caller (CurrentUserService), never client-supplied.
+model LeadNote {
+  id       String @id @default(uuid()) @db.Uuid
+  leadId   String @map("lead_id") @db.Uuid
+  authorId String @map("author_id") @db.Uuid
+  body     String @db.Text
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  lead   Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  /// Retrieving a lead's notes (newest-first) is the only access path.
+  @@index([leadId, deletedAt])
+  @@map("lead_notes")
 }
 
 /// A bulk-import run (LEAD-07.1).

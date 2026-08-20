@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { LEAD_LIST_SELECT } from './dto/lead-response.dto';
+import { LEAD_EDIT_SELECT, LEAD_LIST_SELECT } from './dto/lead-response.dto';
 import { LeadSortColumn } from './dto/list-leads-query.dto';
 import { pinnedPageSlice } from './pinned-page';
 
@@ -48,6 +48,82 @@ export class LeadsRepository {
    */
   async findById(where: Prisma.LeadWhereInput) {
     return this.prisma.lead.findFirst({ where, select: LEAD_LIST_SELECT });
+  }
+
+  /**
+   * One lead by the caller-supplied scoped `where`, projected wide enough to
+   * prefill the Edit Lead form (LEAD_EDIT_SELECT). Same scoped-`where` contract as
+   * findById — the service passes the scope, so this can never widen it.
+   */
+  async findEditById(where: Prisma.LeadWhereInput) {
+    return this.prisma.lead.findFirst({ where, select: LEAD_EDIT_SELECT });
+  }
+
+  /**
+   * Updates a lead's scalar fields and replaces its assignments/tags in one
+   * transaction (Edit Lead). Assignments and tags are full-replaced — deleteMany
+   * then create — so removing one in the form removes the row; the whole thing is
+   * atomic, so a bad id leaves the lead untouched. The single COMPLAINTS field
+   * reconciles the latest open complaint: its text is updated in place, or one is
+   * created if none exists; an empty value leaves existing complaints alone (their
+   * lifecycle is LEAD-13.1, not this form's to delete). Returns the list projection
+   * so the row can adopt the result. Scope is enforced by the caller before this.
+   */
+  async update(
+    id: string,
+    {
+      data,
+      assigneeIds,
+      tagIds,
+      complaintReason,
+    }: {
+      data: Prisma.LeadUpdateInput;
+      assigneeIds: string[];
+      tagIds: string[];
+      complaintReason: string | null;
+    },
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      const lead = await tx.lead.update({
+        where: { id },
+        data: {
+          ...data,
+          assignments: {
+            deleteMany: {},
+            create: assigneeIds.map((userId) => ({
+              user: { connect: { id: userId } },
+            })),
+          },
+          tags: {
+            deleteMany: {},
+            create: tagIds.map((tagId) => ({
+              tag: { connect: { id: tagId } },
+            })),
+          },
+        },
+        select: LEAD_LIST_SELECT,
+      });
+
+      if (complaintReason) {
+        const existing = await tx.complaint.findFirst({
+          where: { leadId: id, deletedAt: null },
+          orderBy: { createdAt: 'desc' },
+          select: { id: true },
+        });
+        if (existing) {
+          await tx.complaint.update({
+            where: { id: existing.id },
+            data: { details: complaintReason },
+          });
+        } else {
+          await tx.complaint.create({
+            data: { lead: { connect: { id } }, details: complaintReason, status: 'Open' },
+          });
+        }
+      }
+
+      return lead;
+    });
   }
 
   async findPage({

@@ -16,6 +16,8 @@ import {
 import { LeadsBulkService } from '../bulk/leads-bulk.service';
 import { OUT_OF_SCOPE_REASON } from '../bulk/dto/bulk-actions.dto';
 import {
+  AddLeadNoteResponse,
+  CreateLeadNoteDto,
   ReassignLeadDto,
   RowDeleteResponse,
   SendLeadEmailDto,
@@ -197,6 +199,33 @@ export class LeadRowActionsService {
       );
     }
     return { sent: true };
+  }
+
+  /**
+   * Adds a free-text note to a lead (LEAD-10.2, ADR-0035). Scoped like every row
+   * action: the lead is loaded through the caller's scope first, so a lead they
+   * cannot see is a 404 and never receives a note. The author is the resolved
+   * caller — never client-supplied — and the body is trimmed and length-bounded
+   * by the DTO. Each call is its own row, so notes accumulate rather than
+   * overwrite; there is no notes-history read here (Workpex captures only creation).
+   */
+  async addNote(
+    id: string,
+    dto: CreateLeadNoteDto,
+  ): Promise<AddLeadNoteResponse> {
+    const user = await this.currentUser.resolve();
+
+    const lead = await this.prisma.lead.findFirst({
+      where: { AND: [leadScopeWhere(user), { id }] },
+      select: { id: true },
+    });
+    if (!lead) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+
+    const note = await this.prisma.leadNote.create({
+      data: { leadId: id, authorId: user.id, body: dto.body },
+      select: { id: true },
+    });
+    return { id: note.id };
   }
 
   /**

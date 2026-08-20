@@ -2,12 +2,15 @@ import {
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import { UserRole } from '../../generated/prisma/client';
 import { CurrentUserService } from '../../auth/current-user';
 import { MailerService } from '../../auth/mailer.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { LeadsBulkService } from '../bulk/leads-bulk.service';
 import { BulkActionResponse } from '../bulk/dto/bulk-actions.dto';
+import { CreateLeadNoteDto } from './dto/row-actions.dto';
 import { LeadRowActionsService } from './leads-row-actions.service';
 
 const LEAD_ID = '11111111-1111-1111-1111-111111111111';
@@ -46,6 +49,7 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
   const leadFindUnique = jest.fn();
   const leadCreate = jest.fn();
   const leadUpdate = jest.fn();
+  const leadNoteCreate = jest.fn();
 
   const prisma = {
     lead: {
@@ -53,6 +57,9 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
       findUnique: leadFindUnique,
       create: leadCreate,
       update: leadUpdate,
+    },
+    leadNote: {
+      create: leadNoteCreate,
     },
   } as unknown as PrismaService;
 
@@ -77,6 +84,7 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     leadFindUnique,
     leadCreate,
     leadUpdate,
+    leadNoteCreate,
     bulkReassign,
     bulkDelete,
     sendMail,
@@ -256,6 +264,60 @@ describe('LeadRowActionsService.sendEmail', () => {
     await expect(service.sendEmail(LEAD_ID, payload)).rejects.toBeInstanceOf(
       InternalServerErrorException,
     );
+  });
+});
+
+describe('LeadRowActionsService.addNote', () => {
+  const NOTE_ID = '33333333-3333-3333-3333-333333333333';
+
+  it('persists a note authored by the current user for an in-scope lead', async () => {
+    const { service, leadFindFirst, leadNoteCreate } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    leadNoteCreate.mockResolvedValue({ id: NOTE_ID });
+
+    const res = await service.addNote(LEAD_ID, {
+      body: 'Called, will follow up',
+    });
+
+    expect(res).toEqual({ id: NOTE_ID });
+    const args = (leadNoteCreate.mock.calls as unknown[][])[0][0] as {
+      data: { leadId: string; authorId: string; body: string };
+    };
+    // Scoped to the lead, authored by the resolved caller (never client-supplied).
+    expect(args.data.leadId).toBe(LEAD_ID);
+    expect(args.data.authorId).toBe('u1');
+    expect(args.data.body).toBe('Called, will follow up');
+  });
+
+  it('404s (and never writes) for an out-of-scope lead', async () => {
+    const { service, leadFindFirst, leadNoteCreate } = makeService();
+    leadFindFirst.mockResolvedValue(null);
+
+    await expect(
+      service.addNote(LEAD_ID, { body: 'x' }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(leadNoteCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe('CreateLeadNoteDto validation', () => {
+  const bodyErrors = async (raw: unknown): Promise<string[]> => {
+    const dto = plainToInstance(CreateLeadNoteDto, { body: raw });
+    const errors = await validate(dto);
+    return errors.flatMap((e) => Object.values(e.constraints ?? {}));
+  };
+
+  it('accepts a non-empty body', async () => {
+    expect(await bodyErrors('Follow up next week')).toEqual([]);
+  });
+
+  it('rejects an empty or whitespace-only body (trimmed first)', async () => {
+    expect((await bodyErrors('')).length).toBeGreaterThan(0);
+    expect((await bodyErrors('   ')).length).toBeGreaterThan(0);
+  });
+
+  it('rejects a body over the length cap', async () => {
+    expect((await bodyErrors('a'.repeat(20001))).length).toBeGreaterThan(0);
   });
 });
 

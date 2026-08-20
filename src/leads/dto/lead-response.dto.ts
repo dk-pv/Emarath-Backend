@@ -80,9 +80,134 @@ export const LEAD_LIST_SELECT = {
 
 type LeadRow = Prisma.LeadGetPayload<{ select: typeof LEAD_LIST_SELECT }>;
 
+/**
+ * Everything the Edit Lead form needs to prefill — a superset of the list
+ * projection with the fields the list never shows (products, address, payment,
+ * the raw complaint text). Kept separate from LEAD_LIST_SELECT so the 100-row
+ * list query stays narrow; this wider read only runs when one lead is opened for
+ * editing. `complaints` returns just the latest open one — the form's single
+ * COMPLAINTS field mirrors that one, matching how create seeds it.
+ */
+export const LEAD_EDIT_SELECT = {
+  id: true,
+  name: true,
+  firstName: true,
+  primaryPhone: true,
+  secondaryPhone: true,
+  email: true,
+  language: true,
+  country: true,
+  source: true,
+  status: true,
+  pipeline: true,
+  product: true,
+  productQty: true,
+  product2: true,
+  product2Qty: true,
+  bookingDate: true,
+  category: true,
+  actualAmount: true,
+  forecastedAmount: true,
+  paymentMethod: true,
+  state: true,
+  street: true,
+  city: true,
+  nationalCode: true,
+  callStatus: true,
+  callAttempts: true,
+  whatsappAttempts: true,
+  assignments: {
+    select: { user: { select: { id: true, name: true } } },
+  },
+  tags: { select: { tagId: true } },
+  complaints: {
+    where: { deletedAt: null },
+    orderBy: { createdAt: 'desc' },
+    take: 1,
+    select: { details: true },
+  },
+} satisfies Prisma.LeadSelect;
+
+type LeadEditRow = Prisma.LeadGetPayload<{ select: typeof LEAD_EDIT_SELECT }>;
+
+/**
+ * The Edit Lead form's prefill payload. Mirrors CreateLeadDto's fields (plus the
+ * lead id) so the one shared form can round-trip: read here, edit, PUT back. The
+ * form's `msgAttempts` is this lead's `whatsappAttempts` — the same rename create
+ * applies in reverse. Assigned agents carry their names so the MultiSelect can
+ * label a chip for an assignee who is not in the assignable list (e.g. an admin).
+ */
+export interface LeadEditData {
+  id: string;
+  name: string;
+  firstName: string | null;
+  primaryPhone: string;
+  secondaryPhone: string | null;
+  email: string | null;
+  language: string | null;
+  country: string | null;
+  source: string | null;
+  status: string;
+  pipeline: string;
+  product: string | null;
+  productQty: string | null;
+  product2: string | null;
+  product2Qty: string | null;
+  bookingDate: string | null;
+  category: string | null;
+  actualAmount: string | null;
+  forecastedAmount: string | null;
+  paymentMethod: string | null;
+  state: string | null;
+  street: string | null;
+  city: string | null;
+  nationalCode: string | null;
+  callStatus: string | null;
+  callAttempts: number;
+  msgAttempts: number;
+  assignedAgents: { id: string; name: string }[];
+  tagIds: string[];
+  complaintReason: string | null;
+}
+
 /** Date-only in the database; keep it date-only on the wire. */
 function toDateOnly(value: Date | null): string | null {
   return value ? value.toISOString().slice(0, 10) : null;
+}
+
+export function toLeadEditData(row: LeadEditRow): LeadEditData {
+  return {
+    id: row.id,
+    name: row.name,
+    firstName: row.firstName,
+    primaryPhone: row.primaryPhone,
+    secondaryPhone: row.secondaryPhone,
+    email: row.email,
+    language: row.language,
+    country: row.country,
+    source: row.source,
+    status: row.status,
+    pipeline: row.pipeline,
+    product: row.product,
+    productQty: row.productQty?.toString() ?? null,
+    product2: row.product2,
+    product2Qty: row.product2Qty?.toString() ?? null,
+    bookingDate: toDateOnly(row.bookingDate),
+    category: row.category,
+    actualAmount: row.actualAmount?.toString() ?? null,
+    forecastedAmount: row.forecastedAmount?.toString() ?? null,
+    paymentMethod: row.paymentMethod,
+    state: row.state,
+    street: row.street,
+    city: row.city,
+    nationalCode: row.nationalCode,
+    callStatus: row.callStatus,
+    callAttempts: row.callAttempts,
+    msgAttempts: row.whatsappAttempts,
+    assignedAgents: row.assignments.map((a) => a.user),
+    tagIds: row.tags.map((t) => t.tagId),
+    complaintReason: row.complaints[0]?.details ?? null,
+  };
 }
 
 export function toLeadListItem(row: LeadRow, isPinned = false): LeadListItem {

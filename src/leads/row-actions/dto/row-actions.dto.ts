@@ -81,3 +81,23 @@ export class SendLeadEmailDto {
 export interface SendLeadEmailResponse {
   sent: boolean;
 }
+
+/**
+ * Row "Add Note" action (LEAD-10.2, ADR-0035): the note body to attach to a lead.
+ * A single required text field — Workpex's Add Note drawer has one textarea, no
+ * template or extra fields. Trimmed so a whitespace-only note is rejected, and
+ * length-bounded like the email body. The author is the resolved caller, never
+ * client-supplied, so this DTO deliberately has no `authorId`.
+ */
+export class CreateLeadNoteDto {
+  @Transform(trim)
+  @IsString()
+  @IsNotEmpty({ message: 'A note is required' })
+  @MaxLength(20000)
+  body!: string;
+}
+
+/** Row "Add Note" action result — the drawer closes on the created note's id. */
+export interface AddLeadNoteResponse {
+  id: string;
+}

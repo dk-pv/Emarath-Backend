@@ -12,6 +12,8 @@ import { Roles } from '../../auth/roles.decorator';
 import { UserRole } from '../../generated/prisma/client';
 import { LeadListItem } from '../dto/lead-response.dto';
 import {
+  AddLeadNoteResponse,
+  CreateLeadNoteDto,
   ReassignLeadDto,
   RowDeleteResponse,
   SendLeadEmailDto,
@@ -75,6 +77,19 @@ export class LeadRowActionsController {
     @Body() dto: SendLeadEmailDto,
   ): Promise<SendLeadEmailResponse> {
     return this.service.sendEmail(id, dto);
+  }
+
+  /**
+   * POST /api/leads/:id/notes — add a free-text note to this lead (LEAD-10.2,
+   * ADR-0035). Scoped to a lead the caller can see; the DTO requires a non-empty
+   * body. Creates a resource, so it answers 201 with the new note's id.
+   */
+  @Post(':id/notes')
+  addNote(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateLeadNoteDto,
+  ): Promise<AddLeadNoteResponse> {
+    return this.service.addNote(id, dto);
   }
 
   /** DELETE /api/leads/:id — permanently remove this lead (AC5). */
