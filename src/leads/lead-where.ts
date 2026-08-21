@@ -4,6 +4,7 @@ import { type DayBoundaries } from '../activities/activity-buckets';
 import { leadScopeWhere } from './lead-scope';
 import { leadSearchWhere } from './lead-search';
 import { leadFilterWhere } from './lead-filter';
+import { leadConditionWhere, parseLeadConditions } from './lead-conditions';
 
 /**
  * The inputs the list and the export share: the archived flag (scope predicate),
@@ -13,6 +14,8 @@ import { leadFilterWhere } from './lead-filter';
 export interface LeadWhereQuery {
   archived?: boolean;
   search?: string;
+  /** The advanced filter builder's JSON conditions (ADR-0039), parsed here. */
+  conditions?: string;
   source?: string[];
   status?: string[];
   assignedAgent?: string[];
@@ -50,6 +53,10 @@ export function buildLeadWhere(
 
   const search = leadSearchWhere(query.search);
   if (search) conditions.push(search);
+
+  // Advanced filter builder (ADR-0039) — each parsed, whitelisted condition becomes
+  // one scoped fragment, ANDed with scope/search like the simple filters below.
+  conditions.push(...leadConditionWhere(parseLeadConditions(query.conditions)));
 
   // The client's timezone day boundaries (LEAD-04.1 activity presets), present only
   // when a Today's-Follow-Ups / Overdue preset is active; passed to the reused

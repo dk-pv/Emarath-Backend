@@ -9,11 +9,13 @@ import { LeadsRepository } from './leads.repository';
 import { leadScopeWhere } from './lead-scope';
 import { buildLeadWhere } from './lead-where';
 import {
+  LeadActivity,
   LeadEditData,
   LeadListItem,
   LeadListResponse,
   LeadTimelineEvent,
   buildLeadTimeline,
+  toLeadActivity,
   toLeadEditData,
   toLeadListItem,
 } from './dto/lead-response.dto';
@@ -270,6 +272,27 @@ export class LeadsService {
     ]);
 
     return buildLeadTimeline(lead.id, lead.createdAt, assignments, notes);
+  }
+
+  /**
+   * A lead's follow-ups for the Lead Detail drawer (ACT-03.2 / ACT-04.1). Scoped
+   * like the timeline read — an out-of-scope/unknown/deleted id is a 404 — then
+   * returns the lead's activities (earliest due first). The drawer derives its Next
+   * Follow-up card and its Follow-up Created/Completed timeline entries from these.
+   */
+  async getActivities(id: string): Promise<LeadActivity[]> {
+    const user = await this.currentUser.resolve();
+    const lead = await this.repository.findById({
+      AND: [leadScopeWhere(user), { id }],
+    });
+    if (!lead) {
+      throw new NotFoundException(
+        'That lead does not exist or is not in your scope.',
+      );
+    }
+
+    const rows = await this.repository.activitiesForLead(id);
+    return rows.map(toLeadActivity);
   }
 
   /**

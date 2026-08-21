@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { LeadsService } from './leads.service';
 import {
+  LeadActivity,
   LeadEditData,
   LeadListItem,
   LeadListResponse,
@@ -103,6 +104,16 @@ export class LeadsController {
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<LeadTimelineEvent[]> {
     return this.leads.getTimeline(id);
+  }
+
+  /**
+   * GET /api/leads/:id/activities — the lead's follow-ups for the Lead Detail
+   * drawer (ACT-03.2 / ACT-04.1), scoped like the detail read → 404 out of scope.
+   * Two-segment path, declared before the single-segment `:id`.
+   */
+  @Get(':id/activities')
+  activities(@Param('id', ParseUUIDPipe) id: string): Promise<LeadActivity[]> {
+    return this.leads.getActivities(id);
   }
 
   /**

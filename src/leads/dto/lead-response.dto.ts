@@ -256,6 +256,46 @@ export function buildLeadTimeline(
   return events.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
 }
 
+/**
+ * One of a lead's follow-ups for the Lead Detail drawer (ACT-03.2 / ACT-04.1). The
+ * drawer derives its "Next Follow-up" card (the earliest incomplete one) and its
+ * "Follow Up … Created/Completed" timeline entries from this list. `type` is the
+ * ActivityType enum value; times are ISO. The actor who created/completed it is not
+ * recorded on `Activity`, so it is deliberately absent (partial-but-honest).
+ */
+export interface LeadActivity {
+  id: string;
+  type: string;
+  description: string | null;
+  dueAt: string;
+  endAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  assignees: { id: string; name: string }[];
+}
+
+export function toLeadActivity(row: {
+  id: string;
+  type: string;
+  description: string | null;
+  dueAt: Date;
+  endAt: Date | null;
+  completedAt: Date | null;
+  createdAt: Date;
+  assignees: { user: { id: string; name: string } }[];
+}): LeadActivity {
+  return {
+    id: row.id,
+    type: row.type,
+    description: row.description,
+    dueAt: row.dueAt.toISOString(),
+    endAt: row.endAt ? row.endAt.toISOString() : null,
+    completedAt: row.completedAt ? row.completedAt.toISOString() : null,
+    createdAt: row.createdAt.toISOString(),
+    assignees: row.assignees.map((a) => a.user),
+  };
+}
+
 export function toLeadListItem(row: LeadRow, isPinned = false): LeadListItem {
   return {
     id: row.id,

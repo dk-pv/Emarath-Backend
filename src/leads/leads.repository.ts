@@ -304,6 +304,31 @@ export class LeadsRepository {
     });
   }
 
+  /**
+   * A lead's follow-ups for the Lead Detail drawer (ACT-03.2 / ACT-04.1): type,
+   * description, schedule, completion and assignees, excluding soft-deleted, earliest
+   * due first. Scope is verified by the caller (leadId only here), matching the
+   * timeline reads. Feeds both the "Next Follow-up" card and the timeline entries.
+   */
+  async activitiesForLead(leadId: string) {
+    return this.prisma.activity.findMany({
+      where: { leadId, deletedAt: null },
+      select: {
+        id: true,
+        type: true,
+        description: true,
+        dueAt: true,
+        endAt: true,
+        completedAt: true,
+        createdAt: true,
+        assignees: {
+          select: { user: { select: { id: true, name: true } } },
+        },
+      },
+      orderBy: { dueAt: 'asc' },
+    });
+  }
+
   /** One user's id and name, for the agent's own single filter option. */
   async findUserSummary(
     id: string,

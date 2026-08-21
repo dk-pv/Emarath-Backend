@@ -79,6 +79,7 @@ function makeService(
   const unpin = jest.fn().mockResolvedValue(undefined);
   const assignmentsForTimeline = jest.fn().mockResolvedValue([]);
   const notesForTimeline = jest.fn().mockResolvedValue([]);
+  const activitiesForLead = jest.fn().mockResolvedValue([]);
   const repository = {
     create,
     findById,
@@ -88,6 +89,7 @@ function makeService(
     unpin,
     assignmentsForTimeline,
     notesForTimeline,
+    activitiesForLead,
   } as unknown as LeadsRepository;
   const currentUser = {
     resolve: jest.fn().mockResolvedValue({ id: userId, role, team }),
@@ -109,6 +111,7 @@ function makeService(
     updateArgsOf,
     assignmentsForTimeline,
     notesForTimeline,
+    activitiesForLead,
   };
 }
 
@@ -163,6 +166,47 @@ describe('LeadsService.getTimeline', () => {
       assigneeName: 'ADEEB C',
     });
     expect(events[2]).toMatchObject({ type: 'created' });
+  });
+});
+
+describe('LeadsService.getActivities', () => {
+  it('404s (and never reads activities) an out-of-scope lead', async () => {
+    const { service, findById, activitiesForLead } = makeService();
+    findById.mockResolvedValue(null);
+
+    await expect(service.getActivities('lead-1')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(activitiesForLead).not.toHaveBeenCalled();
+  });
+
+  it('maps the lead activities (dates → ISO, assignees flattened)', async () => {
+    const { service, findById, activitiesForLead } = makeService();
+    findById.mockResolvedValue({ ...FAKE_ROW, id: 'lead-1' });
+    activitiesForLead.mockResolvedValue([
+      {
+        id: 'act-1',
+        type: 'MEETING',
+        description: 'tfyguijop',
+        dueAt: new Date('2026-08-28T00:30:00.000Z'),
+        endAt: null,
+        completedAt: null,
+        createdAt: new Date('2026-08-20T09:47:00.000Z'),
+        assignees: [{ user: { id: 'u1', name: 'ADEEB C' } }],
+      },
+    ]);
+
+    const activities = await service.getActivities('lead-1');
+
+    expect(activities).toHaveLength(1);
+    expect(activities[0]).toMatchObject({
+      id: 'act-1',
+      type: 'MEETING',
+      description: 'tfyguijop',
+      dueAt: '2026-08-28T00:30:00.000Z',
+      completedAt: null,
+      assignees: [{ id: 'u1', name: 'ADEEB C' }],
+    });
   });
 });
 

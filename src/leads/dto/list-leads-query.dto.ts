@@ -114,6 +114,16 @@ export class ListLeadsQueryDto {
   search?: string;
 
   /**
+   * The advanced filter condition builder (ADR-0039) — a JSON array of
+   * `{ field, operator, values }`, parsed and whitelisted by `parseLeadConditions`.
+   * Distinct from the simple `source`/`status`/… IN-filters below; both may be sent.
+   */
+  @IsString({ message: 'conditions must be a JSON string' })
+  @MaxLength(8000, { message: 'conditions payload is too large' })
+  @IsOptional()
+  conditions?: string;
+
+  /**
    * Field filters (LEAD-03.2). Each accepts one or more values, repeated in the
    * query string (`?source=A&source=B`); a single value is coerced to a one-item
    * array and a blank one to no filter (AC5). Values combine as OR within a
