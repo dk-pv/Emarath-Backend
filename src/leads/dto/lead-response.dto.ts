@@ -30,6 +30,12 @@ export interface LeadListItem {
   assignedAgents: { id: string; name: string }[];
   tags: { id: string; name: string }[];
   /**
+   * LEAD-05.1 (ADR-0051): per-lead custom-column values, keyed by the field's stable
+   * "cf_<slug>" key. Only active fields with a value appear; an absent key is a blank
+   * cell. The table's custom columns read `row.customFields[column.key]`.
+   */
+  customFields: Record<string, string>;
+  /**
    * Whether the CURRENT caller has pinned this lead (ADR-0031) — personal, not
    * shared. Not a column on the lead: it is derived per-request from `lead_pins`,
    * so it is passed in rather than read off `row`. Defaults false, so the many
@@ -75,6 +81,15 @@ export const LEAD_LIST_SELECT = {
   },
   tags: {
     select: { tag: { select: { id: true, name: true } } },
+  },
+  /**
+   * LEAD-05.1 (ADR-0051): this page's leads' custom-column values, batched by Prisma
+   * as one nested read (no N+1). Only active fields' values are projected; the field's
+   * stable `key` keys the response map. Bounded by (#fields × pageSize).
+   */
+  customFieldValues: {
+    where: { customField: { deletedAt: null } },
+    select: { value: true, customField: { select: { key: true } } },
   },
 } satisfies Prisma.LeadSelect;
 
@@ -126,6 +141,11 @@ export const LEAD_EDIT_SELECT = {
     take: 1,
     select: { details: true },
   },
+  /** LEAD-05.1 (ADR-0051): the lead's custom values, so Edit-mode prefills them. */
+  customFieldValues: {
+    where: { customField: { deletedAt: null } },
+    select: { value: true, customField: { select: { key: true } } },
+  },
 } satisfies Prisma.LeadSelect;
 
 type LeadEditRow = Prisma.LeadGetPayload<{ select: typeof LEAD_EDIT_SELECT }>;
@@ -168,6 +188,8 @@ export interface LeadEditData {
   assignedAgents: { id: string; name: string }[];
   tagIds: string[];
   complaintReason: string | null;
+  /** LEAD-05.1 (ADR-0051): custom values keyed by field key, so Edit prefills them. */
+  customFields: Record<string, string>;
 }
 
 /** Date-only in the database; keep it date-only on the wire. */
@@ -207,6 +229,9 @@ export function toLeadEditData(row: LeadEditRow): LeadEditData {
     assignedAgents: row.assignments.map((a) => a.user),
     tagIds: row.tags.map((t) => t.tagId),
     complaintReason: row.complaints[0]?.details ?? null,
+    customFields: Object.fromEntries(
+      row.customFieldValues.map((v) => [v.customField.key, v.value]),
+    ),
   };
 }
 
@@ -319,6 +344,9 @@ export function toLeadListItem(row: LeadRow, isPinned = false): LeadListItem {
     createdAt: row.createdAt.toISOString(),
     assignedAgents: row.assignments.map((a) => a.user),
     tags: row.tags.map((t) => t.tag),
+    customFields: Object.fromEntries(
+      row.customFieldValues.map((v) => [v.customField.key, v.value]),
+    ),
     isPinned,
   };
 }

@@ -13,7 +13,9 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
+import { CustomFieldValueDto } from './custom-field-value.dto';
 
 /**
  * The New Lead form's payload (LEAD-06.1).
@@ -217,4 +219,17 @@ export class CreateLeadDto {
   @MaxLength(64)
   @IsOptional()
   paymentMethod?: string;
+
+  /**
+   * Per-lead custom-column values (LEAD-05.1, ADR-0051). A declared, validated channel:
+   * `forbidNonWhitelisted` rejects ad-hoc `cf_*` props, so values must ride this nested
+   * array. Blank values are dropped and type-correctness by field is enforced in the
+   * LeadCustomFieldsService against each field's definition.
+   */
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CustomFieldValueDto)
+  @ArrayMaxSize(100)
+  @IsOptional()
+  customFields?: CustomFieldValueDto[];
 }

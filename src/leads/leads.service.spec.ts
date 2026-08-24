@@ -2,6 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { CurrentUserService } from '../auth/current-user';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { CreateLeadDto } from './dto/create-lead.dto';
+import { LeadCustomFieldsService } from '../lead-custom-fields/lead-custom-fields.service';
 import { LeadsRepository } from './leads.repository';
 import { LeadsService } from './leads.service';
 
@@ -27,6 +28,7 @@ const FAKE_ROW = {
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   assignments: [],
   tags: [],
+  customFieldValues: [],
 };
 
 const BASE_DTO: CreateLeadDto = {
@@ -94,7 +96,13 @@ function makeService(
   const currentUser = {
     resolve: jest.fn().mockResolvedValue({ id: userId, role, team }),
   } as unknown as CurrentUserService;
-  const service = new LeadsService(repository, currentUser);
+  // Custom-field value prep is exercised in its own suite; here it is a no-op so the
+  // create/update payload assertions stay focused on the core fields.
+  const prepareValues = jest.fn().mockResolvedValue([]);
+  const customFields = {
+    prepareValues,
+  } as unknown as LeadCustomFieldsService;
+  const service = new LeadsService(repository, currentUser, customFields);
   const dataOf = (call = 0): Prisma.LeadCreateInput =>
     (create.mock.calls[call] as [Prisma.LeadCreateInput])[0];
   const updateArgsOf = (call = 0): UpdateArgs =>

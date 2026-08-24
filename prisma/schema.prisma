@@ -250,19 +250,21 @@ model Lead {
   updatedAt DateTime  @updatedAt @map("updated_at")
   deletedAt DateTime? @map("deleted_at")
 
-  assignments LeadAssignment[]
-  tags        LeadTag[]
-  complaints  Complaint[]
+  assignments       LeadAssignment[]
+  tags              LeadTag[]
+  complaints        Complaint[]
   /// ACT-01.1: follow-ups on this lead. Independent of the lead's stage — an
   /// activity links to the lead, not to a status/pipeline (ADR-0027 dec 7).
-  activities  Activity[]
+  activities        Activity[]
   /// CALL-01.1: call records linked to this lead.
-  calls       Call[]
+  calls             Call[]
   /// Per-user pins (ADR-0031): one row per user who has pinned this lead so it
   /// floats to the top of their own list. Personal, never shared.
-  pins        LeadPin[]
+  pins              LeadPin[]
   /// LEAD-10.2 (ADR-0035): free-text notes added from the row "Add Note" action.
-  notes       LeadNote[]
+  notes             LeadNote[]
+  /// LEAD-05.1 (ADR-0051): per-lead values for user-defined custom columns.
+  customFieldValues LeadCustomFieldValue[]
 
   /// AC2: the fields the list and board filter and group by are indexed.
   /// Each is paired with deletedAt because every query must exclude soft-deleted
@@ -769,4 +771,67 @@ model DocumentAccess {
   /// "documents shared with me" — the per-user access lookup.
   @@index([userId])
   @@map("document_access")
+}
+
+/// LEAD-05.1 (ADR-0051): the five custom-column field types Workpex offers in the
+/// "Add Column" field-type menu (leads-add-column-dropdown-open-field-type.png). An
+/// enum, not a string: the set is fixed by the product, and each type drives a
+/// specific input control (create/edit form) and display format (list cell).
+enum LeadCustomFieldType {
+  TEXT
+  TEXTBOX
+  NUMBER
+  DATE
+  DATETIME
+}
+
+/// LEAD-05.1 (ADR-0051): a user-defined custom column created from "Add Column".
+/// App-global — the platform is single-tenant, so a field defined once is available
+/// to everyone; per-user visibility/order stays in UserViewPreference, not here.
+/// Soft-deleted (like Tag) so removing a field never orphans a saved column layout —
+/// the client's reconcileLayout drops the missing key on the next load.
+model LeadCustomField {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// Stable column key used in the table and the per-user layout, "cf_<slug>".
+  /// Letter-started and <= 64 chars so it satisfies the view-preference COLUMN_KEY
+  /// rule and can never collide with a built-in Leads column key.
+  key      String              @unique @db.VarChar(64)
+  name     String              @db.VarChar(180)
+  type     LeadCustomFieldType
+  /// Left-to-right position among custom columns; also the default layout order.
+  position Int
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  values LeadCustomFieldValue[]
+
+  @@map("lead_custom_fields")
+}
+
+/// LEAD-05.1 (ADR-0051): one lead's value for one custom field. Stored as text and
+/// interpreted by the field's `type` on read (numbers/dates validated + formatted by
+/// type), the same "string with meaning defined elsewhere" model as status/source.
+/// No soft delete — a value is owned child data that Cascades away with its lead or
+/// its field, and is full-replaced on lead update (like assignments/tags).
+model LeadCustomFieldValue {
+  id            String @id @default(uuid()) @db.Uuid
+  customFieldId String @map("custom_field_id") @db.Uuid
+  leadId        String @map("lead_id") @db.Uuid
+  value         String @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  customField LeadCustomField @relation(fields: [customFieldId], references: [id], onDelete: Cascade)
+  lead        Lead            @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  /// At most one value per (lead, field). Leading leadId also serves the list's
+  /// per-page value projection (WHERE lead_id IN (…)).
+  @@unique([leadId, customFieldId])
+  /// Reverse lookup: all leads' values for one field (future sort/filter).
+  @@index([customFieldId])
+  @@map("lead_custom_field_values")
 }

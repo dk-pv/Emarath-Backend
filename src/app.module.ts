@@ -13,6 +13,7 @@ import { DocumentsModule } from './documents/documents.module';
 import { GpsModule } from './gps/gps.module';
 import { GpsExportModule } from './gps/export/gps-export.module';
 import { HealthModule } from './health/health.module';
+import { LeadCustomFieldsModule } from './lead-custom-fields/lead-custom-fields.module';
 import { LeadsModule } from './leads/leads.module';
 import { LeadsBoardModule } from './leads/board/leads-board.module';
 import { LeadsBulkModule } from './leads/bulk/leads-bulk.module';
@@ -60,6 +61,8 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     LeadsRowActionsModule,
     LeadsTagsModule,
     LeadsModule,
+    // Top-level /api/lead-custom-fields — not under /leads/, so route order is moot.
+    LeadCustomFieldsModule,
     LookupsModule,
     ReportsModule,
     StagesModule,

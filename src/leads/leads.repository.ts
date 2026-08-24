@@ -76,11 +76,13 @@ export class LeadsRepository {
       assigneeIds,
       tagIds,
       complaintReason,
+      customFieldValues,
     }: {
       data: Prisma.LeadUpdateInput;
       assigneeIds: string[];
       tagIds: string[];
       complaintReason: string | null;
+      customFieldValues: { customFieldId: string; value: string }[];
     },
   ) {
     return this.prisma.$transaction(async (tx) => {
@@ -98,6 +100,15 @@ export class LeadsRepository {
             deleteMany: {},
             create: tagIds.map((tagId) => ({
               tag: { connect: { id: tagId } },
+            })),
+          },
+          // Full-replace (like assignments/tags): a value the form emptied is dropped,
+          // a changed one rewritten, all atomic (LEAD-05.1, ADR-0051).
+          customFieldValues: {
+            deleteMany: {},
+            create: customFieldValues.map((v) => ({
+              customField: { connect: { id: v.customFieldId } },
+              value: v.value,
             })),
           },
         },

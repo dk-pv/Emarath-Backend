@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../auth/current-user';
+import { LeadCustomFieldsService } from '../lead-custom-fields/lead-custom-fields.service';
 import { LeadsRepository } from './leads.repository';
 import { leadScopeWhere } from './lead-scope';
 import { buildLeadWhere } from './lead-where';
@@ -37,6 +38,7 @@ export class LeadsService {
   constructor(
     private readonly repository: LeadsRepository,
     private readonly currentUser: CurrentUserService,
+    private readonly customFields: LeadCustomFieldsService,
   ) {}
 
   async list(query: ListLeadsQueryDto): Promise<LeadListResponse> {
@@ -165,6 +167,10 @@ export class LeadsService {
     const assigneeIds = new Set(dto.assignedAgentIds ?? []);
     if (user.role === UserRole.SALES_AGENT) assigneeIds.add(user.id);
 
+    const customFieldValues = await this.customFields.prepareValues(
+      dto.customFields,
+    );
+
     const data: Prisma.LeadCreateInput = {
       name: dto.name,
       firstName: dto.firstName ?? null,
@@ -208,6 +214,14 @@ export class LeadsService {
         : undefined,
       complaints: dto.complaintReason
         ? { create: [{ details: dto.complaintReason, status: 'Open' }] }
+        : undefined,
+      customFieldValues: customFieldValues.length
+        ? {
+            create: customFieldValues.map((v) => ({
+              customField: { connect: { id: v.customFieldId } },
+              value: v.value,
+            })),
+          }
         : undefined,
     };
 
@@ -318,6 +332,10 @@ export class LeadsService {
     const assigneeIds = new Set(dto.assignedAgentIds ?? []);
     if (user.role === UserRole.SALES_AGENT) assigneeIds.add(user.id);
 
+    const customFieldValues = await this.customFields.prepareValues(
+      dto.customFields,
+    );
+
     const data: Prisma.LeadUpdateInput = {
       name: dto.name,
       firstName: dto.firstName ?? null,
@@ -353,6 +371,7 @@ export class LeadsService {
         assigneeIds: [...assigneeIds],
         tagIds: dto.tagIds ?? [],
         complaintReason: dto.complaintReason ?? null,
+        customFieldValues,
       });
       return toLeadListItem(lead);
     } catch (error) {
