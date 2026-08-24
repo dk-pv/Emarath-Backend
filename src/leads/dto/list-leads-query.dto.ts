@@ -45,6 +45,22 @@ export const LEAD_SORT_COLUMNS = [
   'whatsappAttempts',
   'createdAt',
   'updatedAt',
+  // The remaining scalar columns the Workpex Leads "Sort" menu offers
+  // (leads-sort-dropdown). Each is a real `Lead` column the generic
+  // `orderBy: { [sort]: direction }` already orders by — only the whitelist gated
+  // them out. Relation fields Workpex also lists (COMPLAINTS, Assigned Date) are
+  // deliberately NOT here: Prisma cannot `orderBy` a to-many relation field.
+  'secondaryPhone',
+  'pipeline',
+  'product',
+  'productQty',
+  'product2',
+  'product2Qty',
+  'paymentMethod',
+  'state',
+  'street',
+  'city',
+  'nationalCode',
 ] as const;
 
 export type LeadSortColumn = (typeof LEAD_SORT_COLUMNS)[number];
