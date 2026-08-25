@@ -1,6 +1,11 @@
 import { Body, Controller, Get, Param, Put } from '@nestjs/common';
 import { ViewPreferencesService } from './view-preferences.service';
-import { ColumnLayout, SaveViewPreferenceDto } from './dto/view-preference.dto';
+import {
+  ColumnLayout,
+  KanbanPins,
+  SaveViewPreferenceDto,
+  SetKanbanPinDto,
+} from './dto/view-preference.dto';
 
 /**
  * Per-user table layout endpoints (LEAD-05.1), under `/api/view-preferences`.
@@ -12,6 +17,25 @@ import { ColumnLayout, SaveViewPreferenceDto } from './dto/view-preference.dto';
 @Controller('view-preferences')
 export class ViewPreferencesController {
   constructor(private readonly service: ViewPreferencesService) {}
+
+  /**
+   * GET /api/view-preferences/kanban-pins — the caller's Kanban stage pins (KAN-05.2),
+   * a per-pipeline map. Declared before `:viewKey` so the static segment is never
+   * captured as a view key.
+   */
+  @Get('kanban-pins')
+  getKanbanPins(): Promise<KanbanPins> {
+    return this.service.getKanbanPins();
+  }
+
+  /**
+   * PUT /api/view-preferences/kanban-pins — pin (or unpin) one stage of a pipeline for
+   * the caller; returns the updated map. One pin per pipeline.
+   */
+  @Put('kanban-pins')
+  setKanbanPin(@Body() dto: SetKanbanPinDto): Promise<KanbanPins> {
+    return this.service.setKanbanPin(dto.pipeline, dto.stage ?? null);
+  }
 
   /** GET /api/view-preferences/:viewKey — the caller's saved layout, or null. */
   @Get(':viewKey')

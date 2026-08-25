@@ -15,9 +15,11 @@ import {
   AddLeadNoteResponse,
   CreateLeadNoteDto,
   ReassignLeadDto,
+  RowArchiveResponse,
   RowDeleteResponse,
   SendLeadEmailDto,
   SendLeadEmailResponse,
+  SetLeadPipelineDto,
   SetLeadStatusDto,
 } from './dto/row-actions.dto';
 
@@ -90,6 +92,38 @@ export class LeadRowActionsController {
     @Body() dto: CreateLeadNoteDto,
   ): Promise<AddLeadNoteResponse> {
     return this.service.addNote(id, dto);
+  }
+
+  /**
+   * POST /api/leads/:id/pipeline — move this lead to another pipeline (KAN-03.1 card
+   * menu). Lands it on the target pipeline's first stage; a pipeline with no stages is
+   * a 400. Two-segment path, so it never collides with the single-segment routes.
+   */
+  @Post(':id/pipeline')
+  @HttpCode(200)
+  changePipeline(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetLeadPipelineDto,
+  ): Promise<LeadListItem> {
+    return this.service.changePipeline(id, dto);
+  }
+
+  /**
+   * POST /api/leads/:id/archive — soft-archive this lead (KAN-03.1 card menu): sets
+   * `deletedAt` so it leaves the active board/list but stays recoverable, distinct
+   * from the hard delete below.
+   */
+  @Post(':id/archive')
+  @HttpCode(200)
+  archive(@Param('id', ParseUUIDPipe) id: string): Promise<RowArchiveResponse> {
+    return this.service.archive(id);
+  }
+
+  /** POST /api/leads/:id/unarchive — restore an archived lead (clears `deletedAt`). */
+  @Post(':id/unarchive')
+  @HttpCode(200)
+  unarchive(@Param('id', ParseUUIDPipe) id: string): Promise<LeadListItem> {
+    return this.service.unarchive(id);
   }
 
   /** DELETE /api/leads/:id — permanently remove this lead (AC5). */

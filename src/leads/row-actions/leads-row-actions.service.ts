@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -19,9 +20,11 @@ import {
   AddLeadNoteResponse,
   CreateLeadNoteDto,
   ReassignLeadDto,
+  RowArchiveResponse,
   RowDeleteResponse,
   SendLeadEmailDto,
   SendLeadEmailResponse,
+  SetLeadPipelineDto,
   SetLeadStatusDto,
 } from './dto/row-actions.dto';
 
@@ -239,6 +242,89 @@ export class LeadRowActionsService {
       throw new NotFoundException(OUT_OF_SCOPE_REASON);
     }
     return { id };
+  }
+
+  /**
+   * Moves a lead to another pipeline (KAN-03.1 card menu). `pipeline` is a real axis
+   * separate from `status`, so the lead also lands on the target pipeline's first stage
+   * (by position) — otherwise it would sit on a stage that isn't on its new board.
+   * A pipeline with no stages is refused (BadRequest → the UI toasts it), never a
+   * silent move into an invalid state. Scoped: an out-of-scope id is a 404.
+   */
+  async changePipeline(
+    id: string,
+    dto: SetLeadPipelineDto,
+  ): Promise<LeadListItem> {
+    const user = await this.currentUser.resolve();
+
+    const target = await this.prisma.lead.findFirst({
+      where: { AND: [leadScopeWhere(user), { id }] },
+      select: { id: true },
+    });
+    if (!target) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+
+    const firstStage = await this.prisma.stage.findFirst({
+      where: { pipeline: dto.pipeline },
+      orderBy: { position: 'asc' },
+      select: { name: true },
+    });
+    if (!firstStage) {
+      throw new BadRequestException(
+        `The “${dto.pipeline}” pipeline has no stages, so a lead can’t be moved into it.`,
+      );
+    }
+
+    const updated = await this.prisma.lead.update({
+      where: { id },
+      data: { pipeline: dto.pipeline, status: firstStage.name },
+      select: LEAD_LIST_SELECT,
+    });
+    return toLeadListItem(updated);
+  }
+
+  /**
+   * Soft-archives a lead (KAN-03.1 card menu): sets `deletedAt`, the same state the
+   * Leads "Archived leads" filter reads. The lead leaves the active board/list but is
+   * recoverable via `unarchive` — distinct from the hard `delete` that removes the row.
+   * Scoped over active leads, so an out-of-scope or already-archived id is a 404.
+   */
+  async archive(id: string): Promise<RowArchiveResponse> {
+    const user = await this.currentUser.resolve();
+
+    const target = await this.prisma.lead.findFirst({
+      where: { AND: [leadScopeWhere(user), { id }] },
+      select: { id: true },
+    });
+    if (!target) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+
+    await this.prisma.lead.update({
+      where: { id },
+      data: { deletedAt: new Date() },
+    });
+    return { id };
+  }
+
+  /**
+   * Restores an archived lead (clears `deletedAt`). Scoped over archived leads
+   * (`leadScopeWhere(user, true)`), so a caller can only restore one they could see;
+   * an active or out-of-scope id is a 404. Returns the restored lead for the caller
+   * to adopt back into the active view.
+   */
+  async unarchive(id: string): Promise<LeadListItem> {
+    const user = await this.currentUser.resolve();
+
+    const target = await this.prisma.lead.findFirst({
+      where: { AND: [leadScopeWhere(user, true), { id }] },
+      select: { id: true },
+    });
+    if (!target) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+
+    const updated = await this.prisma.lead.update({
+      where: { id },
+      data: { deletedAt: null },
+      select: LEAD_LIST_SELECT,
+    });
+    return toLeadListItem(updated);
   }
 
   /** The lead by id after a successful action (it exists), as a list item. */

@@ -41,6 +41,30 @@ export interface RowDeleteResponse {
 }
 
 /**
+ * Card "Archive" action (KAN-03.1 card menu): confirms which lead was archived. A
+ * soft archive sets `deletedAt` — the same state the Leads "Archived leads" filter
+ * reads (`deletedAt != null`) — so the lead leaves the active board/list but is
+ * recoverable, distinct from the hard Delete that removes the row.
+ */
+export interface RowArchiveResponse {
+  id: string;
+}
+
+/**
+ * Card "Change Pipeline" action (KAN-03.1 card menu): the pipeline to move the lead
+ * to. `pipeline` is a real, separate axis from `status` (a Lead column); moving a lead
+ * lands it on the target pipeline's first stage, so a pipeline with no stages is
+ * refused rather than leaving the lead on a stage that isn't on its board.
+ */
+export class SetLeadPipelineDto {
+  @Transform(trim)
+  @IsString()
+  @IsNotEmpty({ message: 'pipeline is required' })
+  @MaxLength(64)
+  pipeline!: string;
+}
+
+/**
  * Row "Email" action (LEAD-10.2, ADR-0032): the composed message to send from a
  * lead's row. `to` must carry at least one valid email; Cc/Bcc/Subject/Message are
  * optional. The From is the server's verified sender (`MAIL_FROM`) — never accepted

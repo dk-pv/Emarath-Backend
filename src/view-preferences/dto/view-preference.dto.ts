@@ -1,4 +1,13 @@
-import { ArrayMaxSize, IsArray, IsString, Matches } from 'class-validator';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+} from 'class-validator';
+import { Transform } from 'class-transformer';
 
 /**
  * A saved table layout: the manageable column ids in the user's chosen order,
@@ -8,6 +17,39 @@ import { ArrayMaxSize, IsArray, IsString, Matches } from 'class-validator';
 export interface ColumnLayout {
   order: string[];
   hidden: string[];
+}
+
+const trim = ({ value }: { value: unknown }): unknown =>
+  typeof value === 'string' ? value.trim() : value;
+
+/**
+ * The Kanban stage-pin preference (KAN-05.2): per pipeline, the one stage the caller
+ * has pinned (rendered as a sticky/frozen column). Stored per-user in the same
+ * `UserViewPreference` table under the fixed `kanban-pins` key. A pipeline absent from
+ * the map has no pinned stage; one pin per pipeline (a new pin replaces the previous).
+ */
+export interface KanbanPins {
+  pins: Record<string, string>;
+}
+
+/**
+ * Pin — or unpin — one stage of a pipeline. `stage` present pins it (replacing any
+ * previous pin in that pipeline); `stage` omitted or empty unpins the pipeline. Names
+ * carry spaces/punctuation ("SUPER HOT", "QC NOT APPROVED - WON"), so they are length-
+ * bounded rather than pattern-matched like the safe column-id keys above.
+ */
+export class SetKanbanPinDto {
+  @Transform(trim)
+  @IsString()
+  @IsNotEmpty({ message: 'pipeline is required' })
+  @MaxLength(64)
+  pipeline!: string;
+
+  @IsOptional()
+  @Transform(trim)
+  @IsString()
+  @MaxLength(64)
+  stage?: string;
 }
 
 /**
