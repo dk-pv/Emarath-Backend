@@ -68,6 +68,8 @@ model User {
   leadPins            LeadPin[]
   importJobs          ImportJob[]
   viewPreferences     UserViewPreference[]
+  /// ADR-0052: this user's own saved filter presets (the filter panel's checkbox row).
+  savedFilters        SavedFilter[]
   /// ACT-01.1 (ACT-06.1): activities this user is assigned to work.
   activityAssignments ActivityAssignee[]
   /// CALL-01.1: calls made or received by this agent.
@@ -496,6 +498,31 @@ model UserViewPreference {
   /// One saved layout per user per view; the upsert target.
   @@unique([userId, viewKey])
   @@map("user_view_preferences")
+}
+
+/// A user's saved filter preset (ADR-0052) — one row of the filter panel's checkbox
+/// row above the condition builder ("UAE TEAM", "GLOBAL TEAM", "WON", …). The names
+/// are the user's own words, not entities: no Team model backs them.
+///
+/// Shared by the Leads list and the Kanban board deliberately, so a preset saved on
+/// one surface is usable on the other (KAN-07.1 AC5). `conditions` stores the exact
+/// payload `GET /leads?conditions=` accepts, validated with the existing whitelist on
+/// write, so a preset can never carry a field or operator the live builder could not.
+model SavedFilter {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  name       String   @db.VarChar(120)
+  conditions Json
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// The row shows names, so two presets of the same name would be indistinguishable.
+  @@unique([userId, name])
+  /// The only read path: "my presets".
+  @@index([userId])
+  @@map("saved_filters")
 }
 
 /// Pipeline stage catalogue (KAN-05.1) — the single, user-editable source of the
