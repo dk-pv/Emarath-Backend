@@ -12,7 +12,7 @@ describe('HealthController', () => {
     environment: 'development',
     port: 5000,
     apiPrefix: 'api',
-    corsOrigin: 'http://localhost:3000',
+    corsOrigin: ['http://localhost:3000'],
   };
 
   beforeEach(async () => {

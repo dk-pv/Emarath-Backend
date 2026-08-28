@@ -60,4 +60,28 @@ describe('buildNoActivityWhere', () => {
     expect(json).toContain('DoubleTick');
     expect(json).toContain('11111111-1111-1111-1111-111111111111');
   });
+
+  it('passes the pipeline filter through to the lead where (toolbar "Pipeline")', () => {
+    const where = buildNoActivityWhere(admin, { pipeline: 'LOGISTICS' });
+    // The lead fragment is the first of the two ANDed halves.
+    expect(JSON.stringify(where.AND?.[0])).toContain('LOGISTICS');
+  });
+
+  it('leaves the pipeline predicate out entirely when no pipeline is selected', () => {
+    const where = buildNoActivityWhere(admin, {});
+    expect(JSON.stringify(where.AND?.[0])).not.toContain('pipeline');
+  });
+
+  it("passes the unassigned flag through (the summary's Unassigned drill-through)", () => {
+    const where = buildNoActivityWhere(admin, { unassigned: true });
+    // `unassigned` compiles to a "no assignments" predicate on the lead fragment.
+    expect(JSON.stringify(where.AND?.[0])).toContain('assignments');
+  });
+
+  it('keeps an agent scope narrower than the whole org for a sales agent', () => {
+    const where = buildNoActivityWhere(agent, { pipeline: 'QC' });
+    const lead = JSON.stringify(where.AND?.[0]);
+    expect(lead).toContain('QC');
+    expect(lead).toContain('agent-1');
+  });
 });
