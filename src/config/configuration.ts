@@ -18,8 +18,12 @@ export interface AppConfig {
   port: number;
   /** Global route prefix (health check is served at `/<apiPrefix>/health`). */
   apiPrefix: string;
-  /** Allowed CORS origin (the frontend URL). */
-  corsOrigin: string;
+  /**
+   * Allowed CORS origins (the frontend URLs). A list, because the dev frontend moves
+   * between ports — Next falls back to 3001 when something else holds 3000 — and a
+   * single pinned origin means every such move breaks login until the env is edited.
+   */
+  corsOrigin: string[];
 }
 
 const VALID_ENVIRONMENTS: AppEnvironment[] = [
@@ -61,10 +65,27 @@ function resolvePort(): number {
  * `ConfigService.get<AppConfig>('app')` so that application code never reads
  * `process.env` directly.
  */
+/**
+ * The CORS allow-list from `CORS_ORIGIN`: one origin, or several separated by commas.
+ * Blank entries are dropped so a trailing comma is harmless. Defaults to the two ports
+ * `next dev` actually uses locally, so a fresh clone works whichever one it lands on.
+ */
+function resolveCorsOrigins(): string[] {
+  const raw = process.env.CORS_ORIGIN;
+  if (!raw) return ['http://localhost:3000', 'http://localhost:3001'];
+  const origins = raw
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0);
+  return origins.length > 0
+    ? origins
+    : ['http://localhost:3000', 'http://localhost:3001'];
+}
+
 export default registerAs('app', (): AppConfig => ({
   name: process.env.APP_NAME ?? 'Emarath Backend',
   environment: resolveEnvironment(),
   port: resolvePort(),
   apiPrefix: process.env.API_PREFIX ?? 'api',
-  corsOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:3000',
+  corsOrigin: resolveCorsOrigins(),
 }));

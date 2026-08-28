@@ -8,6 +8,10 @@ export interface NoActivityFilters {
   agent?: string[];
   /** Lead source values (RPT-02.1 AC2) — exact match. */
   source?: string[];
+  /** The board a lead belongs to — one exact value, as the Leads list filters it. */
+  pipeline?: string;
+  /** Only leads with no assignee — the summary's "Unassigned" bucket. */
+  unassigned?: boolean;
   /**
    * The recency window's lower bound (RPT-02.1 AC2 "period"), an ISO instant the
    * client computes in its own timezone. A lead qualifies only if it has NO completed
@@ -60,6 +64,8 @@ export function buildNoActivityWhere(
       buildLeadWhere(user, {
         source: filters.source,
         assignedAgent: filters.agent,
+        pipeline: filters.pipeline,
+        unassigned: filters.unassigned,
       }),
       noRecentActivityWhere(filters),
     ],

@@ -29,8 +29,15 @@ const EXPORT_HEADERS = [
   'Customer Name',
   'First Name',
   'Primary Phone',
-  'Source',
+  'Secondary Phone',
+  'Actual Amount',
+  'Lead Pipeline',
+  'Lead Status',
   'Assigned',
+  'Source',
+  'Category',
+  'Country',
+  'Street',
   'Last Activity',
 ] as const;
 
@@ -57,15 +64,18 @@ export class NoActivityReportService {
     const user = await this.currentUser.resolve();
     const where = buildNoActivityWhere(user, query);
 
-    const [leads, total] = await this.prisma.$transaction([
-      this.prisma.lead.findMany({
-        where,
-        select: NO_ACTIVITY_SELECT,
-        orderBy: ORDER_BY,
-        skip: (query.page - 1) * query.size,
-        take: query.size,
-      }),
-      this.prisma.lead.count({ where }),
+    const [[leads, total], colorByStatus] = await Promise.all([
+      this.prisma.$transaction([
+        this.prisma.lead.findMany({
+          where,
+          select: NO_ACTIVITY_SELECT,
+          orderBy: ORDER_BY,
+          skip: (query.page - 1) * query.size,
+          take: query.size,
+        }),
+        this.prisma.lead.count({ where }),
+      ]),
+      this.stageColorByName(),
     ]);
 
     const lastById = await this.lastActivityByLead(
@@ -73,7 +83,11 @@ export class NoActivityReportService {
     );
     return {
       rows: leads.map((lead) =>
-        toNoActivityRow(lead, lastById.get(lead.id) ?? null),
+        toNoActivityRow(
+          lead,
+          lastById.get(lead.id) ?? null,
+          colorByStatus.get(lead.status) ?? null,
+        ),
       ),
       total,
     };
@@ -183,8 +197,15 @@ export class NoActivityReportService {
             csvCell(lead.name),
             csvCell(lead.firstName ?? ''),
             csvCell(lead.primaryPhone),
-            csvCell(lead.source ?? ''),
+            csvCell(lead.secondaryPhone ?? ''),
+            csvCell(lead.actualAmount ? lead.actualAmount.toString() : ''),
+            csvCell(lead.pipeline),
+            csvCell(lead.status),
             csvCell(lead.assignments.map((a) => a.user.name).join('; ')),
+            csvCell(lead.source ?? ''),
+            csvCell(lead.category ?? ''),
+            csvCell(lead.country ?? ''),
+            csvCell(lead.street ?? ''),
             csvCell(last ? last.toISOString() : 'No activity'),
           ].join(',') + '\r\n';
       }
@@ -195,6 +216,23 @@ export class NoActivityReportService {
     }
 
     res.end();
+  }
+
+  /**
+   * status name → Stage colour key, from the catalogue (KAN-05.1), so the detailed view's
+   * Lead Status badge is tinted by the same source the board and the Leads list read. Same
+   * helper as the Leads By Status report; statuses with no stage entry render neutral.
+   */
+  private async stageColorByName(): Promise<Map<string, string>> {
+    const stages = await this.prisma.stage.findMany({
+      select: { name: true, color: true },
+      orderBy: [{ pipeline: 'asc' }, { position: 'asc' }],
+    });
+    const map = new Map<string, string>();
+    for (const stage of stages) {
+      if (!map.has(stage.name)) map.set(stage.name, stage.color);
+    }
+    return map;
   }
 
   /**

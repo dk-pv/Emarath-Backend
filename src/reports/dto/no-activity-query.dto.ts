@@ -2,6 +2,7 @@ import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsDateString,
   IsInt,
   IsOptional,
@@ -13,12 +14,18 @@ import {
 } from 'class-validator';
 import { normalizeFilterValues } from '../../leads/lead-filter';
 
+/** `?unassigned=true` / `1`; anything else (including absent) leaves the filter off. */
+const toOptionalBoolean = ({ value }: { value: unknown }): unknown =>
+  value === undefined ? undefined : value === 'true' || value === '1';
+
 export const DEFAULT_REPORT_PAGE_SIZE = 100;
 /** Guards the DB against a caller asking for the whole table in one page. */
 export const MAX_REPORT_PAGE_SIZE = 200;
 export const MAX_FILTER_VALUES = 100;
 /** Source is `VarChar(64)`; a longer value can never match a row. */
 export const MAX_SOURCE_LENGTH = 64;
+/** Pipeline is `VarChar(120)`; a longer value can never match a row. */
+export const MAX_PIPELINE_LENGTH = 120;
 
 const trim = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' ? value.trim() : value;
@@ -70,6 +77,29 @@ export class NoActivityQueryDto {
   })
   @IsOptional()
   source?: string[];
+
+  /**
+   * The board a lead belongs to (RPT-02.1 toolbar "Pipeline"). One value, an exact match —
+   * a lead carries exactly one pipeline, so this mirrors the Leads list's `pipeline` param
+   * rather than accepting an array.
+   */
+  @Transform(trim)
+  @IsString({ message: 'pipeline must be a string' })
+  @MaxLength(MAX_PIPELINE_LENGTH, {
+    message: `pipeline must be at most ${MAX_PIPELINE_LENGTH} characters`,
+  })
+  @IsOptional()
+  pipeline?: string;
+
+  /**
+   * Restricts the report to leads with no assignee — the summary's "Unassigned" bucket,
+   * so its count drills through to exactly the rows it counted. Mirrors the Leads list's
+   * own `unassigned` flag rather than inventing a second spelling.
+   */
+  @Transform(toOptionalBoolean)
+  @IsBoolean({ message: 'unassigned must be a boolean' })
+  @IsOptional()
+  unassigned?: boolean;
 
   @Transform(({ value }: { value: unknown }): unknown =>
     normalizeFilterValues(value),
