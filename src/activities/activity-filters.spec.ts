@@ -49,4 +49,19 @@ describe('activityFilterWhere', () => {
       { lead: { pipeline: { in: ['Sales'] } } },
     ]);
   });
+
+  it('matches the follow-up type from the popup dropdown', () => {
+    expect(activityFilterWhere({ type: [ActivityType.CALL] })).toEqual([
+      { type: { in: [ActivityType.CALL] } },
+    ]);
+  });
+
+  it('ANDs type alongside the other filters', () => {
+    expect(
+      activityFilterWhere({ assignedAgent: ['u1'], type: [ActivityType.TASK] }),
+    ).toEqual([
+      { assignees: { some: { userId: { in: ['u1'] } } } },
+      { type: { in: [ActivityType.TASK] } },
+    ]);
+  });
 });

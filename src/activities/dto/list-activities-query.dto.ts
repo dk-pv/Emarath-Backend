@@ -21,6 +21,13 @@ import {
 } from '../../leads/dto/list-leads-query.dto';
 import { normalizeFilterValues } from '../../leads/lead-filter';
 import { ACTIVITY_BUCKETS, type ActivityBucket } from '../activity-buckets';
+import {
+  ACTIVITY_DATE_WINDOWS,
+  type ActivityDateWindow,
+} from '../activity-date-windows';
+import { ActivityType } from '../../generated/prisma/client';
+
+const ACTIVITY_TYPES = Object.values(ActivityType);
 
 /**
  * The Activities worklist query (ACT-02.1 + ACT-07.1). Reuses the Leads
@@ -117,4 +124,70 @@ export class ListActivitiesQueryDto {
   })
   @IsOptional()
   pipeline?: string[];
+
+  /**
+   * The filter popup's ticked quick-date checkboxes. Several may be sent; the
+   * service ORs their windows and ANDs the result with the active tab.
+   */
+  @Transform(({ value }: { value: unknown }): unknown =>
+    normalizeFilterValues(value),
+  )
+  @IsArray({ message: 'dateWindow must be one or more values' })
+  @IsIn(ACTIVITY_DATE_WINDOWS, {
+    each: true,
+    message: `each dateWindow must be one of: ${ACTIVITY_DATE_WINDOWS.join(', ')}`,
+  })
+  @ArrayMaxSize(ACTIVITY_DATE_WINDOWS.length, {
+    message: 'dateWindow accepts at most one value per window',
+  })
+  @IsOptional()
+  dateWindow?: ActivityDateWindow[];
+
+  /**
+   * Edges for the windows that need more than the three tab boundaries. Sent only
+   * when the matching checkbox is ticked, so an unticked window costs nothing.
+   */
+  @IsDateString({}, { message: 'yesterdayStart must be an ISO date' })
+  @IsOptional()
+  yesterdayStart?: string;
+
+  @IsDateString({}, { message: 'weekStart must be an ISO date' })
+  @IsOptional()
+  weekStart?: string;
+
+  @IsDateString({}, { message: 'weekEnd must be an ISO date' })
+  @IsOptional()
+  weekEnd?: string;
+
+  @IsDateString({}, { message: 'monthStart must be an ISO date' })
+  @IsOptional()
+  monthStart?: string;
+
+  @IsDateString({}, { message: 'monthEnd must be an ISO date' })
+  @IsOptional()
+  monthEnd?: string;
+
+  /** The popup's explicit From/To range, ANDed with the quick-date windows. */
+  @IsDateString({}, { message: 'dueFrom must be an ISO date' })
+  @IsOptional()
+  dueFrom?: string;
+
+  @IsDateString({}, { message: 'dueTo must be an ISO date' })
+  @IsOptional()
+  dueTo?: string;
+
+  /** Follow-up type — the popup's "All Activities" dropdown. */
+  @Transform(({ value }: { value: unknown }): unknown =>
+    normalizeFilterValues(value),
+  )
+  @IsArray({ message: 'type must be one or more values' })
+  @IsIn(ACTIVITY_TYPES, {
+    each: true,
+    message: `each type must be one of: ${ACTIVITY_TYPES.join(', ')}`,
+  })
+  @ArrayMaxSize(ACTIVITY_TYPES.length, {
+    message: 'type accepts at most one value per type',
+  })
+  @IsOptional()
+  type?: ActivityType[];
 }

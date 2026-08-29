@@ -48,6 +48,8 @@ export interface ActivityFilters {
   status?: string[];
   /** Lead pipeline values, matched on the linked lead (AC2). */
   pipeline?: string[];
+  /** Follow-up types — the popup's "All Activities" dropdown (AC2). */
+  type?: ActivityType[];
 }
 
 /**
@@ -72,6 +74,9 @@ export function activityFilterWhere(
   }
   if (filters.pipeline?.length) {
     conditions.push({ lead: { pipeline: { in: filters.pipeline } } });
+  }
+  if (filters.type?.length) {
+    conditions.push({ type: { in: filters.type } });
   }
 
   return conditions;
