@@ -19,6 +19,25 @@ import { PrismaClient } from '../generated/prisma/client';
  * stays alive (liveness `/api/health` remains up) and Prisma reconnects on the
  * next query. This keeps app liveness independent of transient DB availability.
  */
+/**
+ * Connection pool and transaction budgets.
+ *
+ * A round trip to the managed Postgres costs ~1.2s here, so a list request holds
+ * its connection for about that long. With node-postgres' default pool of 10, a
+ * page opened by more than ten concurrent callers queues, and Prisma's default
+ * 2s `maxWait` then aborts the waiters with
+ * "Transaction API error: Unable to start a transaction in the given time" —
+ * surfacing as a 500 on an otherwise valid request. That is pool exhaustion, not
+ * a failing query: every list endpoint (Leads included) fails the same way, so
+ * the budgets belong here rather than in any one module.
+ *
+ * `maxWait` is therefore sized to queue behind a saturated pool instead of giving
+ * up mid-round-trip; `timeout` still bounds a transaction that has actually started,
+ * so a runaway query cannot hold a connection indefinitely.
+ */
+const POOL_SIZE = 20;
+const TRANSACTION_MAX_WAIT_MS = 15_000;
+const TRANSACTION_TIMEOUT_MS = 20_000;
 @Injectable()
 export class PrismaService
   extends PrismaClient
@@ -38,7 +57,13 @@ export class PrismaService
     ) {
       throw new Error('DATABASE_URL must be set in production.');
     }
-    super({ adapter: new PrismaPg({ connectionString }) });
+    super({
+      adapter: new PrismaPg({ connectionString, max: POOL_SIZE }),
+      transactionOptions: {
+        maxWait: TRANSACTION_MAX_WAIT_MS,
+        timeout: TRANSACTION_TIMEOUT_MS,
+      },
+    });
   }
 
   async onModuleInit(): Promise<void> {

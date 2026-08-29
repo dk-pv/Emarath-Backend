@@ -18,7 +18,6 @@ import { ListActivitiesQueryDto } from './dto/list-activities-query.dto';
 import {
   ACTIVITY_LIST_SELECT,
   ACTIVITY_SELECT,
-  ActivityBucketCounts,
   ActivityItem,
   ActivityListResponse,
   toActivityItem,
@@ -86,43 +85,39 @@ export class ActivitiesService {
       AND: [...base, activityBucketWhere(query.bucket, boundaries)],
     };
 
-    const [rows, total] = await this.prisma.$transaction([
-      this.prisma.activity.findMany({
-        where,
-        select: ACTIVITY_LIST_SELECT,
-        // id breaks ties so a row can't swap pages between two same-due rows.
-        orderBy: [{ dueAt: 'asc' }, { id: 'asc' }],
-        skip: (query.page - 1) * query.size,
-        take: query.size,
-      }),
-      this.prisma.activity.count({ where }),
-    ]);
-
-    const counts = await this.bucketCounts(base, boundaries);
-
-    return { rows: rows.map(toActivityListItem), total, counts };
-  }
-
-  /** The five tab counts for the caller's base filter, in one consistent snapshot. */
-  private async bucketCounts(
-    base: Prisma.ActivityWhereInput[],
-    boundaries: DayBoundaries,
-  ): Promise<ActivityBucketCounts> {
-    const count = (bucket: Parameters<typeof activityBucketWhere>[0]) =>
+    const bucketCount = (bucket: Parameters<typeof activityBucketWhere>[0]) =>
       this.prisma.activity.count({
         where: { AND: [...base, activityBucketWhere(bucket, boundaries)] },
       });
 
-    const [overdue, today, tomorrow, completed, all] =
+    // One transaction, not two: the page, its total and the five tab counts all
+    // read the same snapshot, and the request acquires a pooled connection once.
+    // Splitting the counts into a second transaction doubled the acquisitions per
+    // page load, which is what pushed concurrent callers past Prisma's transaction
+    // maxWait and returned a 500 on a perfectly valid request.
+    const [rows, total, overdue, today, tomorrow, completed, all] =
       await this.prisma.$transaction([
-        count('overdue'),
-        count('today'),
-        count('tomorrow'),
-        count('completed'),
-        count('all'),
+        this.prisma.activity.findMany({
+          where,
+          select: ACTIVITY_LIST_SELECT,
+          // id breaks ties so a row can't swap pages between two same-due rows.
+          orderBy: [{ dueAt: 'asc' }, { id: 'asc' }],
+          skip: (query.page - 1) * query.size,
+          take: query.size,
+        }),
+        this.prisma.activity.count({ where }),
+        bucketCount('overdue'),
+        bucketCount('today'),
+        bucketCount('tomorrow'),
+        bucketCount('completed'),
+        bucketCount('all'),
       ]);
 
-    return { overdue, today, tomorrow, completed, all };
+    return {
+      rows: rows.map(toActivityListItem),
+      total,
+      counts: { overdue, today, tomorrow, completed, all },
+    };
   }
 
   /**
