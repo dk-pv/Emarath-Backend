@@ -27,6 +27,10 @@ export interface LeadListItem {
   callAttempts: number;
   whatsappAttempts: number;
   createdAt: string;
+  /** Address parts the board card joins into its one location line (KAN-03.1). */
+  state: string | null;
+  street: string | null;
+  city: string | null;
   assignedAgents: { id: string; name: string }[];
   tags: { id: string; name: string }[];
   /**
@@ -76,6 +80,17 @@ export const LEAD_LIST_SELECT = {
   callAttempts: true,
   whatsappAttempts: true,
   createdAt: true,
+  /**
+   * The board card's address line (KAN-03.1): Workpex prints a location under the
+   * phone on the cards that have one — see the pinned addresses in
+   * `ui-reference/Kanban/kanban-lead-pipeline-dropdown-open-card-hover.png`. Three
+   * short varchars on a query that already projects ~20 scalars and is page-capped,
+   * so the list stays as narrow as it needs to be; the composition into one line is
+   * the client's, as with every other formatted value here.
+   */
+  state: true,
+  street: true,
+  city: true,
   assignments: {
     select: { user: { select: { id: true, name: true } } },
   },
@@ -97,8 +112,8 @@ type LeadRow = Prisma.LeadGetPayload<{ select: typeof LEAD_LIST_SELECT }>;
 
 /**
  * Everything the Edit Lead form needs to prefill — a superset of the list
- * projection with the fields the list never shows (products, address, payment,
- * the raw complaint text). Kept separate from LEAD_LIST_SELECT so the 100-row
+ * projection with the fields the list never shows (products, payment, the national
+ * code, the raw complaint text). Kept separate from LEAD_LIST_SELECT so the 100-row
  * list query stays narrow; this wider read only runs when one lead is opened for
  * editing. `complaints` returns just the latest open one — the form's single
  * COMPLAINTS field mirrors that one, matching how create seeds it.
@@ -342,6 +357,9 @@ export function toLeadListItem(row: LeadRow, isPinned = false): LeadListItem {
     callAttempts: row.callAttempts,
     whatsappAttempts: row.whatsappAttempts,
     createdAt: row.createdAt.toISOString(),
+    state: row.state,
+    street: row.street,
+    city: row.city,
     assignedAgents: row.assignments.map((a) => a.user),
     tags: row.tags.map((t) => t.tag),
     customFields: Object.fromEntries(
