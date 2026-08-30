@@ -12,6 +12,9 @@ import {
   Min,
 } from 'class-validator';
 import { normalizeFilterValues } from '../../leads/lead-filter';
+
+/** Pipeline is `VarChar(120)`; a longer value can never match a row. */
+const MAX_PIPELINE_LENGTH = 120;
 import {
   DEFAULT_REPORT_PAGE_SIZE,
   MAX_FILTER_VALUES,
@@ -70,6 +73,18 @@ export class TodayLeadsQueryDto {
   })
   @IsOptional()
   source?: string[];
+
+  /**
+   * The board a lead belongs to (RPT-02.2 toolbar "Pipeline"). One value, an exact match —
+   * a lead carries exactly one pipeline, mirroring the Leads list' own `pipeline` param.
+   */
+  @Transform(trim)
+  @IsString({ message: 'pipeline must be a string' })
+  @MaxLength(MAX_PIPELINE_LENGTH, {
+    message: `pipeline must be at most ${MAX_PIPELINE_LENGTH} characters`,
+  })
+  @IsOptional()
+  pipeline?: string;
 
   @Transform(({ value }: { value: unknown }): unknown =>
     normalizeFilterValues(value),

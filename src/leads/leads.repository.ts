@@ -299,6 +299,23 @@ export class LeadsRepository {
   }
 
   /**
+   * A lead's calls for its detail timeline: direction, agent and when, newest first,
+   * excluding soft-deleted. Scope is verified by the caller, as with the other two.
+   */
+  async callsForTimeline(leadId: string) {
+    return this.prisma.call.findMany({
+      where: { leadId, deletedAt: null },
+      select: {
+        id: true,
+        startedAt: true,
+        direction: true,
+        agent: { select: { name: true } },
+      },
+      orderBy: { startedAt: 'desc' },
+    });
+  }
+
+  /**
    * A lead's notes for its detail timeline (LEAD-10.2, ADR-0035): author, body and
    * when, newest first, excluding soft-deleted. Scope is verified by the caller.
    */

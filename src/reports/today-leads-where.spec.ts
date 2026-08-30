@@ -60,4 +60,14 @@ describe('buildTodayLeadsWhere', () => {
     expect(json).toContain('DoubleTick');
     expect(json).toContain('11111111-1111-1111-1111-111111111111');
   });
+
+  it('passes the pipeline filter through to the lead where (toolbar "Pipeline")', () => {
+    const where = buildTodayLeadsWhere(admin, { pipeline: 'LOGISTICS' });
+    expect(JSON.stringify(where.AND?.[0])).toContain('LOGISTICS');
+  });
+
+  it('leaves the pipeline predicate out entirely when none is selected', () => {
+    const where = buildTodayLeadsWhere(admin, {});
+    expect(JSON.stringify(where.AND?.[0])).not.toContain('pipeline');
+  });
 });

@@ -14,6 +14,19 @@ import {
   toTodayLeadRow,
 } from './dto/today-leads-response.dto';
 
+/** Workpex's "Assigned Date": the latest assignment, the one currently in force. */
+function assignedDateOf(lead: {
+  assignments: { createdAt: Date }[];
+}): Date | null {
+  return lead.assignments.reduce<Date | null>(
+    (latest, assignment) =>
+      latest === null || assignment.createdAt > latest
+        ? assignment.createdAt
+        : latest,
+    null,
+  );
+}
+
 /** Rows are read in pages so a large export never loads the whole set at once. */
 const EXPORT_BATCH_SIZE = 1000;
 /** A hard ceiling so a runaway filter cannot stream unbounded rows. */
@@ -34,10 +47,17 @@ const ORDER_BY: Prisma.LeadOrderByWithRelationInput[] = [
 
 const EXPORT_HEADERS = [
   'Customer Name',
-  'First Name',
+  'Assigned Date',
+  'Created Date',
   'Primary Phone',
-  'Source',
+  'First Name',
+  'Secondary Phone',
   'Assigned',
+  'Lead Status',
+  'Language',
+  'Source',
+  'Call Status',
+  'Country',
   'Call Attempts',
   'WhatsApp Attempts',
   'Last Contacted',
@@ -66,15 +86,18 @@ export class TodayLeadsReportService {
     const user = await this.currentUser.resolve();
     const where = buildTodayLeadsWhere(user, query);
 
-    const [leads, total] = await this.prisma.$transaction([
-      this.prisma.lead.findMany({
-        where,
-        select: TODAY_LEADS_SELECT,
-        orderBy: ORDER_BY,
-        skip: (query.page - 1) * query.size,
-        take: query.size,
-      }),
-      this.prisma.lead.count({ where }),
+    const [[leads, total], colorByStatus] = await Promise.all([
+      this.prisma.$transaction([
+        this.prisma.lead.findMany({
+          where,
+          select: TODAY_LEADS_SELECT,
+          orderBy: ORDER_BY,
+          skip: (query.page - 1) * query.size,
+          take: query.size,
+        }),
+        this.prisma.lead.count({ where }),
+      ]),
+      this.stageColorByName(),
     ]);
 
     const lastById = await this.lastContactedByLead(
@@ -82,7 +105,11 @@ export class TodayLeadsReportService {
     );
     return {
       rows: leads.map((lead) =>
-        toTodayLeadRow(lead, lastById.get(lead.id) ?? null),
+        toTodayLeadRow(
+          lead,
+          lastById.get(lead.id) ?? null,
+          colorByStatus.get(lead.status) ?? null,
+        ),
       ),
       total,
     };
@@ -191,10 +218,17 @@ export class TodayLeadsReportService {
         chunk +=
           [
             csvCell(lead.name),
-            csvCell(lead.firstName ?? ''),
+            csvCell(assignedDateOf(lead)?.toISOString() ?? ''),
+            csvCell(lead.createdAt.toISOString()),
             csvCell(lead.primaryPhone),
-            csvCell(lead.source ?? ''),
+            csvCell(lead.firstName ?? ''),
+            csvCell(lead.secondaryPhone ?? ''),
             csvCell(lead.assignments.map((a) => a.user.name).join('; ')),
+            csvCell(lead.status),
+            csvCell(lead.language ?? ''),
+            csvCell(lead.source ?? ''),
+            csvCell(lead.callStatus ?? ''),
+            csvCell(lead.country ?? ''),
             csvCell(String(lead.callAttempts)),
             csvCell(String(lead.whatsappAttempts)),
             csvCell(last ? last.toISOString() : 'Not contacted'),
@@ -207,6 +241,22 @@ export class TodayLeadsReportService {
     }
 
     res.end();
+  }
+
+  /**
+   * status name → Stage colour key (KAN-05.1), so the Lead Status badge is tinted from the
+   * same catalogue the board and the Leads list read. Same helper as the sibling reports.
+   */
+  private async stageColorByName(): Promise<Map<string, string>> {
+    const stages = await this.prisma.stage.findMany({
+      select: { name: true, color: true },
+      orderBy: [{ pipeline: 'asc' }, { position: 'asc' }],
+    });
+    const map = new Map<string, string>();
+    for (const stage of stages) {
+      if (!map.has(stage.name)) map.set(stage.name, stage.color);
+    }
+    return map;
   }
 
   /**

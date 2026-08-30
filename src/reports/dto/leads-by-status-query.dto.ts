@@ -6,6 +6,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   MaxLength,
   Min,
@@ -19,6 +20,8 @@ import {
 
 /** `User.team` is `VarChar(120)`; a longer value can never match a row. */
 export const MAX_TEAM_LENGTH = 120;
+/** `Lead.status` / `Lead.pipeline` are `VarChar(120)` too. */
+const MAX_VALUE_LENGTH = 120;
 
 const trim = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' ? value.trim() : value;
@@ -71,4 +74,41 @@ export class LeadsByStatusQueryDto {
   })
   @IsOptional()
   team?: string[];
+
+  /** Assigned-agent user ids (toolbar "Sales Agent") — matched through the assignment join. */
+  @Transform(({ value }: { value: unknown }): unknown =>
+    normalizeFilterValues(value),
+  )
+  @IsArray({ message: 'agent must be one or more values' })
+  @IsUUID('all', { each: true, message: 'each agent must be a valid id' })
+  @ArrayMaxSize(MAX_FILTER_VALUES, {
+    message: `agent accepts at most ${MAX_FILTER_VALUES} values`,
+  })
+  @IsOptional()
+  agent?: string[];
+
+  /** Lead status names (toolbar "Lead Status") — narrows the grouped set to these statuses. */
+  @Transform(({ value }: { value: unknown }): unknown =>
+    normalizeFilterValues(value),
+  )
+  @IsArray({ message: 'status must be one or more values' })
+  @IsString({ each: true, message: 'each status must be a string' })
+  @MaxLength(MAX_VALUE_LENGTH, {
+    each: true,
+    message: `each status must be at most ${MAX_VALUE_LENGTH} characters`,
+  })
+  @ArrayMaxSize(MAX_FILTER_VALUES, {
+    message: `status accepts at most ${MAX_FILTER_VALUES} values`,
+  })
+  @IsOptional()
+  status?: string[];
+
+  /** The board a lead belongs to (toolbar "Pipeline") — one exact value. */
+  @Transform(trim)
+  @IsString({ message: 'pipeline must be a string' })
+  @MaxLength(MAX_VALUE_LENGTH, {
+    message: `pipeline must be at most ${MAX_VALUE_LENGTH} characters`,
+  })
+  @IsOptional()
+  pipeline?: string;
 }
