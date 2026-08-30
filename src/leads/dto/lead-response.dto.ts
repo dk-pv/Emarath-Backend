@@ -1,4 +1,4 @@
-import { Prisma } from '../../generated/prisma/client';
+import { CallDirection, Prisma } from '../../generated/prisma/client';
 
 /**
  * The shape the list endpoint returns for one lead.
@@ -27,10 +27,23 @@ export interface LeadListItem {
   callAttempts: number;
   whatsappAttempts: number;
   createdAt: string;
+  /** Last write to the lead row — the Lead Detail header's "Last Updated" line. */
+  updatedAt: string;
   /** Address parts the board card joins into its one location line (KAN-03.1). */
   state: string | null;
   street: string | null;
   city: string | null;
+  /** The remaining Workpex list columns (LEAD-02.2): order, payment and identity fields. */
+  product: string | null;
+  productQty: string | null;
+  product2: string | null;
+  product2Qty: string | null;
+  paymentMethod: string | null;
+  nationalCode: string | null;
+  /** The latest open complaint's reason — Workpex's "COMPLAINTS" column; null when none. */
+  complaintReason: string | null;
+  /** The latest assignment's instant — "Assigned Date"; null when unassigned. */
+  assignedDate: string | null;
   assignedAgents: { id: string; name: string }[];
   tags: { id: string; name: string }[];
   /**
@@ -80,6 +93,7 @@ export const LEAD_LIST_SELECT = {
   callAttempts: true,
   whatsappAttempts: true,
   createdAt: true,
+  updatedAt: true,
   /**
    * The board card's address line (KAN-03.1): Workpex prints a location under the
    * phone on the cards that have one — see the pinned addresses in
@@ -91,8 +105,21 @@ export const LEAD_LIST_SELECT = {
   state: true,
   street: true,
   city: true,
+  product: true,
+  productQty: true,
+  product2: true,
+  product2Qty: true,
+  paymentMethod: true,
+  nationalCode: true,
+  /** The latest open complaint only — one nested row per lead, so the page stays bounded. */
+  complaints: {
+    where: { deletedAt: null },
+    orderBy: { createdAt: 'desc' },
+    take: 1,
+    select: { details: true },
+  },
   assignments: {
-    select: { user: { select: { id: true, name: true } } },
+    select: { createdAt: true, user: { select: { id: true, name: true } } },
   },
   tags: {
     select: { tag: { select: { id: true, name: true } } },
@@ -253,14 +280,21 @@ export function toLeadEditData(row: LeadEditRow): LeadEditData {
 /**
  * One entry in the Lead Detail timeline (Lead Detail drawer). Built by aggregating
  * data the system actually records — the lead's own `createdAt`, its assignment
- * rows, and its notes — never a fabricated event. Email sends and the actor who
- * created/assigned a lead are not tracked today, so those are deliberately absent
+ * rows, its notes and its calls — never a fabricated event. Email sends and the actor
+ * who created/assigned a lead are not tracked today, so those are deliberately absent
  * rather than invented (partial-but-honest timeline).
  */
 export type LeadTimelineEvent =
   | { id: string; type: 'created'; at: string }
   | { id: string; type: 'assigned'; at: string; assigneeName: string }
-  | { id: string; type: 'note'; at: string; authorName: string; body: string };
+  | { id: string; type: 'note'; at: string; authorName: string; body: string }
+  | {
+      id: string;
+      type: 'call';
+      at: string;
+      direction: CallDirection;
+      agentName: string;
+    };
 
 /**
  * Merges a lead's created/assigned/note facts into one newest-first feed. Pure, so
@@ -276,6 +310,12 @@ export function buildLeadTimeline(
     body: string;
     author: { name: string };
   }[],
+  calls: {
+    id: string;
+    startedAt: Date;
+    direction: CallDirection;
+    agent: { name: string };
+  }[] = [],
 ): LeadTimelineEvent[] {
   const events: LeadTimelineEvent[] = [
     { id: `created:${leadId}`, type: 'created', at: createdAt.toISOString() },
@@ -291,6 +331,13 @@ export function buildLeadTimeline(
       at: n.createdAt.toISOString(),
       authorName: n.author.name,
       body: n.body,
+    })),
+    ...calls.map((c) => ({
+      id: `call:${c.id}`,
+      type: 'call' as const,
+      at: c.startedAt.toISOString(),
+      direction: c.direction,
+      agentName: c.agent.name,
     })),
   ];
   return events.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
@@ -357,9 +404,25 @@ export function toLeadListItem(row: LeadRow, isPinned = false): LeadListItem {
     callAttempts: row.callAttempts,
     whatsappAttempts: row.whatsappAttempts,
     createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
     state: row.state,
     street: row.street,
     city: row.city,
+    product: row.product,
+    productQty: row.productQty?.toString() ?? null,
+    product2: row.product2,
+    product2Qty: row.product2Qty?.toString() ?? null,
+    paymentMethod: row.paymentMethod,
+    nationalCode: row.nationalCode,
+    complaintReason: row.complaints[0]?.details ?? null,
+    assignedDate:
+      row.assignments
+        .reduce<Date | null>(
+          (latest, a) =>
+            latest === null || a.createdAt > latest ? a.createdAt : latest,
+          null,
+        )
+        ?.toISOString() ?? null,
     assignedAgents: row.assignments.map((a) => a.user),
     tags: row.tags.map((t) => t.tag),
     customFields: Object.fromEntries(

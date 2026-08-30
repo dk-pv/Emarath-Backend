@@ -26,8 +26,16 @@ const FAKE_ROW = {
   callAttempts: 0,
   whatsappAttempts: 0,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
+  updatedAt: new Date('2026-01-01T00:00:00.000Z'),
   assignments: [],
   tags: [],
+  product: null,
+  productQty: null,
+  product2: null,
+  product2Qty: null,
+  paymentMethod: null,
+  nationalCode: null,
+  complaints: [],
   customFieldValues: [],
 };
 
@@ -56,7 +64,12 @@ const FAKE_EDIT_ROW = {
   street: null,
   city: null,
   nationalCode: null,
-  assignments: [{ user: { id: 'agent-1', name: 'Agent One' } }],
+  assignments: [
+    {
+      createdAt: new Date('2026-08-19T16:00:00.000Z'),
+      user: { id: 'agent-1', name: 'Agent One' },
+    },
+  ],
   tags: [{ tagId: 'tag-1' }],
   complaints: [{ details: 'RETURN' }],
 };
@@ -81,6 +94,7 @@ function makeService(
   const unpin = jest.fn().mockResolvedValue(undefined);
   const assignmentsForTimeline = jest.fn().mockResolvedValue([]);
   const notesForTimeline = jest.fn().mockResolvedValue([]);
+  const callsForTimeline = jest.fn().mockResolvedValue([]);
   const activitiesForLead = jest.fn().mockResolvedValue([]);
   const repository = {
     create,
@@ -91,6 +105,7 @@ function makeService(
     unpin,
     assignmentsForTimeline,
     notesForTimeline,
+    callsForTimeline,
     activitiesForLead,
   } as unknown as LeadsRepository;
   const currentUser = {
@@ -119,14 +134,20 @@ function makeService(
     updateArgsOf,
     assignmentsForTimeline,
     notesForTimeline,
+    callsForTimeline,
     activitiesForLead,
   };
 }
 
 describe('LeadsService.getTimeline', () => {
   it('404s (and never aggregates) an out-of-scope lead', async () => {
-    const { service, findById, assignmentsForTimeline, notesForTimeline } =
-      makeService();
+    const {
+      service,
+      findById,
+      assignmentsForTimeline,
+      notesForTimeline,
+      callsForTimeline,
+    } = makeService();
     findById.mockResolvedValue(null);
 
     await expect(service.getTimeline('lead-1')).rejects.toBeInstanceOf(
@@ -134,11 +155,17 @@ describe('LeadsService.getTimeline', () => {
     );
     expect(assignmentsForTimeline).not.toHaveBeenCalled();
     expect(notesForTimeline).not.toHaveBeenCalled();
+    expect(callsForTimeline).not.toHaveBeenCalled();
   });
 
   it('merges created + assignments + notes newest-first for an in-scope lead', async () => {
-    const { service, findById, assignmentsForTimeline, notesForTimeline } =
-      makeService();
+    const {
+      service,
+      findById,
+      assignmentsForTimeline,
+      notesForTimeline,
+      callsForTimeline,
+    } = makeService();
     findById.mockResolvedValue({
       ...FAKE_ROW,
       id: 'lead-1',
@@ -159,21 +186,40 @@ describe('LeadsService.getTimeline', () => {
         author: { name: 'Ahamed' },
       },
     ]);
+    callsForTimeline.mockResolvedValue([
+      {
+        id: 'c1',
+        startedAt: new Date('2026-08-21T10:53:00.000Z'),
+        direction: 'OUTBOUND',
+        agent: { name: 'ADEEB C' },
+      },
+    ]);
 
     const events = await service.getTimeline('lead-1');
 
-    // Newest first: the note (Aug 20) precedes the assignment and creation (Aug 19).
-    expect(events.map((e) => e.type)).toEqual(['note', 'assigned', 'created']);
+    // Newest first: the call (Aug 21), the note (Aug 20), then the assignment and
+    // creation (Aug 19).
+    expect(events.map((e) => e.type)).toEqual([
+      'call',
+      'note',
+      'assigned',
+      'created',
+    ]);
     expect(events[0]).toMatchObject({
+      type: 'call',
+      direction: 'OUTBOUND',
+      agentName: 'ADEEB C',
+    });
+    expect(events[1]).toMatchObject({
       type: 'note',
       authorName: 'Ahamed',
       body: 'hello',
     });
-    expect(events[1]).toMatchObject({
+    expect(events[2]).toMatchObject({
       type: 'assigned',
       assigneeName: 'ADEEB C',
     });
-    expect(events[2]).toMatchObject({ type: 'created' });
+    expect(events[3]).toMatchObject({ type: 'created' });
   });
 });
 
@@ -200,7 +246,12 @@ describe('LeadsService.getActivities', () => {
         endAt: null,
         completedAt: null,
         createdAt: new Date('2026-08-20T09:47:00.000Z'),
-        assignees: [{ user: { id: 'u1', name: 'ADEEB C' } }],
+        assignees: [
+          {
+            createdAt: new Date('2026-08-19T16:00:00.000Z'),
+            user: { id: 'u1', name: 'ADEEB C' },
+          },
+        ],
       },
     ]);
 

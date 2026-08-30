@@ -4,6 +4,12 @@ import { buildLeadWhere } from '../leads/lead-where';
 
 /** The filters the Leads By Status report (RPT-02.3) accepts, already parsed. */
 export interface LeadsByStatusFilters {
+  /** Assigned-agent user ids — matched through the assignment join. */
+  agent?: string[];
+  /** Lead status names to narrow to. */
+  status?: string[];
+  /** One exact board name. */
+  pipeline?: string;
   /** Team names (RPT-02.3 AC3) — matched through the assignee's `User.team`. */
   team?: string[];
   /**
@@ -40,7 +46,13 @@ export function buildLeadsByStatusWhere(
   filters: LeadsByStatusFilters,
 ): Prisma.LeadWhereInput {
   const conditions: Prisma.LeadWhereInput[] = [
-    buildLeadWhere(user, { createdFrom: filters.from, createdTo: filters.to }),
+    buildLeadWhere(user, {
+      createdFrom: filters.from,
+      createdTo: filters.to,
+      assignedAgent: filters.agent,
+      status: filters.status,
+      pipeline: filters.pipeline,
+    }),
   ];
   if (filters.team?.length) conditions.push(teamWhere(filters.team));
 

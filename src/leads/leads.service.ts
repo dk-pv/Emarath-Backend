@@ -280,12 +280,19 @@ export class LeadsService {
       );
     }
 
-    const [assignments, notes] = await Promise.all([
+    const [assignments, notes, calls] = await Promise.all([
       this.repository.assignmentsForTimeline(id),
       this.repository.notesForTimeline(id),
+      this.repository.callsForTimeline(id),
     ]);
 
-    return buildLeadTimeline(lead.id, lead.createdAt, assignments, notes);
+    return buildLeadTimeline(
+      lead.id,
+      lead.createdAt,
+      assignments,
+      notes,
+      calls,
+    );
   }
 
   /**

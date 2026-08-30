@@ -4,6 +4,8 @@ import { buildLeadWhere } from '../leads/lead-where';
 
 /** The filters the Today Leads report (RPT-02.2) accepts, already parsed. */
 export interface TodayLeadsFilters {
+  /** The board a lead belongs to — one exact value, as the Leads list filters it. */
+  pipeline?: string;
   /** Assigned-agent user ids (RPT-02.2 AC2) — matched through the assignment join. */
   agent?: string[];
   /** Lead source values (RPT-02.2 AC2) — exact match. */
@@ -69,6 +71,7 @@ export function buildTodayLeadsWhere(
       buildLeadWhere(user, {
         source: filters.source,
         assignedAgent: filters.agent,
+        pipeline: filters.pipeline,
       }),
       recentlyContactedWhere(filters),
     ],

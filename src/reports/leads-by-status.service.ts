@@ -59,15 +59,19 @@ export class LeadsByStatusReportService {
     const user = await this.currentUser.resolve();
     const where = buildLeadsByStatusWhere(user, query);
 
-    const [leads, total, colorByStatus] = await Promise.all([
-      this.prisma.lead.findMany({
-        where,
-        select: LEADS_BY_STATUS_SELECT,
-        orderBy: ORDER_BY,
-        skip: (query.page - 1) * query.size,
-        take: query.size,
-      }),
-      this.prisma.lead.count({ where }),
+    // Page + count in one transaction so `total` can never describe a different
+    // snapshot than `rows` — the same guarantee every sibling report gives.
+    const [[leads, total], colorByStatus] = await Promise.all([
+      this.prisma.$transaction([
+        this.prisma.lead.findMany({
+          where,
+          select: LEADS_BY_STATUS_SELECT,
+          orderBy: ORDER_BY,
+          skip: (query.page - 1) * query.size,
+          take: query.size,
+        }),
+        this.prisma.lead.count({ where }),
+      ]),
       this.stageColorByName(),
     ]);
 

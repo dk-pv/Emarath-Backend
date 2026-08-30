@@ -40,4 +40,23 @@ describe('buildLeadsByStatusWhere', () => {
     const where = buildLeadsByStatusWhere(agent, { team: ['Sales'] });
     expect(JSON.stringify(where)).toContain('"userId":"agent-1"');
   });
+
+  it('passes agent, status and pipeline through to the reused leads where', () => {
+    const where = buildLeadsByStatusWhere(admin, {
+      agent: ['11111111-1111-4111-8111-111111111111'],
+      status: ['HOT', 'Cold'],
+      pipeline: 'LOGISTICS',
+    });
+    const json = JSON.stringify(where);
+    expect(json).toContain('11111111-1111-4111-8111-111111111111');
+    expect(json).toContain('HOT');
+    expect(json).toContain('Cold');
+    expect(json).toContain('LOGISTICS');
+  });
+
+  it('leaves the new predicates out entirely when none is selected', () => {
+    const json = JSON.stringify(buildLeadsByStatusWhere(admin, {}));
+    expect(json).not.toContain('pipeline');
+    expect(json).not.toContain('"status"');
+  });
 });
