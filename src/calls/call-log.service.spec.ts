@@ -11,6 +11,7 @@ import { CallLogQueryDto } from './dto/call-log-query.dto';
 const USER_ID = '22222222-2222-2222-2222-222222222222';
 const LEAD_ID = '11111111-1111-1111-1111-111111111111';
 const CALL_ID = '44444444-4444-4444-4444-444444444444';
+const TAG_ID = '55555555-5555-5555-5555-555555555555';
 const FROM = '2026-07-27T00:00:00.000Z';
 const TO = '2026-07-28T00:00:00.000Z';
 
@@ -32,7 +33,16 @@ function callRow(overrides: Record<string, unknown> = {}) {
     direction: CallDirection.OUTBOUND,
     leadNotes: 'lead note',
     callNotes: 'call note',
-    lead: { name: 'Acme', status: 'New' },
+    audioUrl: null,
+    flagged: false,
+    lead: {
+      name: 'Acme',
+      status: 'New',
+      source: 'Broadcast',
+      pipeline: 'Lead Pipeline',
+      assignments: [{ user: { id: USER_ID, name: 'Agent One' } }],
+      tags: [{ tag: { id: TAG_ID, name: 'VIP' } }],
+    },
     ...overrides,
   };
 }
@@ -86,6 +96,19 @@ describe('CallLogService.getLog', () => {
       leadNotes: 'lead note',
       callNotes: 'call note',
       nextFollowUp: new Date('2026-07-30T09:00:00.000Z'),
+    });
+  });
+
+  it('flattens the lead-derived columns the log offers', async () => {
+    const { service } = makeService();
+    const [row] = (await service.getLog(query())).rows;
+    expect(row).toMatchObject({
+      leadSource: 'Broadcast',
+      leadPipeline: 'Lead Pipeline',
+      assignedTo: [{ id: USER_ID, name: 'Agent One' }],
+      tags: [{ id: TAG_ID, name: 'VIP' }],
+      audioUrl: null,
+      flagged: false,
     });
   });
 

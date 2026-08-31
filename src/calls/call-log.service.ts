@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { CallDirection, CallOutcome, Prisma } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
@@ -8,7 +8,12 @@ import { callScopeWhere } from './call-scope';
 import { resolvePeriod } from './call-period';
 import { CallLogQueryDto } from './dto/call-log-query.dto';
 
-/** One row of the Recent Call Log (CALL-05.1) — the backlog fields, no more. */
+/**
+ * One row of the Recent Call Log (CALL-05.1). The backlog fields, plus the
+ * lead-derived columns the Workpex Manage Columns panel offers (source, stage,
+ * assignee, tags) and the row's own audio/flag state. All of it comes off the
+ * one scoped call read — no second round trip per row.
+ */
 export type CallLogRow = {
   id: string;
   /** The drill-through target for CALL-05.2 (clicking the Lead Name). */
@@ -24,6 +29,18 @@ export type CallLogRow = {
   nextFollowUp: Date | null;
   leadNotes: string | null;
   callNotes: string | null;
+  /** The PBX recording, when one exists — the Audio Clip column / download action. */
+  audioUrl: string | null;
+  /** The row's own flag, toggled from the Actions column. */
+  flagged: boolean;
+  /** The lead's origin channel, for the optional Lead Source column. */
+  leadSource: string | null;
+  /** The lead's pipeline — with `leadStatus`, the Lead Stage column. */
+  leadPipeline: string;
+  /** The lead's assigned agents, for the optional Assigned To column. */
+  assignedTo: { id: string; name: string }[];
+  /** The lead's tags, for the optional Tags column. */
+  tags: { id: string; name: string }[];
 };
 
 export type CallLogResponse = {
@@ -42,7 +59,18 @@ const CALL_LOG_SELECT = {
   direction: true,
   leadNotes: true,
   callNotes: true,
-  lead: { select: { name: true, status: true } },
+  audioUrl: true,
+  flagged: true,
+  lead: {
+    select: {
+      name: true,
+      status: true,
+      source: true,
+      pipeline: true,
+      assignments: { select: { user: { select: { id: true, name: true } } } },
+      tags: { select: { tag: { select: { id: true, name: true } } } },
+    },
+  },
 } satisfies Prisma.CallSelect;
 
 /**
@@ -50,8 +78,7 @@ const CALL_LOG_SELECT = {
  * individual calls behind the summary KPIs. Reuses `callScopeWhere` and
  * `resolvePeriod`, and the leads' `escapeLike` for search. Server-side paged
  * (CLAUDE §8 — never an unbounded log). Outcome + name/number search are the
- * only filters here; the rest are CALL-06.1. Audio Clip and the row Actions are
- * deferred (approved Change Request).
+ * only filters here; the rest are CALL-06.1.
  */
 @Injectable()
 export class CallLogService {
@@ -108,9 +135,30 @@ export class CallLogService {
       nextFollowUp: nextFollowUpByLead.get(call.leadId) ?? null,
       leadNotes: call.leadNotes,
       callNotes: call.callNotes,
+      audioUrl: call.audioUrl,
+      flagged: call.flagged,
+      leadSource: call.lead.source,
+      leadPipeline: call.lead.pipeline,
+      assignedTo: call.lead.assignments.map((a) => a.user),
+      tags: call.lead.tags.map((t) => t.tag),
     }));
 
     return { rows, total, page: query.page, size: query.size };
+  }
+
+  /**
+   * Toggle one call's flag from the log's Actions column. Scoped like every read
+   * here — the update is filtered by `callScopeWhere`, so an agent cannot flag a
+   * call on someone else's lead by posting its id.
+   */
+  async setFlagged(id: string, flagged: boolean): Promise<{ flagged: boolean }> {
+    const user = await this.currentUser.resolve();
+    const { count } = await this.prisma.call.updateMany({
+      where: { ...callScopeWhere(user), id },
+      data: { flagged },
+    });
+    if (count === 0) throw new NotFoundException('Call not found');
+    return { flagged };
   }
 
   /** Name-or-number search, reusing the leads LIKE-escape (AC4). */
