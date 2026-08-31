@@ -251,6 +251,11 @@ model Lead {
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   deletedAt DateTime? @map("deleted_at")
+  /// When `status` last changed — kept by the `leads_status_changed_at` trigger
+  /// (migration 20260830120000), never by app code, so every write path stays covered.
+  /// Backfilled to `created_at`. Drives the Leads By Status report's "Status Changed
+  /// Date" window (RPT-02.3).
+  statusChangedAt DateTime @default(now()) @map("status_changed_at")
 
   assignments       LeadAssignment[]
   tags              LeadTag[]

@@ -202,6 +202,20 @@ export class LeadsRepository {
     return rows.map((row) => row.leadId);
   }
 
+  /**
+   * The primary phones held by more than one lead inside a scoped `where` — the
+   * "Duplicate Lead" search scope. Grouped in the database, so no lead set streams out
+   * to be compared here; the caller narrows its page to these phones.
+   */
+  async duplicatePhones(where: Prisma.LeadWhereInput): Promise<string[]> {
+    const groups = await this.prisma.lead.groupBy({
+      by: ['primaryPhone'],
+      where,
+      having: { primaryPhone: { _count: { gt: 1 } } },
+    });
+    return groups.map((group) => group.primaryPhone);
+  }
+
   /** Pins a lead for one user (ADR-0031). Idempotent — re-pinning is a no-op. */
   async pin(userId: string, leadId: string): Promise<void> {
     await this.prisma.leadPin.upsert({
