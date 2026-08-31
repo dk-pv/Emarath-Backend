@@ -12,6 +12,11 @@ import { leadScopeWhere } from '../leads/lead-scope';
 import { activityScopeWhere } from './activity-scope';
 import { activityBucketWhere, DayBoundaries } from './activity-buckets';
 import { activityFilterWhere, activitySearchWhere } from './activity-filters';
+import {
+  activityDateWindowWhere,
+  activityDueRangeWhere,
+  type ActivityWindowEdges,
+} from './activity-date-windows';
 import { CreateActivityDto } from './dto/create-activity.dto';
 import { UpdateActivityDto } from './dto/update-activity.dto';
 import { ListActivitiesQueryDto } from './dto/list-activities-query.dto';
@@ -78,8 +83,30 @@ export class ActivitiesService {
         assignedAgent: query.assignedAgent,
         status: query.status,
         pipeline: query.pipeline,
+        type: query.type,
       }),
     );
+
+    // The filter popup's quick-date checkboxes and its explicit From/To range.
+    // Both sit in `base`, so they narrow the tab counts too — a badge keeps
+    // counting exactly what its tab would show under the active filters (AC5).
+    const optional = (value: string | undefined) =>
+      value === undefined ? undefined : new Date(value);
+    const edges: ActivityWindowEdges = {
+      ...boundaries,
+      yesterdayStart: optional(query.yesterdayStart),
+      weekStart: optional(query.weekStart),
+      weekEnd: optional(query.weekEnd),
+      monthStart: optional(query.monthStart),
+      monthEnd: optional(query.monthEnd),
+    };
+    const windows = activityDateWindowWhere(query.dateWindow, edges);
+    if (windows) base.push(windows);
+    const dueRange = activityDueRangeWhere(
+      optional(query.dueFrom),
+      optional(query.dueTo),
+    );
+    if (dueRange) base.push(dueRange);
 
     const where: Prisma.ActivityWhereInput = {
       AND: [...base, activityBucketWhere(query.bucket, boundaries)],

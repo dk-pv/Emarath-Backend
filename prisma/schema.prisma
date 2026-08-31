@@ -665,6 +665,13 @@ model Call {
   duration   Int           @default(0)
   leadNotes  String?       @map("lead_notes") @db.Text
   callNotes  String?       @map("call_notes") @db.Text
+  /// Row-level flag raised from the Recent Call Log's Actions column. Belongs to
+  /// the attempt, not the lead, so flagging one call never marks the others.
+  flagged    Boolean       @default(false)
+  /// The PBX recording for this attempt, when one exists. Null until the live 3CX
+  /// transport supplies it (CALL-02.1), which keeps the Audio Clip action honest:
+  /// the row's download is disabled rather than dead.
+  audioUrl   String?       @map("audio_url") @db.VarChar(500)
 
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")

@@ -31,6 +31,7 @@ describe('Historical call retention (CALL-08.1)', () => {
         aggregate: jest.fn().mockResolvedValue({ _sum: { duration: 0 } }),
         groupBy: jest.fn().mockResolvedValue([]),
       },
+      activity: { count: jest.fn().mockResolvedValue(0) },
     } as unknown as PrismaService;
     const currentUser = {
       resolve: jest.fn().mockResolvedValue({

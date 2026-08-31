@@ -43,6 +43,9 @@ export class CallLeaderboardService {
     const where: Prisma.CallWhereInput = {
       ...scope,
       startedAt: { gte: start, lt: end },
+      // The Filter popup's "Select User" leg — narrows the board to one agent
+      // on top of role scoping, never around it.
+      ...(query.agentId ? { agentId: query.agentId } : {}),
     };
 
     const [totals, answered, missed, contactGroups] = await Promise.all([

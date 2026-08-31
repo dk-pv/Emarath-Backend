@@ -5,6 +5,7 @@ import { CallLookupService } from './call-lookup.service';
 import { CallSummaryService } from './call-summary.service';
 import { CallLeaderboardService } from './call-leaderboard.service';
 import { CallLogService } from './call-log.service';
+import { CallAnalyticsService } from './call-analytics.service';
 
 /**
  * The Call Dashboard feature. CALL-01.1 landed the schema; CALL-02.1 adds the
@@ -25,6 +26,7 @@ import { CallLogService } from './call-log.service';
     CallSummaryService,
     CallLeaderboardService,
     CallLogService,
+    CallAnalyticsService,
   ],
   exports: [CallsService, CallLookupService],
 })
