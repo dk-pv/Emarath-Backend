@@ -1,26 +1,16 @@
 import { Prisma } from '../../generated/prisma/client';
-
-/** An assignee reference, exactly the shape the Leads list already exposes. */
-export interface LeadsByStatusAgentRef {
-  id: string;
-  name: string;
-}
+import { LeadListItem } from '../../leads/dto/lead-response.dto';
 
 /**
- * One lead in the detailed view (RPT-02.3 AC1/AC3). `statusColor` is the lead's status
- * stage colour KEY from the Stage catalogue (KAN-05.1), or null when the status has no
- * catalogue entry — the frontend maps the key to its tokens (never an invented colour).
+ * One lead in the detailed view (RPT-02.3 AC1/AC3): the Leads list's own row — every
+ * column the report shows is a field the list already returns, mapped by the same code —
+ * plus `statusColor`, the status's stage colour KEY from the Stage catalogue (KAN-05.1),
+ * or null when the status has no catalogue entry. The frontend maps the key to its tokens
+ * (never an invented colour).
  */
-export interface LeadsByStatusLeadRow {
-  id: string;
-  name: string;
-  firstName: string | null;
-  primaryPhone: string;
-  source: string | null;
-  status: string;
+export type LeadsByStatusLeadRow = LeadListItem & {
   statusColor: string | null;
-  assignedTo: LeadsByStatusAgentRef[];
-}
+};
 
 export interface LeadsByStatusListResponse {
   rows: LeadsByStatusLeadRow[];
@@ -45,7 +35,7 @@ export interface LeadsByStatusFilterOptions {
   teams: string[];
 }
 
-/** The lead fields the report reads — identity, source, status and assignees only. */
+/** The lead fields the CSV export reads — identity, source, status and assignees only. */
 export const LEADS_BY_STATUS_SELECT = {
   id: true,
   name: true,
@@ -57,27 +47,3 @@ export const LEADS_BY_STATUS_SELECT = {
     select: { user: { select: { id: true, name: true } } },
   },
 } satisfies Prisma.LeadSelect;
-
-type LeadsByStatusLead = Prisma.LeadGetPayload<{
-  select: typeof LEADS_BY_STATUS_SELECT;
-}>;
-
-/** Shapes a selected lead + its status colour into a response row. */
-export function toLeadsByStatusRow(
-  lead: LeadsByStatusLead,
-  statusColor: string | null,
-): LeadsByStatusLeadRow {
-  return {
-    id: lead.id,
-    name: lead.name,
-    firstName: lead.firstName,
-    primaryPhone: lead.primaryPhone,
-    source: lead.source,
-    status: lead.status,
-    statusColor,
-    assignedTo: lead.assignments.map((assignment) => ({
-      id: assignment.user.id,
-      name: assignment.user.name,
-    })),
-  };
-}

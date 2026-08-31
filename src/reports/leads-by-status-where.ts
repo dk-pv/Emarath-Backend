@@ -18,8 +18,12 @@ export interface LeadsByStatusFilters {
    * instant. Absent means "any time" — the whole role-scoped set.
    */
   from?: string;
-  /** Optional upper bound of the creation window; rarely set (the UI sends only `from`). */
+  /** Optional upper bound of the window (the Custom range's inclusive end, as the next midnight). */
   to?: string;
+  /** Which lead date the window applies to; absent means creation. */
+  dateField?: 'created' | 'statusChanged';
+  /** The Filter condition builder's JSON payload (ADR-0039), parsed by `buildLeadWhere`. */
+  conditions?: string;
 }
 
 /**
@@ -45,16 +49,28 @@ export function buildLeadsByStatusWhere(
   user: CurrentUser,
   filters: LeadsByStatusFilters,
 ): Prisma.LeadWhereInput {
+  const byStatusChange = filters.dateField === 'statusChanged';
   const conditions: Prisma.LeadWhereInput[] = [
     buildLeadWhere(user, {
-      createdFrom: filters.from,
-      createdTo: filters.to,
+      createdFrom: byStatusChange ? undefined : filters.from,
+      createdTo: byStatusChange ? undefined : filters.to,
       assignedAgent: filters.agent,
       status: filters.status,
       pipeline: filters.pipeline,
+      conditions: filters.conditions,
     }),
   ];
   if (filters.team?.length) conditions.push(teamWhere(filters.team));
+  // "Status Changed Date": the same half-open [from, to) window, on the column the
+  // `leads_status_changed_at` trigger keeps current.
+  if (byStatusChange && (filters.from || filters.to)) {
+    conditions.push({
+      statusChangedAt: {
+        gte: filters.from ? new Date(filters.from) : undefined,
+        lt: filters.to ? new Date(filters.to) : undefined,
+      },
+    });
+  }
 
   return conditions.length === 1 ? conditions[0] : { AND: conditions };
 }

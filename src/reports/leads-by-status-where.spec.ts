@@ -54,6 +54,26 @@ describe('buildLeadsByStatusWhere', () => {
     expect(json).toContain('LOGISTICS');
   });
 
+  it('moves the window onto statusChangedAt for the status-change date', () => {
+    const from = '2026-07-01T00:00:00.000Z';
+    const to = '2026-08-01T00:00:00.000Z';
+    const json = JSON.stringify(
+      buildLeadsByStatusWhere(admin, { from, to, dateField: 'statusChanged' }),
+    );
+    expect(json).toContain('"statusChangedAt"');
+    expect(json).toContain(from);
+    expect(json).toContain(to);
+    expect(json).not.toContain('createdAt');
+  });
+
+  it('threads the condition builder payload into the reused leads where', () => {
+    const conditions = JSON.stringify([
+      { field: 'source', operator: 'is', values: ['Facebook'] },
+    ]);
+    const json = JSON.stringify(buildLeadsByStatusWhere(admin, { conditions }));
+    expect(json).toContain('Facebook');
+  });
+
   it('leaves the new predicates out entirely when none is selected', () => {
     const json = JSON.stringify(buildLeadsByStatusWhere(admin, {}));
     expect(json).not.toContain('pipeline');

@@ -43,7 +43,7 @@ export class LeadsService {
 
   async list(query: ListLeadsQueryDto): Promise<LeadListResponse> {
     const user = await this.currentUser.resolve();
-    const where = this.buildWhere(user, query);
+    const where = await this.listWhere(user, query);
 
     // The caller's pins within this exact view drive the pinned-first order
     // (ADR-0031). Resolved per-request from the current user, never the client.
@@ -404,5 +404,23 @@ export class LeadsService {
     query: ListLeadsQueryDto,
   ): Prisma.LeadWhereInput {
     return buildLeadWhere(user, query);
+  }
+
+  /**
+   * The list's `where`, narrowed for the "Duplicate Lead" search scope to leads whose
+   * primary phone another lead also holds. Duplicates are judged across the caller's
+   * whole scoped set — not only the rows the search term matches — so a search inside
+   * the scope still finds a lead whose twin carries a different name.
+   */
+  private async listWhere(
+    user: CurrentUser,
+    query: ListLeadsQueryDto,
+  ): Promise<Prisma.LeadWhereInput> {
+    const where = this.buildWhere(user, query);
+    if (query.searchScope !== 'duplicate') return where;
+    const phones = await this.repository.duplicatePhones(
+      buildLeadWhere(user, { archived: query.archived }),
+    );
+    return { AND: [where, { primaryPhone: { in: phones } }] };
   }
 }

@@ -3,6 +3,7 @@ import {
   ArrayMaxSize,
   IsArray,
   IsDateString,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
@@ -60,6 +61,14 @@ export class LeadsByStatusQueryDto {
   @IsOptional()
   to?: string;
 
+  /** Which lead date the `from`/`to` window applies to: creation (default) or the last status change. */
+  @Transform(trim)
+  @IsIn(['created', 'statusChanged'], {
+    message: 'dateField must be created or statusChanged',
+  })
+  @IsOptional()
+  dateField?: 'created' | 'statusChanged';
+
   @Transform(({ value }: { value: unknown }): unknown =>
     normalizeFilterValues(value),
   )
@@ -111,4 +120,13 @@ export class LeadsByStatusQueryDto {
   })
   @IsOptional()
   pipeline?: string;
+
+  /**
+   * The Filter condition builder's JSON payload (ADR-0039) — the same param the Leads
+   * list accepts, parsed and whitelisted by `parseLeadConditions` inside `buildLeadWhere`.
+   */
+  @IsString({ message: 'conditions must be a JSON string' })
+  @MaxLength(8000, { message: 'conditions payload is too large' })
+  @IsOptional()
+  conditions?: string;
 }

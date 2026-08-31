@@ -130,6 +130,16 @@ export class ListLeadsQueryDto {
   search?: string;
 
   /**
+   * What the search box targets — the toolbar's "Lead / Duplicate Lead" selector: every
+   * lead (default), or only leads whose primary phone another scoped lead also holds.
+   */
+  @IsIn(['lead', 'duplicate'], {
+    message: 'searchScope must be lead or duplicate',
+  })
+  @IsOptional()
+  searchScope?: 'lead' | 'duplicate';
+
+  /**
    * The advanced filter condition builder (ADR-0039) — a JSON array of
    * `{ field, operator, values }`, parsed and whitelisted by `parseLeadConditions`.
    * Distinct from the simple `source`/`status`/… IN-filters below; both may be sent.

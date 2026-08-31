@@ -3,6 +3,10 @@ import type { Response } from 'express';
 import { Prisma } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  LEAD_LIST_SELECT,
+  toLeadListItem,
+} from '../leads/dto/lead-response.dto';
 import { csvCell } from '../leads/export/leads-export.columns';
 import { buildLeadsByStatusWhere } from './leads-by-status-where';
 import { LeadsByStatusQueryDto } from './dto/leads-by-status-query.dto';
@@ -12,7 +16,6 @@ import {
   LeadsByStatusListResponse,
   LeadsByStatusSummaryResponse,
   StatusCountRow,
-  toLeadsByStatusRow,
 } from './dto/leads-by-status-response.dto';
 
 /** Rows are read in pages so a large export never loads the whole set at once. */
@@ -52,7 +55,10 @@ export class LeadsByStatusReportService {
     private readonly currentUser: CurrentUserService,
   ) {}
 
-  /** The detailed view: a scoped page of leads with their status (AC1/AC3). */
+  /**
+   * The detailed view (AC1/AC3): a scoped page of leads in the Leads list's own projection,
+   * each with its status's stage colour key.
+   */
   async listDetailed(
     query: LeadsByStatusQueryDto,
   ): Promise<LeadsByStatusListResponse> {
@@ -65,7 +71,7 @@ export class LeadsByStatusReportService {
       this.prisma.$transaction([
         this.prisma.lead.findMany({
           where,
-          select: LEADS_BY_STATUS_SELECT,
+          select: LEAD_LIST_SELECT,
           orderBy: ORDER_BY,
           skip: (query.page - 1) * query.size,
           take: query.size,
@@ -76,9 +82,10 @@ export class LeadsByStatusReportService {
     ]);
 
     return {
-      rows: leads.map((lead) =>
-        toLeadsByStatusRow(lead, colorByStatus.get(lead.status) ?? null),
-      ),
+      rows: leads.map((lead) => ({
+        ...toLeadListItem(lead),
+        statusColor: colorByStatus.get(lead.status) ?? null,
+      })),
       total,
     };
   }

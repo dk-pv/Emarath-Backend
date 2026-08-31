@@ -2,6 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { CurrentUserService } from '../auth/current-user';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { CreateLeadDto } from './dto/create-lead.dto';
+import { ListLeadsQueryDto } from './dto/list-leads-query.dto';
 import { LeadCustomFieldsService } from '../lead-custom-fields/lead-custom-fields.service';
 import { LeadsRepository } from './leads.repository';
 import { LeadsService } from './leads.service';
@@ -96,8 +97,16 @@ function makeService(
   const notesForTimeline = jest.fn().mockResolvedValue([]);
   const callsForTimeline = jest.fn().mockResolvedValue([]);
   const activitiesForLead = jest.fn().mockResolvedValue([]);
+  const pinnedLeadIds = jest.fn().mockResolvedValue([]);
+  const findPage = jest
+    .fn()
+    .mockResolvedValue({ pinnedRows: [], unpinnedRows: [], total: 0 });
+  const duplicatePhones = jest.fn().mockResolvedValue([]);
   const repository = {
     create,
+    pinnedLeadIds,
+    findPage,
+    duplicatePhones,
     findById,
     findEditById,
     update,
@@ -136,8 +145,35 @@ function makeService(
     notesForTimeline,
     callsForTimeline,
     activitiesForLead,
+    findPage,
+    duplicatePhones,
   };
 }
+
+describe('LeadsService.list', () => {
+  const query = { page: 1, size: 100 } as ListLeadsQueryDto;
+  const whereOf = (findPage: jest.Mock): string =>
+    JSON.stringify(
+      (findPage.mock.calls[0] as [{ where: Prisma.LeadWhereInput }])[0].where,
+    );
+
+  it('leaves the scoped where alone without a search scope', async () => {
+    const { service, findPage, duplicatePhones } = makeService();
+    await service.list(query);
+    expect(duplicatePhones).not.toHaveBeenCalled();
+    expect(whereOf(findPage)).not.toContain('primaryPhone');
+  });
+
+  it('narrows the "Duplicate Lead" scope to phones held by more than one lead', async () => {
+    const { service, findPage, duplicatePhones } = makeService();
+    duplicatePhones.mockResolvedValue(['971500000000']);
+    await service.list({ ...query, searchScope: 'duplicate' });
+    expect(duplicatePhones).toHaveBeenCalledTimes(1);
+    expect(whereOf(findPage)).toContain(
+      '"primaryPhone":{"in":["971500000000"]}',
+    );
+  });
+});
 
 describe('LeadsService.getTimeline', () => {
   it('404s (and never aggregates) an out-of-scope lead', async () => {
