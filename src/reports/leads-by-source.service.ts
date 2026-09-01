@@ -3,7 +3,12 @@ import type { Response } from 'express';
 import { Prisma } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  LEAD_LIST_SELECT,
+  toLeadListItem,
+} from '../leads/dto/lead-response.dto';
 import { csvCell } from '../leads/export/leads-export.columns';
+import { CONVERTED_STATUS } from './converted-leads-where';
 import { buildLeadsBySourceWhere } from './leads-by-source-where';
 import { LeadsBySourceQueryDto } from './dto/leads-by-source-query.dto';
 import {
@@ -13,7 +18,6 @@ import {
   LeadsBySourceSummaryResponse,
   NO_SOURCE_LABEL,
   SourceCountRow,
-  toLeadsBySourceRow,
 } from './dto/leads-by-source-response.dto';
 
 /** Rows are read in pages so a large export never loads the whole set at once. */
@@ -58,18 +62,29 @@ export class LeadsBySourceReportService {
     const user = await this.currentUser.resolve();
     const where = buildLeadsBySourceWhere(user, query);
 
-    const [leads, total] = await this.prisma.$transaction([
-      this.prisma.lead.findMany({
-        where,
-        select: LEADS_BY_SOURCE_SELECT,
-        orderBy: ORDER_BY,
-        skip: (query.page - 1) * query.size,
-        take: query.size,
-      }),
-      this.prisma.lead.count({ where }),
+    // The Leads list projection, so the detailed view renders the list's own columns; page +
+    // count in one transaction so `total` never describes a different snapshot than `rows`.
+    const [[leads, total], colorByStatus] = await Promise.all([
+      this.prisma.$transaction([
+        this.prisma.lead.findMany({
+          where,
+          select: LEAD_LIST_SELECT,
+          orderBy: ORDER_BY,
+          skip: (query.page - 1) * query.size,
+          take: query.size,
+        }),
+        this.prisma.lead.count({ where }),
+      ]),
+      this.stageColorByName(),
     ]);
 
-    return { rows: leads.map(toLeadsBySourceRow), total };
+    return {
+      rows: leads.map((lead) => ({
+        ...toLeadListItem(lead),
+        statusColor: colorByStatus.get(lead.status) ?? null,
+      })),
+      total,
+    };
   }
 
   /**
@@ -84,27 +99,55 @@ export class LeadsBySourceReportService {
     const user = await this.currentUser.resolve();
     const where = buildLeadsBySourceWhere(user, query);
 
-    const grouped = await this.prisma.lead.groupBy({
-      by: ['source'],
-      where,
-      _count: { _all: true },
-    });
-
+    // Bucket counts and the converted (WON) counts per bucket — two `groupBy`s, never a
+    // query per source. (`groupBy` can't ride a `$transaction` array: its generics don't
+    // infer there, so this pairs them with `Promise.all` like the sibling reports.)
+    const [grouped, convertedGrouped] = await Promise.all([
+      this.prisma.lead.groupBy({
+        by: ['source'],
+        where,
+        _count: { _all: true },
+      }),
+      this.prisma.lead.groupBy({
+        by: ['source'],
+        where: { AND: [where, { status: CONVERTED_STATUS }] },
+        _count: { _all: true },
+      }),
+    ]);
     // Fold null and blank sources into one "No Source" bucket (two DB groups can map to it).
-    const counts = new Map<string, number>();
-    for (const group of grouped) {
-      const label =
-        group.source && group.source.trim() !== ''
-          ? group.source
-          : NO_SOURCE_LABEL;
-      counts.set(label, (counts.get(label) ?? 0) + group._count._all);
-    }
-
+    const fold = (
+      groups: { source: string | null; _count: { _all: number } }[],
+    ): Map<string, number> => {
+      const counts = new Map<string, number>();
+      for (const group of groups) {
+        const label =
+          group.source && group.source.trim() !== ''
+            ? group.source
+            : NO_SOURCE_LABEL;
+        counts.set(label, (counts.get(label) ?? 0) + group._count._all);
+      }
+      return counts;
+    };
+    const counts = fold(grouped);
+    const converted = fold(convertedGrouped);
+    // The reference lists sources alphabetically with "No Source" last.
+    // Share is of the FILTERED total — every bucket the caller's filters left in — so the
+    // percentages always sum to 100 for the set on screen.
+    const total = [...counts.values()].reduce((sum, count) => sum + count, 0);
     const rows: SourceCountRow[] = [...counts.entries()]
-      .map(([source, count]) => ({ source, count }))
-      .sort((a, b) => b.count - a.count || a.source.localeCompare(b.source));
-
-    const total = rows.reduce((sum, row) => sum + row.count, 0);
+      .map(([source, count]) => ({
+        source,
+        count,
+        share: total > 0 ? (count / total) * 100 : 0,
+        conversionRate:
+          count > 0 ? ((converted.get(source) ?? 0) / count) * 100 : 0,
+      }))
+      .sort(
+        (a, b) =>
+          Number(a.source === NO_SOURCE_LABEL) -
+            Number(b.source === NO_SOURCE_LABEL) ||
+          a.source.localeCompare(b.source, undefined, { sensitivity: 'base' }),
+      );
     return { rows, total };
   }
 
@@ -164,6 +207,19 @@ export class LeadsBySourceReportService {
   }
 
   /** The team values the filter offers (AC3): the distinct non-empty `User.team` labels. */
+  /** Stage colour by status name — the first stage carrying a name wins across pipelines. */
+  private async stageColorByName(): Promise<Map<string, string>> {
+    const stages = await this.prisma.stage.findMany({
+      select: { name: true, color: true },
+      orderBy: [{ pipeline: 'asc' }, { position: 'asc' }],
+    });
+    const map = new Map<string, string>();
+    for (const stage of stages) {
+      if (!map.has(stage.name)) map.set(stage.name, stage.color);
+    }
+    return map;
+  }
+
   async filterOptions(): Promise<LeadsBySourceFilterOptions> {
     const rows = await this.prisma.user.findMany({
       where: { team: { not: null }, deletedAt: null },

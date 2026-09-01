@@ -1,5 +1,5 @@
 import { Transform } from 'class-transformer';
-import { IsNotEmpty, IsString, MaxLength } from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 import { LeadListItem } from '../../dto/lead-response.dto';
 import { BoardStageSummary } from './board-query.dto';
 
@@ -22,6 +22,13 @@ export class MoveLeadStageDto {
   @IsNotEmpty({ message: 'stage is required' })
   @MaxLength(64)
   stage!: string;
+
+  /** Why the lead was lost — meaningful only when the target stage is LOST. */
+  @Transform(trim)
+  @IsString()
+  @MaxLength(120)
+  @IsOptional()
+  lostReason?: string;
 }
 
 /**

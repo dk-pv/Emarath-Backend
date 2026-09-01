@@ -44,6 +44,8 @@ export interface LeadListItem {
   complaintReason: string | null;
   /** The latest assignment's instant — "Assigned Date"; null when unassigned. */
   assignedDate: string | null;
+  /** False until the lead has a completed activity or a logged call — the list's warning triangle. */
+  hasActivity: boolean;
   assignedAgents: { id: string; name: string }[];
   tags: { id: string; name: string }[];
   /**
@@ -132,6 +134,17 @@ export const LEAD_LIST_SELECT = {
   customFieldValues: {
     where: { customField: { deletedAt: null } },
     select: { value: true, customField: { select: { key: true } } },
+  },
+  /**
+   * Whether the lead has been worked at all — the Leads list's warning triangle. The same
+   * definition the No Activity Leads report uses (a completed activity or a logged call), as
+   * two filtered relation counts in the one query — no per-row lookups.
+   */
+  _count: {
+    select: {
+      activities: { where: { deletedAt: null, completedAt: { not: null } } },
+      calls: { where: { deletedAt: null } },
+    },
   },
 } satisfies Prisma.LeadSelect;
 
@@ -428,6 +441,7 @@ export function toLeadListItem(row: LeadRow, isPinned = false): LeadListItem {
     customFields: Object.fromEntries(
       row.customFieldValues.map((v) => [v.customField.key, v.value]),
     ),
+    hasActivity: row._count.activities > 0 || row._count.calls > 0,
     isPinned,
   };
 }

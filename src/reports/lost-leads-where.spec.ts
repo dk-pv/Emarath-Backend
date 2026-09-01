@@ -49,4 +49,36 @@ describe('buildLostLeadsWhere', () => {
     expect(createdAt?.gte).toEqual(new Date(from));
     expect(createdAt?.lt).toEqual(new Date(to));
   });
+
+  it('applies the window to statusChangedAt when dateField is statusChanged', () => {
+    const where = buildLostLeadsWhere(admin, {
+      from: '2026-07-01T00:00:00.000Z',
+      dateField: 'statusChanged',
+    });
+    const json = JSON.stringify(where);
+    expect(json).toContain('statusChangedAt');
+    expect(json).toContain('LOST');
+    expect(JSON.stringify(where.AND?.[0])).not.toContain('createdAt');
+  });
+
+  it('passes agent, source and pipeline through to the reused leads where', () => {
+    const json = JSON.stringify(
+      buildLostLeadsWhere(admin, {
+        agent: ['11111111-1111-4111-8111-111111111111'],
+        source: ['Broadcast'],
+        pipeline: 'LOGISTICS',
+      }),
+    );
+    expect(json).toContain('11111111-1111-4111-8111-111111111111');
+    expect(json).toContain('Broadcast');
+    expect(json).toContain('LOGISTICS');
+  });
+
+  it('narrows to reason buckets, mapping the `none` value to a null lostReason', () => {
+    const json = JSON.stringify(
+      buildLostLeadsWhere(admin, { reason: ['Price too high', 'none'] }),
+    );
+    expect(json).toContain('"lostReason":"Price too high"');
+    expect(json).toContain('"lostReason":null');
+  });
 });

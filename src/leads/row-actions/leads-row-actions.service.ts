@@ -27,6 +27,7 @@ import {
   SetLeadPipelineDto,
   SetLeadStatusDto,
 } from './dto/row-actions.dto';
+import { LOST_STATUS } from '../lead-status.constants';
 
 /**
  * The scalar and relation fields a duplicate copies (LEAD-10.1 AC2, decided
@@ -160,7 +161,13 @@ export class LeadRowActionsService {
 
     const updated = await this.prisma.lead.update({
       where: { id },
-      data: { status: dto.status },
+      // The capture rule: a move to LOST stores the reason (null when none was offered);
+      // any other status clears it — a reason belongs to the loss it described.
+      data: {
+        status: dto.status,
+        lostReason:
+          dto.status === LOST_STATUS ? (dto.lostReason ?? null) : null,
+      },
       select: LEAD_LIST_SELECT,
     });
     return toLeadListItem(updated);

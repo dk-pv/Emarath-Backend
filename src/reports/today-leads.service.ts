@@ -61,6 +61,7 @@ const EXPORT_HEADERS = [
   'Call Attempts',
   'WhatsApp Attempts',
   'Last Contacted',
+  'Next Follow-up',
 ] as const;
 
 /**
@@ -100,15 +101,18 @@ export class TodayLeadsReportService {
       this.stageColorByName(),
     ]);
 
-    const lastById = await this.lastContactedByLead(
-      leads.map((lead) => lead.id),
-    );
+    const ids = leads.map((lead) => lead.id);
+    const [lastById, nextById] = await Promise.all([
+      this.lastContactedByLead(ids),
+      this.nextFollowUpByLead(ids),
+    ]);
     return {
       rows: leads.map((lead) =>
         toTodayLeadRow(
           lead,
           lastById.get(lead.id) ?? null,
           colorByStatus.get(lead.status) ?? null,
+          nextById.get(lead.id) ?? null,
         ),
       ),
       total,
@@ -209,12 +213,15 @@ export class TodayLeadsReportService {
       });
       if (leads.length === 0) break;
 
-      const lastById = await this.lastContactedByLead(
-        leads.map((lead) => lead.id),
-      );
+      const ids = leads.map((lead) => lead.id);
+      const [lastById, nextById] = await Promise.all([
+        this.lastContactedByLead(ids),
+        this.nextFollowUpByLead(ids),
+      ]);
       let chunk = '';
       for (const lead of leads) {
         const last = lastById.get(lead.id);
+        const next = nextById.get(lead.id);
         chunk +=
           [
             csvCell(lead.name),
@@ -232,6 +239,7 @@ export class TodayLeadsReportService {
             csvCell(String(lead.callAttempts)),
             csvCell(String(lead.whatsappAttempts)),
             csvCell(last ? last.toISOString() : 'Not contacted'),
+            csvCell(next ? next.toISOString() : ''),
           ].join(',') + '\r\n';
       }
       res.write(chunk);
@@ -260,7 +268,7 @@ export class TodayLeadsReportService {
   }
 
   /**
-   * The most recent call instant per lead, for one page of ids, in a single `groupBy` — so
+   * The most recent answered-call instant per lead, for one page of ids, in a single `groupBy` — so
    * the "last contacted" column costs one query, not one per row. Leads with no call are
    * simply absent from the map (rendered as "Not contacted").
    */
@@ -268,13 +276,32 @@ export class TodayLeadsReportService {
     if (ids.length === 0) return new Map();
     const grouped = await this.prisma.call.groupBy({
       by: ['leadId'],
-      where: { leadId: { in: ids }, deletedAt: null },
+      where: { leadId: { in: ids }, deletedAt: null, outcome: 'ANSWERED' },
       _max: { startedAt: true },
     });
     return new Map(
       grouped
         .filter((group) => group._max.startedAt)
         .map((group) => [group.leadId, group._max.startedAt as Date]),
+    );
+  }
+
+  /**
+   * The soonest outstanding follow-up per lead — what "same-day follow-up" means for an
+   * agent reading the row. The same derivation the Call Log's "Next Follow-up" column uses:
+   * the earliest incomplete, non-deleted activity (overdue or upcoming), one `groupBy`.
+   */
+  private async nextFollowUpByLead(ids: string[]): Promise<Map<string, Date>> {
+    if (ids.length === 0) return new Map();
+    const grouped = await this.prisma.activity.groupBy({
+      by: ['leadId'],
+      where: { leadId: { in: ids }, completedAt: null, deletedAt: null },
+      _min: { dueAt: true },
+    });
+    return new Map(
+      grouped
+        .filter((group) => group._min.dueAt)
+        .map((group) => [group.leadId, group._min.dueAt as Date]),
     );
   }
 }

@@ -9,9 +9,9 @@ const admin: CurrentUser = { id: 'admin-1', role: UserRole.SUPERADMIN };
 const agent: CurrentUser = { id: 'agent-1', role: UserRole.SALES_AGENT };
 
 describe('recentlyContactedWhere', () => {
-  it('defaults to "ever contacted" (a non-deleted call) when no window is given', () => {
+  it('defaults to "ever contacted" (a non-deleted answered call) when no window is given', () => {
     expect(recentlyContactedWhere({})).toEqual({
-      calls: { some: { deletedAt: null } },
+      calls: { some: { deletedAt: null, outcome: 'ANSWERED' } },
     });
   });
 
@@ -20,6 +20,7 @@ describe('recentlyContactedWhere', () => {
     const where = recentlyContactedWhere({ from });
     expect(where.calls?.some).toMatchObject({
       deletedAt: null,
+      outcome: 'ANSWERED',
       startedAt: { gte: new Date(from) },
     });
   });
@@ -39,7 +40,7 @@ describe('buildTodayLeadsWhere', () => {
     expect(where.AND).toHaveLength(2);
     // Second fragment is always the contact predicate.
     expect(where.AND?.[1]).toEqual({
-      calls: { some: { deletedAt: null } },
+      calls: { some: { deletedAt: null, outcome: 'ANSWERED' } },
     });
   });
 

@@ -129,6 +129,7 @@ function leadRow(overrides: Record<string, unknown> = {}) {
     nationalCode: null,
     complaints: [],
     customFieldValues: [],
+    _count: { activities: 0, calls: 0 },
     ...overrides,
   };
 }

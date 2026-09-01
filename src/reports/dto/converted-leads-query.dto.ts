@@ -3,6 +3,7 @@ import {
   ArrayMaxSize,
   IsArray,
   IsDateString,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
@@ -18,6 +19,9 @@ import {
   MAX_REPORT_PAGE_SIZE,
   MAX_SOURCE_LENGTH,
 } from './no-activity-query.dto';
+
+/** `Lead.pipeline` is `VarChar(120)`; a longer value can never match a row. */
+const MAX_VALUE_LENGTH = 120;
 
 const trim = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' ? value.trim() : value;
@@ -81,4 +85,30 @@ export class ConvertedLeadsQueryDto {
   })
   @IsOptional()
   agent?: string[];
+
+  /** Which lead date the `from`/`to` window applies to: creation (default) or the last status change — for a WON lead, when it converted. */
+  @Transform(trim)
+  @IsIn(['created', 'statusChanged'], {
+    message: 'dateField must be created or statusChanged',
+  })
+  @IsOptional()
+  dateField?: 'created' | 'statusChanged';
+
+  /** The board a lead belongs to (toolbar "Pipeline") — one exact value. */
+  @Transform(trim)
+  @IsString({ message: 'pipeline must be a string' })
+  @MaxLength(MAX_VALUE_LENGTH, {
+    message: `pipeline must be at most ${MAX_VALUE_LENGTH} characters`,
+  })
+  @IsOptional()
+  pipeline?: string;
+
+  /**
+   * The Filter condition builder's JSON payload (ADR-0039) — the same param the Leads
+   * list accepts, parsed and whitelisted by `parseLeadConditions` inside `buildLeadWhere`.
+   */
+  @IsString({ message: 'conditions must be a JSON string' })
+  @MaxLength(8000, { message: 'conditions payload is too large' })
+  @IsOptional()
+  conditions?: string;
 }

@@ -3,16 +3,21 @@ import type { Response } from 'express';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import { toLeadListItem } from '../leads/dto/lead-response.dto';
 import { csvCell } from '../leads/export/leads-export.columns';
-import { LOST_STATUS, buildLostLeadsWhere } from './lost-leads-where';
+import {
+  LOST_STATUS,
+  NO_REASON_VALUE,
+  buildLostLeadsWhere,
+} from './lost-leads-where';
 import { LostLeadsQueryDto } from './dto/lost-leads-query.dto';
 import {
-  LOST_LEADS_SELECT,
+  LOST_EXPORT_SELECT,
+  LOST_LIST_SELECT,
   LostLeadsFilterOptions,
   LostLeadsListResponse,
   LostLeadsSummaryResponse,
-  LostLeadsSummaryRow,
-  toLostLeadRow,
+  LostReasonCountRow,
 } from './dto/lost-leads-response.dto';
 
 /** Rows are read in pages so a large export never loads the whole set at once. */
@@ -34,11 +39,6 @@ const EXPORT_HEADERS = [
   'Status',
   'Assigned',
 ] as const;
-
-/** The synthetic "Total" summary row — distinct lost leads. */
-function totalRow(count: number): LostLeadsSummaryRow {
-  return { agentId: null, agentName: 'Total', count, isTotal: true };
-}
 
 /**
  * The Lost Leads report (RPT-02.7).
@@ -63,11 +63,13 @@ export class LostLeadsReportService {
     const user = await this.currentUser.resolve();
     const where = buildLostLeadsWhere(user, query);
 
+    // The Leads list projection, so the view renders the list's own columns; page + count
+    // in one transaction so `total` never describes a different snapshot than `rows`.
     const [[leads, total], statusColor] = await Promise.all([
       this.prisma.$transaction([
         this.prisma.lead.findMany({
           where,
-          select: LOST_LEADS_SELECT,
+          select: LOST_LIST_SELECT,
           orderBy: ORDER_BY,
           skip: (query.page - 1) * query.size,
           take: query.size,
@@ -78,74 +80,41 @@ export class LostLeadsReportService {
     ]);
 
     return {
-      rows: leads.map((lead) => toLostLeadRow(lead, statusColor)),
+      rows: leads.map((lead) => ({
+        ...toLeadListItem(lead),
+        statusColor,
+        lostAt: lead.statusChangedAt.toISOString(),
+        lostReason: lead.lostReason,
+      })),
       total,
     };
   }
 
   /**
-   * The summary view: lost-lead counts per assignee ("Assigned User | No. of Leads"), plus an
-   * "Unassigned" bucket and a "Total" row. A sales agent only ever sees themselves — a shared
-   * lead's co-assignee is never named in an agent's report; managers and admins see the
-   * per-assignee breakdown their scope already permits.
+   * The reason breakdown (RPT-02.7 v2): lost-lead counts per `lostReason` over the same
+   * scoped `where` the list and export compose — grouped in the database, most common
+   * first, with leads lost before reasons existed folded into "No reason recorded".
    */
   async summary(query: LostLeadsQueryDto): Promise<LostLeadsSummaryResponse> {
     const user = await this.currentUser.resolve();
     const where = buildLostLeadsWhere(user, query);
 
-    if (user.role === UserRole.SALES_AGENT) {
-      const [count, self] = await Promise.all([
-        this.prisma.lead.count({ where }),
-        this.prisma.user.findUnique({
-          where: { id: user.id },
-          select: { id: true, name: true },
-        }),
-      ]);
-      if (count === 0 || !self) return { rows: [], total: 0 };
-      return {
-        rows: [
-          { agentId: self.id, agentName: self.name, count },
-          totalRow(count),
-        ],
-        total: count,
-      };
-    }
-
-    const [grouped, unassigned, total] = await Promise.all([
-      this.prisma.leadAssignment.groupBy({
-        by: ['userId'],
-        where: { lead: where },
+    const [grouped, total] = await Promise.all([
+      this.prisma.lead.groupBy({
+        by: ['lostReason'],
+        where,
         _count: { _all: true },
-      }),
-      this.prisma.lead.count({
-        where: { AND: [where, { assignments: { none: {} } }] },
       }),
       this.prisma.lead.count({ where }),
     ]);
 
-    if (total === 0) return { rows: [], total: 0 };
-
-    const names = await this.prisma.user.findMany({
-      where: { id: { in: grouped.map((group) => group.userId) } },
-      select: { id: true, name: true },
-    });
-    const nameById = new Map(names.map((entry) => [entry.id, entry.name]));
-
-    const rows: LostLeadsSummaryRow[] = grouped
+    const rows: LostReasonCountRow[] = grouped
       .map((group) => ({
-        agentId: group.userId,
-        agentName: nameById.get(group.userId) ?? 'Unknown',
+        reason: group.lostReason ?? 'No reason recorded',
+        value: group.lostReason ?? NO_REASON_VALUE,
         count: group._count._all,
       }))
-      .sort(
-        (a, b) => b.count - a.count || a.agentName.localeCompare(b.agentName),
-      );
-
-    if (unassigned > 0) {
-      rows.push({ agentId: null, agentName: 'Unassigned', count: unassigned });
-    }
-    rows.push(totalRow(total));
-
+      .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
     return { rows, total };
   }
 
@@ -177,7 +146,7 @@ export class LostLeadsReportService {
     while (skip < MAX_EXPORT_ROWS) {
       const leads = await this.prisma.lead.findMany({
         where,
-        select: LOST_LEADS_SELECT,
+        select: LOST_EXPORT_SELECT,
         orderBy: ORDER_BY,
         skip,
         take: EXPORT_BATCH_SIZE,

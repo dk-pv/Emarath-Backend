@@ -33,6 +33,17 @@ export class SetLeadStatusDto {
   @IsNotEmpty({ message: 'status is required' })
   @MaxLength(64)
   status!: string;
+
+  /**
+   * Why the lead was lost — meaningful only when `status` is LOST (stored then, cleared on
+   * any other status). Values come from the `lostReasons` catalogue; free-text length-bounded
+   * like the column.
+   */
+  @Transform(trim)
+  @IsString()
+  @MaxLength(120)
+  @IsOptional()
+  lostReason?: string;
 }
 
 /** Row "Delete" action (LEAD-10.1 AC5): confirms which lead was removed. */

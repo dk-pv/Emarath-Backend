@@ -2,10 +2,20 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
-import { ColumnLayout, isViewKey, KanbanPins } from './dto/view-preference.dto';
+import {
+  ColumnLayout,
+  isViewKey,
+  KanbanPins,
+  AgingThresholds,
+} from './dto/view-preference.dto';
 
 /** The fixed view key that holds a user's Kanban stage pins (one row per user). */
 const KANBAN_PINS_KEY = 'kanban-pins';
+
+const AGING_THRESHOLDS_KEY = 'lead-aging-thresholds';
+
+/** The report's shipped defaults, used until the caller saves their own. */
+const DEFAULT_AGING_THRESHOLDS: AgingThresholds = { green: 13, amber: 29 };
 
 /**
  * Per-user table layouts — the Manage Columns result (LEAD-05.1 AC3).
@@ -110,6 +120,45 @@ export class ViewPreferencesService {
 
     return { pins };
   }
+
+  /** The caller's aging thresholds, falling back to the report's defaults. */
+  async getAgingThresholds(): Promise<AgingThresholds> {
+    const user = await this.currentUser.resolve();
+    const row = await this.prisma.userViewPreference.findUnique({
+      where: {
+        userId_viewKey: { userId: user.id, viewKey: AGING_THRESHOLDS_KEY },
+      },
+      select: { layout: true },
+    });
+    return toThresholds(row?.layout);
+  }
+
+  /** Upserts the caller's aging thresholds; one row per user, as the pins are. */
+  async saveAgingThresholds(
+    thresholds: AgingThresholds,
+  ): Promise<AgingThresholds> {
+    // Cross-field, so the DTO's per-field rules cannot express it: the bands must not
+    // overlap, or the report would have an empty amber range.
+    if (thresholds.amber <= thresholds.green) {
+      throw new BadRequestException('amber must be greater than green.');
+    }
+    const user = await this.currentUser.resolve();
+    // A typed interface lacks the index signature Prisma's JSON input requires.
+    const layout = thresholds as unknown as Prisma.InputJsonValue;
+
+    await this.prisma.userViewPreference.upsert({
+      where: {
+        userId_viewKey: { userId: user.id, viewKey: AGING_THRESHOLDS_KEY },
+      },
+      create: {
+        user: { connect: { id: user.id } },
+        viewKey: AGING_THRESHOLDS_KEY,
+        layout,
+      },
+      update: { layout },
+    });
+    return thresholds;
+  }
 }
 
 function assertViewKey(viewKey: string): void {
@@ -156,4 +205,27 @@ function toPinsMap(
     if (typeof stage === 'string') pins[pipeline] = stage;
   }
   return pins;
+}
+
+/**
+ * A stored row back into thresholds. Anything unreadable — a row written before the
+ * shape existed, or a partial payload — falls back to the defaults rather than throwing
+ * a saved preference at the report.
+ */
+function toThresholds(value: Prisma.JsonValue | undefined): AgingThresholds {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return DEFAULT_AGING_THRESHOLDS;
+  }
+  const { green, amber } = value as Record<string, unknown>;
+  if (
+    typeof green !== 'number' ||
+    typeof amber !== 'number' ||
+    !Number.isInteger(green) ||
+    !Number.isInteger(amber) ||
+    green < 1 ||
+    amber <= green
+  ) {
+    return DEFAULT_AGING_THRESHOLDS;
+  }
+  return { green, amber };
 }

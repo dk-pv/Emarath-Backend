@@ -15,7 +15,7 @@ import {
 import { normalizeFilterValues } from '../../leads/lead-filter';
 
 /** `?unassigned=true` / `1`; anything else (including absent) leaves the filter off. */
-const toOptionalBoolean = ({ value }: { value: unknown }): unknown =>
+export const toOptionalBoolean = ({ value }: { value: unknown }): unknown =>
   value === undefined ? undefined : value === 'true' || value === '1';
 
 export const DEFAULT_REPORT_PAGE_SIZE = 100;

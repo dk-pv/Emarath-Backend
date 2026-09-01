@@ -23,8 +23,14 @@ export interface ConvertedLeadsFilters {
    * (approved RPT-02.6 rule; the same createdAt window every other RPT-02.x report uses).
    */
   from?: string;
-  /** Optional upper bound of the period; the UI sends only `from`. */
+  /** Optional upper bound of the period. */
   to?: string;
+  /** Which date the window applies to; `statusChanged` reads `Lead.statusChangedAt` — for a WON lead, its conversion instant. */
+  dateField?: 'created' | 'statusChanged';
+  /** One exact board name. */
+  pipeline?: string;
+  /** The condition builder's JSON payload, whitelisted by the leads module. */
+  conditions?: string;
 }
 
 /**
@@ -40,11 +46,28 @@ export function buildConvertedLeadsWhere(
   user: CurrentUser,
   filters: ConvertedLeadsFilters,
 ): Prisma.LeadWhereInput {
-  return buildLeadWhere(user, {
+  const byStatusChange = filters.dateField === 'statusChanged';
+  const base = buildLeadWhere(user, {
     status: [CONVERTED_STATUS],
     source: filters.source,
     assignedAgent: filters.agent,
-    createdFrom: filters.from,
-    createdTo: filters.to,
+    pipeline: filters.pipeline,
+    conditions: filters.conditions,
+    createdFrom: byStatusChange ? undefined : filters.from,
+    createdTo: byStatusChange ? undefined : filters.to,
   });
+  if (!byStatusChange || !(filters.from || filters.to)) return base;
+  // "Converted Date": the same half-open [from, to) window, on the column the
+  // `leads_status_changed_at` trigger keeps current — when the lead became WON.
+  return {
+    AND: [
+      base,
+      {
+        statusChangedAt: {
+          gte: filters.from ? new Date(filters.from) : undefined,
+          lt: filters.to ? new Date(filters.to) : undefined,
+        },
+      },
+    ],
+  };
 }
