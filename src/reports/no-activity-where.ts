@@ -1,5 +1,6 @@
 import { Prisma } from '../generated/prisma/client';
 import { CurrentUser } from '../auth/current-user';
+import { noEngagementWhere } from '../leads/lead-engagement-where';
 import { buildLeadWhere } from '../leads/lead-where';
 
 /** The filters the No Activity Leads report (RPT-02.1) accepts, already parsed. */
@@ -27,7 +28,7 @@ export interface NoActivityFilters {
  * "No recent activity" as a query fragment (RPT-02.1, definition B).
  *
  * A lead is a No-Activity Lead when it has NO non-deleted activity whose `completedAt`
- * falls in the selected window — `completedAt` because a *completed* follow-up is the
+ * falls in the selected window AND no non-deleted logged call started in it — `completedAt` because a *completed* follow-up is the
  * signal that real engagement happened (a merely scheduled or overdue-but-undone activity
  * is not engagement). `none` compiles to NOT EXISTS, so the test runs in the database and
  * is backed by `@@index([leadId, deletedAt])` + `@@index([completedAt])`. With no window
@@ -40,11 +41,7 @@ export interface NoActivityFilters {
 export function noRecentActivityWhere(
   filters: NoActivityFilters,
 ): Prisma.LeadWhereInput {
-  const completedAt: Prisma.DateTimeNullableFilter = { not: null };
-  if (filters.from) completedAt.gte = new Date(filters.from);
-  if (filters.to) completedAt.lt = new Date(filters.to);
-
-  return { activities: { none: { deletedAt: null, completedAt } } };
+  return noEngagementWhere(filters);
 }
 
 /**

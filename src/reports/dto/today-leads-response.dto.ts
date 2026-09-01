@@ -36,6 +36,8 @@ export interface TodayLeadRow {
   callAttempts: number;
   whatsappAttempts: number;
   lastContactedAt: string | null;
+  /** The lead's soonest outstanding follow-up (earliest incomplete activity), or null. */
+  nextFollowUpAt: string | null;
 }
 
 export interface TodayLeadsListResponse {
@@ -94,6 +96,7 @@ export function toTodayLeadRow(
   lead: TodayLead,
   lastContactedAt: Date | null,
   statusColor: string | null = null,
+  nextFollowUpAt: Date | null = null,
 ): TodayLeadRow {
   const assignedDate = lead.assignments.reduce<Date | null>(
     (latest, assignment) =>
@@ -124,5 +127,6 @@ export function toTodayLeadRow(
     callAttempts: lead.callAttempts,
     whatsappAttempts: lead.whatsappAttempts,
     lastContactedAt: lastContactedAt ? lastContactedAt.toISOString() : null,
+    nextFollowUpAt: nextFollowUpAt ? nextFollowUpAt.toISOString() : null,
   };
 }

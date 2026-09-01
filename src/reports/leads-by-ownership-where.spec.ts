@@ -32,4 +32,27 @@ describe('buildLeadsByOwnershipWhere', () => {
     const where = buildLeadsByOwnershipWhere(agent, { team: ['Sales'] });
     expect(JSON.stringify(where)).toContain('"userId":"agent-1"');
   });
+
+  it('passes agent, source, pipeline and the status-changed window through', () => {
+    const json = JSON.stringify(
+      buildLeadsByOwnershipWhere(admin, {
+        agent: ['11111111-1111-4111-8111-111111111111'],
+        source: ['Broadcast'],
+        pipeline: 'LOGISTICS',
+        from: '2026-07-01T00:00:00.000Z',
+        dateField: 'statusChanged',
+      }),
+    );
+    expect(json).toContain('11111111-1111-4111-8111-111111111111');
+    expect(json).toContain('Broadcast');
+    expect(json).toContain('LOGISTICS');
+    expect(json).toContain('statusChangedAt');
+  });
+
+  it("passes the unassigned flag through (the legend's Unassigned drill-down)", () => {
+    const json = JSON.stringify(
+      buildLeadsByOwnershipWhere(admin, { unassigned: true }),
+    );
+    expect(json).toContain('"none"');
+  });
 });

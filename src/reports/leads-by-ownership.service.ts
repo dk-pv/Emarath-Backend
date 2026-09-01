@@ -3,7 +3,17 @@ import type { Response } from 'express';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  LEAD_LIST_SELECT,
+  toLeadListItem,
+} from '../leads/dto/lead-response.dto';
 import { csvCell } from '../leads/export/leads-export.columns';
+import {
+  answeredCallWhere,
+  noEngagementWhere,
+} from '../leads/lead-engagement-where';
+import { CONVERTED_STATUS } from './converted-leads-where';
+import { LOST_STATUS } from './lost-leads-where';
 import { buildLeadsByOwnershipWhere } from './leads-by-ownership-where';
 import { LeadsByOwnershipQueryDto } from './dto/leads-by-ownership-query.dto';
 import {
@@ -13,7 +23,6 @@ import {
   LeadsByOwnershipSummaryResponse,
   OwnerCountRow,
   UNASSIGNED_LABEL,
-  toLeadsByOwnershipRow,
 } from './dto/leads-by-ownership-response.dto';
 
 /** Rows are read in pages so a large export never loads the whole set at once. */
@@ -34,6 +43,49 @@ const EXPORT_HEADERS = [
   'Source',
   'Assigned',
 ] as const;
+
+const ZERO = new Prisma.Decimal(0);
+
+/** The stage a lead starts in; the ownership "New Leads" metric counts leads still there. */
+const NEW_STATUS = 'New';
+
+const METRIC_KEYS = [
+  'newCount',
+  'contactedCount',
+  'noActivityCount',
+  'convertedCount',
+  'lostCount',
+] as const;
+type MetricKey = (typeof METRIC_KEYS)[number];
+
+/**
+ * Each metric is an existing report's own predicate, so an owner's "Converted Leads" is
+ * exactly what the Converted Leads report would list for them, and so on.
+ */
+const METRIC_WHERE: Record<MetricKey, Prisma.LeadWhereInput> = {
+  newCount: { status: NEW_STATUS },
+  contactedCount: answeredCallWhere(),
+  noActivityCount: noEngagementWhere(),
+  convertedCount: { status: CONVERTED_STATUS },
+  lostCount: { status: LOST_STATUS },
+};
+
+function toOwnerRow(
+  base: Pick<OwnerCountRow, 'ownerId' | 'ownerName' | 'count'>,
+  metrics: Record<MetricKey, number>,
+  value: Prisma.Decimal,
+): OwnerCountRow {
+  return {
+    ...base,
+    ...metrics,
+    conversionRatio:
+      base.count > 0 ? (metrics.convertedCount / base.count) * 100 : 0,
+    // No qualification stage/flag and no sales-target model exist in Emarath.
+    qualifiedRatio: null,
+    targetAchievement: null,
+    leadValue: value.toString(),
+  };
+}
 
 /**
  * The Leads By Ownership report (RPT-02.5).
@@ -59,18 +111,42 @@ export class LeadsByOwnershipReportService {
     const user = await this.currentUser.resolve();
     const where = buildLeadsByOwnershipWhere(user, query);
 
-    const [leads, total] = await this.prisma.$transaction([
-      this.prisma.lead.findMany({
-        where,
-        select: LEADS_BY_OWNERSHIP_SELECT,
-        orderBy: ORDER_BY,
-        skip: (query.page - 1) * query.size,
-        take: query.size,
-      }),
-      this.prisma.lead.count({ where }),
+    // The Leads list projection, so the detailed view renders the list's own columns; page +
+    // count in one transaction so `total` never describes a different snapshot than `rows`.
+    const [[leads, total], colorByStatus] = await Promise.all([
+      this.prisma.$transaction([
+        this.prisma.lead.findMany({
+          where,
+          select: LEAD_LIST_SELECT,
+          orderBy: ORDER_BY,
+          skip: (query.page - 1) * query.size,
+          take: query.size,
+        }),
+        this.prisma.lead.count({ where }),
+      ]),
+      this.stageColorByName(),
     ]);
 
-    return { rows: leads.map(toLeadsByOwnershipRow), total };
+    return {
+      rows: leads.map((lead) => ({
+        ...toLeadListItem(lead),
+        statusColor: colorByStatus.get(lead.status) ?? null,
+      })),
+      total,
+    };
+  }
+
+  /** Stage colour by status name — the first stage carrying a name wins across pipelines. */
+  private async stageColorByName(): Promise<Map<string, string>> {
+    const stages = await this.prisma.stage.findMany({
+      select: { name: true, color: true },
+      orderBy: [{ pipeline: 'asc' }, { position: 'asc' }],
+    });
+    const map = new Map<string, string>();
+    for (const stage of stages) {
+      if (!map.has(stage.name)) map.set(stage.name, stage.color);
+    }
+    return map;
   }
 
   /**
@@ -85,59 +161,144 @@ export class LeadsByOwnershipReportService {
   ): Promise<LeadsByOwnershipSummaryResponse> {
     const user = await this.currentUser.resolve();
     const where = buildLeadsByOwnershipWhere(user, query);
+    const and = (extra: Prisma.LeadWhereInput): Prisma.LeadWhereInput => ({
+      AND: [where, extra],
+    });
 
+    // A sales agent only ever sees themselves — a co-assigned lead's other owner is never
+    // named in an agent's report — so their row is the scoped set as a whole.
     if (user.role === UserRole.SALES_AGENT) {
-      const [count, self] = await Promise.all([
+      const [count, self, metrics, value] = await Promise.all([
         this.prisma.lead.count({ where }),
         this.prisma.user.findUnique({
           where: { id: user.id },
           select: { id: true, name: true },
         }),
+        this.metricsFor(where),
+        this.prisma.lead.aggregate({ where, _sum: { actualAmount: true } }),
       ]);
       const rows: OwnerCountRow[] =
         count > 0 && self
-          ? [{ ownerId: self.id, ownerName: self.name, count }]
+          ? [
+              toOwnerRow(
+                { ownerId: self.id, ownerName: self.name, count },
+                metrics,
+                value._sum.actualAmount ?? ZERO,
+              ),
+            ]
           : [];
       return { rows, total: count };
     }
 
-    const [grouped, unassigned, total] = await Promise.all([
+    const unassignedWhere = and({ assignments: { none: {} } });
+    const [
+      grouped,
+      total,
+      unassigned,
+      byUser,
+      unassignedMetrics,
+      valueRows,
+      unassignedValue,
+    ] = await Promise.all([
       this.prisma.leadAssignment.groupBy({
         by: ['userId'],
         where: { lead: where },
         _count: { _all: true },
       }),
-      this.prisma.lead.count({
-        where: { AND: [where, { assignments: { none: {} } }] },
-      }),
       this.prisma.lead.count({ where }),
+      this.prisma.lead.count({ where: unassignedWhere }),
+      this.metricsByUser(and),
+      this.metricsFor(unassignedWhere),
+      // ponytail: Σ actualAmount per owner summed in-app (Prisma can't sum a Lead field
+      // across the assignment join) over a two-field projection — the same trade the
+      // Converted report makes; a scoped raw query if the assignment table ever gets huge.
+      this.prisma.leadAssignment.findMany({
+        where: { lead: where },
+        select: { userId: true, lead: { select: { actualAmount: true } } },
+      }),
+      this.prisma.lead.aggregate({
+        where: unassignedWhere,
+        _sum: { actualAmount: true },
+      }),
     ]);
-
     const names = await this.prisma.user.findMany({
       where: { id: { in: grouped.map((group) => group.userId) } },
       select: { id: true, name: true },
     });
     const nameById = new Map(names.map((named) => [named.id, named.name]));
-
+    const valueByUser = new Map<string, Prisma.Decimal>();
+    for (const row of valueRows) {
+      valueByUser.set(
+        row.userId,
+        (valueByUser.get(row.userId) ?? ZERO).add(
+          row.lead.actualAmount ?? ZERO,
+        ),
+      );
+    }
     const rows: OwnerCountRow[] = grouped
-      .map((group) => ({
-        ownerId: group.userId,
-        ownerName: nameById.get(group.userId) ?? 'Unknown',
-        count: group._count._all,
-      }))
+      .map((group) =>
+        toOwnerRow(
+          {
+            ownerId: group.userId,
+            ownerName: nameById.get(group.userId) ?? 'Unknown',
+            count: group._count._all,
+          },
+          Object.fromEntries(
+            METRIC_KEYS.map((key) => [key, byUser[key].get(group.userId) ?? 0]),
+          ) as Record<MetricKey, number>,
+          valueByUser.get(group.userId) ?? ZERO,
+        ),
+      )
       .sort(
         (a, b) => b.count - a.count || a.ownerName.localeCompare(b.ownerName),
       );
-
     if (unassigned > 0) {
-      rows.push({
-        ownerId: null,
-        ownerName: UNASSIGNED_LABEL,
-        count: unassigned,
-      });
+      rows.push(
+        toOwnerRow(
+          { ownerId: null, ownerName: UNASSIGNED_LABEL, count: unassigned },
+          unassignedMetrics,
+          unassignedValue._sum.actualAmount ?? ZERO,
+        ),
+      );
     }
-
     return { rows, total };
+  }
+
+  /** Each metric's per-owner counts — one `leadAssignment.groupBy` per metric, never per row. */
+  private async metricsByUser(
+    and: (extra: Prisma.LeadWhereInput) => Prisma.LeadWhereInput,
+  ): Promise<Record<MetricKey, Map<string, number>>> {
+    const groups = await Promise.all(
+      METRIC_KEYS.map((key) =>
+        this.prisma.leadAssignment.groupBy({
+          by: ['userId'],
+          where: { lead: and(METRIC_WHERE[key]) },
+          _count: { _all: true },
+        }),
+      ),
+    );
+    return Object.fromEntries(
+      METRIC_KEYS.map((key, index) => [
+        key,
+        new Map(
+          groups[index].map((group) => [group.userId, group._count._all]),
+        ),
+      ]),
+    ) as Record<MetricKey, Map<string, number>>;
+  }
+
+  /** Each metric's count over one lead set (the Unassigned bucket, or an agent's own leads). */
+  private async metricsFor(
+    where: Prisma.LeadWhereInput,
+  ): Promise<Record<MetricKey, number>> {
+    const counts = await Promise.all(
+      METRIC_KEYS.map((key) =>
+        this.prisma.lead.count({ where: { AND: [where, METRIC_WHERE[key]] } }),
+      ),
+    );
+    return Object.fromEntries(
+      METRIC_KEYS.map((key, index) => [key, counts[index]]),
+    ) as Record<MetricKey, number>;
   }
 
   /**

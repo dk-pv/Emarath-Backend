@@ -45,4 +45,15 @@ describe('buildConvertedLeadsWhere', () => {
     expect(createdAt?.gte).toEqual(new Date(from));
     expect(createdAt?.lt).toEqual(new Date(to));
   });
+
+  it('applies the window to statusChangedAt when dateField is statusChanged', () => {
+    const where = buildConvertedLeadsWhere(admin, {
+      from: '2026-07-01T00:00:00.000Z',
+      dateField: 'statusChanged',
+    });
+    const json = JSON.stringify(where);
+    expect(json).toContain('statusChangedAt');
+    expect(json).toContain('WON');
+    expect(JSON.stringify(where.AND?.[0])).not.toContain('createdAt');
+  });
 });

@@ -11,11 +11,11 @@ import {
 /**
  * Serves the New Lead form's dropdown options (ADR-0005, Phase 1).
  *
- * Most lists are config-backed (`lookups.data.ts`). Two are read from the database
+ * Most lists are config-backed (`lookups.data.ts`). Three are read from the database
  * so the form always reflects live, user-managed data: `tags` from the `Tag` table
  * (LEAD-12.1), and `leadStatus` from the `Stage` catalogue (KAN-05.1) — the same
  * canonical source the board and list badges read, so the status dropdown can no
- * longer drift from the stages. All three return the same `{ value, label }` shape,
+ * longer drift from the stages — and `teams` from `User.team`, for the Team filters. All three return the same `{ value, label }` shape,
  * so the frontend treats every lookup identically.
  */
 @Injectable()
@@ -25,6 +25,7 @@ export class LookupsService {
   async byType(type: string): Promise<LookupOption[]> {
     if (type === 'tags') return this.tags();
     if (type === 'leadStatus') return this.stages();
+    if (type === 'teams') return this.teams();
     if (isConfigLookup(type)) return [...LOOKUP_DATA[type]];
     throw new NotFoundException(`Unknown lookup type: ${type}`);
   }
@@ -51,6 +52,20 @@ export class LookupsService {
       orderBy: { position: 'asc' },
     });
     return stages.map((stage) => ({ value: stage.name, label: stage.name }));
+  }
+
+  /** The teams users belong to — distinct `User.team`, the value the Team filters match on. */
+  private async teams(): Promise<LookupOption[]> {
+    const rows = await this.prisma.user.findMany({
+      where: { team: { not: null }, deletedAt: null },
+      select: { team: true },
+      distinct: ['team'],
+      orderBy: { team: 'asc' },
+    });
+    return rows
+      .map((row) => row.team)
+      .filter((team): team is string => team !== null)
+      .map((team) => ({ value: team, label: team }));
   }
 }
 

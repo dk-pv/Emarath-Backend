@@ -90,12 +90,13 @@ function makeService(
       Array.from({ length: size }, (_, i) => ({ leadId: `l${i}` })),
     );
   });
-  const activityCount = jest.fn((args: { where: { completedAt: Where['startedAt'] } }) =>
-    Promise.resolve(
-      args.where.completedAt.gte?.getTime() === new Date(FROM).getTime()
-        ? current.followUpCompleted
-        : previous.followUpCompleted,
-    ),
+  const activityCount = jest.fn(
+    (args: { where: { completedAt: Where['startedAt'] } }) =>
+      Promise.resolve(
+        args.where.completedAt.gte?.getTime() === new Date(FROM).getTime()
+          ? current.followUpCompleted
+          : previous.followUpCompleted,
+      ),
   );
 
   const prisma = {

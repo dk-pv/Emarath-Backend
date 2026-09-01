@@ -1,23 +1,16 @@
 import { Prisma } from '../../generated/prisma/client';
+import { LeadListItem } from '../../leads/dto/lead-response.dto';
 
 /** The bucket label for leads with no assignment (existing project terminology). */
 export const UNASSIGNED_LABEL = 'Unassigned';
 
-/** An assignee reference, exactly the shape the Leads list already exposes. */
-export interface LeadsByOwnershipAgentRef {
-  id: string;
-  name: string;
-}
-
-/** One lead in the detailed view (RPT-02.5) with its owner(s). */
-export interface LeadsByOwnershipLeadRow {
-  id: string;
-  name: string;
-  firstName: string | null;
-  primaryPhone: string;
-  source: string | null;
-  assignedTo: LeadsByOwnershipAgentRef[];
-}
+/**
+ * One lead in the detailed view: the Leads list's own row shape (so the list's column cells
+ * render it unchanged) plus the resolved Stage colour for the status pill.
+ */
+export type LeadsByOwnershipLeadRow = LeadListItem & {
+  statusColor: string | null;
+};
 
 export interface LeadsByOwnershipListResponse {
   rows: LeadsByOwnershipLeadRow[];
@@ -30,10 +23,29 @@ export interface LeadsByOwnershipListResponse {
  * per-owner counts can sum to more than the distinct lead total when leads are co-assigned.
  */
 export interface OwnerCountRow {
-  /** null for the "Unassigned" bucket. */
+  /** Null for the "Unassigned" bucket. */
   ownerId: string | null;
   ownerName: string;
+  /** Total leads assigned to the owner (a co-assigned lead counts for each owner). */
   count: number;
+  /** Leads still in the "New" stage. */
+  newCount: number;
+  /** Leads with an answered call (the Today Leads definition, any time). */
+  contactedCount: number;
+  /** Leads with no completed activity and no logged call (the No Activity definition). */
+  noActivityCount: number;
+  /** Leads in the WON stage. */
+  convertedCount: number;
+  /** Leads in the LOST stage. */
+  lostCount: number;
+  /** convertedCount / count, as a percentage 0–100. */
+  conversionRatio: number;
+  /** Emarath has no lead-qualification stage or flag, so this is null (rendered "—"). */
+  qualifiedRatio: number | null;
+  /** Emarath has no sales-target model, so this is null (rendered "No Target Set"). */
+  targetAchievement: number | null;
+  /** Σ actualAmount of the owner's leads, AED, as a Decimal string. */
+  leadValue: string;
 }
 
 export interface LeadsByOwnershipSummaryResponse {
@@ -58,24 +70,3 @@ export const LEADS_BY_OWNERSHIP_SELECT = {
     select: { user: { select: { id: true, name: true } } },
   },
 } satisfies Prisma.LeadSelect;
-
-type LeadsByOwnershipLead = Prisma.LeadGetPayload<{
-  select: typeof LEADS_BY_OWNERSHIP_SELECT;
-}>;
-
-/** Shapes a selected lead into a response row. */
-export function toLeadsByOwnershipRow(
-  lead: LeadsByOwnershipLead,
-): LeadsByOwnershipLeadRow {
-  return {
-    id: lead.id,
-    name: lead.name,
-    firstName: lead.firstName,
-    primaryPhone: lead.primaryPhone,
-    source: lead.source,
-    assignedTo: lead.assignments.map((assignment) => ({
-      id: assignment.user.id,
-      name: assignment.user.name,
-    })),
-  };
-}

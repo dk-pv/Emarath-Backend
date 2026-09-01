@@ -13,6 +13,7 @@ import { leadScopeWhere } from '../lead-scope';
 import { buildLeadWhere, LeadWhereQuery } from '../lead-where';
 import { BoardStageSummary, LeadBoardResponse } from './dto/board-query.dto';
 import { MoveLeadStageDto, MoveLeadStageResponse } from './dto/move-stage.dto';
+import { LOST_STATUS } from '../lead-status.constants';
 
 /**
  * Kanban board data (KAN-02.1): leads grouped by stage for the selected pipeline,
@@ -108,7 +109,11 @@ export class LeadsBoardService {
 
     const updated = await this.prisma.lead.update({
       where: { id },
-      data: { status: dto.stage },
+      // Same capture rule as the row action: LOST stores the reason, anything else clears it.
+      data: {
+        status: dto.stage,
+        lostReason: dto.stage === LOST_STATUS ? (dto.lostReason ?? null) : null,
+      },
       select: LEAD_LIST_SELECT,
     });
 

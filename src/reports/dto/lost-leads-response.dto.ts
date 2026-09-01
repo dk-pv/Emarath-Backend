@@ -1,47 +1,39 @@
 import { Prisma } from '../../generated/prisma/client';
-
-/** An assignee reference, exactly the shape the Leads list already exposes. */
-export interface LostLeadsAgentRef {
-  id: string;
-  name: string;
-}
+import {
+  LEAD_LIST_SELECT,
+  LeadListItem,
+} from '../../leads/dto/lead-response.dto';
 
 /**
- * One lost lead in the detailed view (RPT-02.7 AC1). `status` is always "LOST" (the report's
- * definition), shown as a coloured pill using the status's real Stage colour; there is no
- * loss-reason column (none exists in the model or the Workpex reference).
+ * One lost lead: the Leads list's own row shape (so the list's column cells render it
+ * unchanged) plus the LOST stage colour and the loss instant — `statusChangedAt`, which for
+ * a LOST lead is when it became LOST (backfilled to `createdAt` for leads whose status never
+ * changed since the column landed).
  */
-export interface LostLeadRow {
-  id: string;
-  name: string;
-  firstName: string | null;
-  primaryPhone: string;
-  source: string | null;
-  status: string;
+export type LostLeadRow = LeadListItem & {
   statusColor: string | null;
-  assignedTo: LostLeadsAgentRef[];
-}
+  lostAt: string;
+  /** Why the lead was lost; null renders "No reason recorded". */
+  lostReason: string | null;
+};
 
 export interface LostLeadsListResponse {
   rows: LostLeadRow[];
   total: number;
 }
 
-/**
- * One summary row: lost-lead count per assignee ("Assigned User | No. of Leads"). `agentId` is
- * null for the "Unassigned" bucket and for the synthetic "Total" row (flagged `isTotal`, carrying
- * the distinct-lead count).
- */
-export interface LostLeadsSummaryRow {
-  agentId: string | null;
-  agentName: string;
+/** One reason bucket: display label, the drill value, and its count. */
+export interface LostReasonCountRow {
+  /** "No reason recorded" for the null bucket. */
+  reason: string;
+  /** What the drill-down sends back as `reason` (`none` for the null bucket). */
+  value: string;
   count: number;
-  isTotal?: boolean;
 }
 
 export interface LostLeadsSummaryResponse {
-  rows: LostLeadsSummaryRow[];
-  /** Distinct lost leads. Per-agent counts can exceed this when a lead has co-assignees. */
+  rows: LostReasonCountRow[];
+  /** Distinct lost leads over the same filters — the denominator. */
   total: number;
 }
 
@@ -49,8 +41,15 @@ export interface LostLeadsFilterOptions {
   teams: string[];
 }
 
-/** The lead fields the report reads — identity, source, status and assignees. */
-export const LOST_LEADS_SELECT = {
+/** The detailed view's projection: the Leads list row plus the loss instant. */
+export const LOST_LIST_SELECT = {
+  ...LEAD_LIST_SELECT,
+  statusChangedAt: true,
+  lostReason: true,
+} satisfies Prisma.LeadSelect;
+
+/** The export's projection: the CSV's six columns plus the assignees' names. */
+export const LOST_EXPORT_SELECT = {
   id: true,
   name: true,
   firstName: true,
@@ -61,25 +60,3 @@ export const LOST_LEADS_SELECT = {
     select: { user: { select: { id: true, name: true } } },
   },
 } satisfies Prisma.LeadSelect;
-
-type LostLead = Prisma.LeadGetPayload<{ select: typeof LOST_LEADS_SELECT }>;
-
-/** Shapes a selected lost lead + its status colour into a response row. */
-export function toLostLeadRow(
-  lead: LostLead,
-  statusColor: string | null,
-): LostLeadRow {
-  return {
-    id: lead.id,
-    name: lead.name,
-    firstName: lead.firstName,
-    primaryPhone: lead.primaryPhone,
-    source: lead.source,
-    status: lead.status,
-    statusColor,
-    assignedTo: lead.assignments.map((assignment) => ({
-      id: assignment.user.id,
-      name: assignment.user.name,
-    })),
-  };
-}

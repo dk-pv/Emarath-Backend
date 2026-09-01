@@ -1,52 +1,33 @@
 import { Prisma } from '../../generated/prisma/client';
-
-/** An assignee reference, exactly the shape the Leads list already exposes. */
-export interface ConvertedLeadsAgentRef {
-  id: string;
-  name: string;
-}
+import {
+  LEAD_LIST_SELECT,
+  LeadListItem,
+} from '../../leads/dto/lead-response.dto';
 
 /**
- * One converted lead in the detailed view (RPT-02.6 AC1/AC2). `actualAmount` is the lead's
- * confirmed value — the report's "converted amount" — serialized as a string to preserve the
- * Decimal exactly (the same convention the Leads list uses); null when the lead has no amount.
+ * One converted lead: the Leads list's own row shape (so the list's column cells render it
+ * unchanged) plus the resolved Stage colour and the conversion instant — `statusChangedAt`,
+ * which for a WON lead is when it became WON (backfilled to `createdAt` for leads whose
+ * status never changed since the column landed).
  */
-export interface ConvertedLeadRow {
-  id: string;
-  name: string;
-  firstName: string | null;
-  primaryPhone: string;
-  source: string | null;
-  assignedTo: ConvertedLeadsAgentRef[];
-  actualAmount: string | null;
-}
+export type ConvertedLeadRow = LeadListItem & {
+  statusColor: string | null;
+  convertedAt: string;
+};
 
 export interface ConvertedLeadsListResponse {
   rows: ConvertedLeadRow[];
   total: number;
 }
 
-/**
- * One summary row: converted-lead count and total converted amount (Σ actualAmount, AED string)
- * per assignee. `agentId` is null for the "Unassigned" bucket and for the synthetic "Total" row,
- * which is flagged `isTotal` and carries the distinct-lead count and grand total amount.
- */
-export interface ConvertedLeadsSummaryRow {
-  agentId: string | null;
-  agentName: string;
-  count: number;
-  amount: string;
-  isTotal?: boolean;
-}
+/** The detailed view's projection: the Leads list row plus the conversion instant. */
+export const CONVERTED_LIST_SELECT = {
+  ...LEAD_LIST_SELECT,
+  statusChangedAt: true,
+} satisfies Prisma.LeadSelect;
 
-export interface ConvertedLeadsSummaryResponse {
-  rows: ConvertedLeadsSummaryRow[];
-  /** Distinct converted leads. Per-agent counts can exceed this when a lead has co-assignees. */
-  total: number;
-}
-
-/** The lead fields the detailed view reads — identity, source, assignees and the converted amount. */
-export const CONVERTED_LEADS_SELECT = {
+/** The export's projection: the CSV's six columns plus the assignees' names. */
+export const CONVERTED_EXPORT_SELECT = {
   id: true,
   name: true,
   firstName: true,
@@ -57,35 +38,3 @@ export const CONVERTED_LEADS_SELECT = {
     select: { user: { select: { id: true, name: true } } },
   },
 } satisfies Prisma.LeadSelect;
-
-/** The minimal projection the summary aggregates over — the amount plus assignee ids only. */
-export const CONVERTED_SUMMARY_SELECT = {
-  id: true,
-  actualAmount: true,
-  assignments: { select: { userId: true } },
-} satisfies Prisma.LeadSelect;
-
-type ConvertedLead = Prisma.LeadGetPayload<{
-  select: typeof CONVERTED_LEADS_SELECT;
-}>;
-
-/** Serializes a nullable Decimal to the string the Leads list uses (null stays null). */
-export function amountToString(value: Prisma.Decimal | null): string | null {
-  return value?.toString() ?? null;
-}
-
-/** Shapes a selected converted lead into a response row. */
-export function toConvertedLeadRow(lead: ConvertedLead): ConvertedLeadRow {
-  return {
-    id: lead.id,
-    name: lead.name,
-    firstName: lead.firstName,
-    primaryPhone: lead.primaryPhone,
-    source: lead.source,
-    assignedTo: lead.assignments.map((assignment) => ({
-      id: assignment.user.id,
-      name: assignment.user.name,
-    })),
-    actualAmount: amountToString(lead.actualAmount),
-  };
-}
