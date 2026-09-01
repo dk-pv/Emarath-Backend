@@ -31,6 +31,7 @@
     "seed:ui-reference": "nest build && node dist/prisma/seed-ui-reference.js",
     "seed:documents": "nest build && node dist/prisma/seed-documents.js",
     "seed:gps": "nest build && node dist/prisma/seed-gps.js",
+    "seed:integrations": "nest build && node dist/prisma/seed-integrations.js",
     "seed:dev-dataset": "nest build && node dist/prisma/seed-dev-dataset.js",
     "seed:dev-dataset:verify": "nest build && node dist/prisma/verify-dev-dataset.js",
     "db:studio": "prisma studio"

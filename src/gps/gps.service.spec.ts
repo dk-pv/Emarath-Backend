@@ -1,4 +1,5 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Prisma } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
@@ -36,6 +37,7 @@ function makeService() {
   const pointFindMany = jest.fn();
   const activityCount = jest.fn();
   const activityFindMany = jest.fn();
+  const activityFindUnique = jest.fn();
   const userFindMany = jest.fn();
 
   const prisma = {
@@ -45,15 +47,23 @@ function makeService() {
       count: pointCount,
       findMany: pointFindMany,
     },
-    activity: { count: activityCount, findMany: activityFindMany },
+    activity: {
+      count: activityCount,
+      findMany: activityFindMany,
+      findUnique: activityFindUnique,
+    },
     user: { findMany: userFindMany },
   } as unknown as PrismaService;
   const currentUser = {
     resolve: jest.fn().mockResolvedValue({ id: AGENT_ID, role: 'SALES_AGENT' }),
   } as unknown as CurrentUserService;
 
+  const config = {
+    getOrThrow: jest.fn().mockReturnValue({ checkInRadiusMeters: 150 }),
+  } as unknown as ConfigService;
+
   return {
-    service: new GpsService(prisma, currentUser),
+    service: new GpsService(prisma, currentUser, config),
     create,
     findFirst,
     update,
@@ -64,7 +74,9 @@ function makeService() {
     pointFindMany,
     activityCount,
     activityFindMany,
+    activityFindUnique,
     userFindMany,
+    config,
   };
 }
 
@@ -153,14 +165,35 @@ describe('GpsService.checkOut', () => {
   });
 });
 
+/**
+ * The boolean gate the Activities service calls. GPS-09.1 changed what "valid"
+ * means — a check-in must now also be near the site — so these assert through the
+ * real proximity path rather than the old existence count.
+ */
 describe('GpsService.hasValidCheckIn', () => {
-  it('is true when the agent has a check-in for the activity (AC3)', async () => {
-    const { service, count } = makeService();
-    count.mockResolvedValue(1);
+  const site = {
+    id: '77777777-7777-7777-7777-777777777777',
+    name: 'Kozhikode Depot',
+    lat: new Prisma.Decimal('11.258800'),
+    lng: new Prisma.Decimal('75.780400'),
+    radiusMeters: null,
+  };
+
+  it('is true when the agent has a nearby check-in for the activity (AC3)', async () => {
+    const { service, activityFindUnique, findMany } = makeService();
+    activityFindUnique.mockResolvedValue({ location: site });
+    findMany.mockResolvedValue([
+      {
+        id: CHECK_IN_ID,
+        checkInLat: new Prisma.Decimal('11.259300'),
+        checkInLng: new Prisma.Decimal('75.780400'),
+      },
+    ]);
+
     await expect(service.hasValidCheckIn(AGENT_ID, ACTIVITY_ID)).resolves.toBe(
       true,
     );
-    const args = (count.mock.calls as unknown[][])[0][0] as {
+    const args = (findMany.mock.calls as unknown[][])[0][0] as {
       where: Record<string, unknown>;
     };
     expect(args.where).toMatchObject({
@@ -171,8 +204,9 @@ describe('GpsService.hasValidCheckIn', () => {
   });
 
   it('is false when the agent has none', async () => {
-    const { service, count } = makeService();
-    count.mockResolvedValue(0);
+    const { service, activityFindUnique, findMany } = makeService();
+    activityFindUnique.mockResolvedValue({ location: site });
+    findMany.mockResolvedValue([]);
     await expect(service.hasValidCheckIn(AGENT_ID, ACTIVITY_ID)).resolves.toBe(
       false,
     );
@@ -339,5 +373,132 @@ describe('GpsService.getLocations', () => {
     expect(result[2].type).toBe('CHECK_IN');
     // GPS-06.1: pins carry the resolved agent display name.
     expect(result[0].agentName).toBe('Test Agent');
+  });
+});
+
+/**
+ * GPS-09.1 — location-verified completion.
+ *
+ * The site sits at the Kozhikode centre the fixture uses. `nearby` is ~55 m away
+ * (inside the 150 m default) and `farAway` ~1.2 km, so the two sides of the gate are
+ * unambiguous rather than borderline.
+ */
+describe('GpsService.verifyLocationCheckIn (GPS-09.1)', () => {
+  const LOCATION_ID = '77777777-7777-7777-7777-777777777777';
+  const site = {
+    id: LOCATION_ID,
+    name: 'Kozhikode Depot',
+    lat: new Prisma.Decimal('11.258800'),
+    lng: new Prisma.Decimal('75.780400'),
+    radiusMeters: null,
+  };
+  const nearby = {
+    id: CHECK_IN_ID,
+    checkInLat: new Prisma.Decimal('11.259300'),
+    checkInLng: new Prisma.Decimal('75.780400'),
+  };
+  const farAway = {
+    id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    checkInLat: new Prisma.Decimal('11.269800'),
+    checkInLng: new Prisma.Decimal('75.780400'),
+  };
+
+  it('accepts a nearby check-in and reports which one satisfied the gate (AC1, AC3)', async () => {
+    const { service, activityFindUnique, findMany } = makeService();
+    activityFindUnique.mockResolvedValue({ location: site });
+    findMany.mockResolvedValue([nearby]);
+
+    const verdict = await service.verifyLocationCheckIn(AGENT_ID, ACTIVITY_ID);
+
+    expect(verdict.ok).toBe(true);
+    if (!verdict.ok) throw new Error('expected ok');
+    expect(verdict.checkInId).toBe(CHECK_IN_ID);
+    expect(verdict.meters).toBeLessThan(150);
+  });
+
+  it('blocks when the agent has no check-in for the follow-up (AC2)', async () => {
+    const { service, activityFindUnique, findMany } = makeService();
+    activityFindUnique.mockResolvedValue({ location: site });
+    findMany.mockResolvedValue([]);
+
+    const verdict = await service.verifyLocationCheckIn(AGENT_ID, ACTIVITY_ID);
+
+    expect(verdict).toEqual({ ok: false, reason: 'NO_CHECK_IN' });
+  });
+
+  it('blocks a check-in outside the radius and says how far it was (AC1, AC2)', async () => {
+    const { service, activityFindUnique, findMany } = makeService();
+    activityFindUnique.mockResolvedValue({ location: site });
+    findMany.mockResolvedValue([farAway]);
+
+    const verdict = await service.verifyLocationCheckIn(AGENT_ID, ACTIVITY_ID);
+
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok || verdict.reason !== 'TOO_FAR')
+      throw new Error('expected TOO_FAR');
+    expect(verdict.meters).toBeGreaterThan(1000);
+    expect(verdict.radius).toBe(150);
+    expect(verdict.locationName).toBe('Kozhikode Depot');
+  });
+
+  it('never considers another agent’s check-in — the query is scoped to the caller (AC2)', async () => {
+    const { service, activityFindUnique, findMany } = makeService();
+    activityFindUnique.mockResolvedValue({ location: site });
+    findMany.mockResolvedValue([]);
+
+    const verdict = await service.verifyLocationCheckIn(AGENT_ID, ACTIVITY_ID);
+
+    expect(verdict).toEqual({ ok: false, reason: 'NO_CHECK_IN' });
+    // The agent is a query condition, so a foreign check-in is never a candidate.
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { agentId: AGENT_ID, activityId: ACTIVITY_ID, deletedAt: null },
+      }),
+    );
+  });
+
+  it('picks the nearest check-in when the agent has several', async () => {
+    const { service, activityFindUnique, findMany } = makeService();
+    activityFindUnique.mockResolvedValue({ location: site });
+    findMany.mockResolvedValue([farAway, nearby]);
+
+    const verdict = await service.verifyLocationCheckIn(AGENT_ID, ACTIVITY_ID);
+
+    expect(verdict.ok).toBe(true);
+    if (!verdict.ok) throw new Error('expected ok');
+    expect(verdict.checkInId).toBe(CHECK_IN_ID);
+  });
+
+  it('honours a site’s own radius over the configured default', async () => {
+    const { service, activityFindUnique, findMany } = makeService();
+    activityFindUnique.mockResolvedValue({
+      location: { ...site, radiusMeters: 2000 },
+    });
+    findMany.mockResolvedValue([farAway]);
+
+    const verdict = await service.verifyLocationCheckIn(AGENT_ID, ACTIVITY_ID);
+
+    expect(verdict.ok).toBe(true);
+  });
+
+  it('fails closed when the follow-up points at a site that no longer exists', async () => {
+    const { service, activityFindUnique, findMany } = makeService();
+    activityFindUnique.mockResolvedValue({ location: null });
+
+    const verdict = await service.verifyLocationCheckIn(AGENT_ID, ACTIVITY_ID);
+
+    expect(verdict).toEqual({ ok: false, reason: 'NO_LOCATION' });
+    // No point querying check-ins when there is nothing to measure against.
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it('hasValidCheckIn stays a boolean view of the same rule', async () => {
+    const { service, activityFindUnique, findMany } = makeService();
+    activityFindUnique.mockResolvedValue({ location: site });
+    findMany.mockResolvedValue([nearby]);
+
+    await expect(service.hasValidCheckIn(AGENT_ID, ACTIVITY_ID)).resolves.toBe(
+      true,
+    );
   });
 });

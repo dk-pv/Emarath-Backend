@@ -7,7 +7,7 @@ import {
 import { ActivityType, Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
-import { GpsService } from '../gps/gps.service';
+import { GpsService, type CheckInVerification } from '../gps/gps.service';
 import { leadScopeWhere } from '../leads/lead-scope';
 import { activityScopeWhere } from './activity-scope';
 import { activityBucketWhere, DayBoundaries } from './activity-buckets';
@@ -39,6 +39,24 @@ const ACTIVITY_OUT_OF_SCOPE =
  */
 export const LOCATION_GATE_MESSAGE =
   'Check in on site to complete this activity.';
+
+/**
+ * The reason a location-tied completion was refused, phrased for the user (GPS-09.1
+ * AC2). Distances are rounded to whole metres — a GPS fix is not precise enough for
+ * decimals to mean anything, and "182 m" reads as a fact where "182.37 m" reads as a
+ * machine talking.
+ */
+export function locationGateMessage(
+  verdict: Extract<CheckInVerification, { ok: false }>,
+): string {
+  if (verdict.reason === 'TOO_FAR') {
+    return `Your check-in was ${Math.round(verdict.meters)} m from ${verdict.locationName}, outside the ${verdict.radius} m required to complete this activity.`;
+  }
+  if (verdict.reason === 'NO_LOCATION') {
+    return 'This activity is tied to a location that no longer exists. Ask an administrator to fix its location before completing it.';
+  }
+  return LOCATION_GATE_MESSAGE;
+}
 
 /**
  * Activity writes (ACT-03.1). Injects `PrismaService` directly — like the row
@@ -183,15 +201,18 @@ export class ActivitiesService {
      * the agent must have a check-in verifying this follow-up. When `locationId`
      * is null the branch is skipped and completion proceeds normally.
      *
-     * Geofencing the check-in against the expected location's coordinates awaits
-     * the location catalogue (deferred); existence of the agent's check-in is
-     * the current verification.
+     * GPS-09.1 completes the rule: `GpsService.verifyLocationCheckIn` measures the
+     * agent's own check-in against the site's coordinates and returns the reason it
+     * failed, which becomes the 409's message so the user is told whether they never
+     * checked in or were too far away.
      */
-    if (
-      activity.locationId !== null &&
-      !(await this.gps.hasValidCheckIn(user.id, activity.id))
-    ) {
-      throw new ConflictException(LOCATION_GATE_MESSAGE);
+    if (activity.locationId !== null) {
+      const verdict = await this.gps.verifyLocationCheckIn(
+        user.id,
+        activity.id,
+      );
+      if (!verdict.ok)
+        throw new ConflictException(locationGateMessage(verdict));
     }
 
     const updated = await this.prisma.activity.update({
@@ -233,7 +254,11 @@ export class ActivitiesService {
           description: dto.description,
           dueAt,
           endAt,
-          locationId: dto.locationId ?? null,
+          // `disconnect`, not `undefined`: an edit that drops the location must clear
+          // it, which is what `locationId: null` did before the relation existed.
+          location: dto.locationId
+            ? { connect: { id: dto.locationId } }
+            : { disconnect: true },
           assignees: {
             deleteMany: {},
             create: [...assigneeIds].map((userId) => ({
@@ -315,7 +340,9 @@ export class ActivitiesService {
         description: source.description,
         dueAt: source.dueAt,
         endAt: source.endAt,
-        locationId: source.locationId,
+        location: source.locationId
+          ? { connect: { id: source.locationId } }
+          : undefined,
         assignees: {
           create: source.assignees.map((a) => ({
             user: { connect: { id: a.userId } },
@@ -383,7 +410,9 @@ export class ActivitiesService {
           description: dto.description,
           dueAt,
           endAt,
-          locationId: dto.locationId ?? null,
+          location: dto.locationId
+            ? { connect: { id: dto.locationId } }
+            : undefined,
           assignees: {
             create: [...assigneeIds].map((userId) => ({
               user: { connect: { id: userId } },

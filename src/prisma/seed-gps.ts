@@ -131,6 +131,40 @@ async function main(): Promise<void> {
       take: 40,
     });
 
+    // GPS-09.1: two sites and two location-tied follow-ups, so the completion gate
+    // has something real to pass and fail against. One follow-up gets a check-in at
+    // the site (completes), the other a check-in ~1.2 km away (blocked).
+    const sites = [
+      {
+        key: 'depot',
+        name: 'Kozhikode Depot',
+        lat: CENTRE.lat,
+        lng: CENTRE.lng,
+      },
+      {
+        key: 'showroom',
+        name: 'Mavoor Road Showroom',
+        lat: CENTRE.lat + 0.012,
+        lng: CENTRE.lng + 0.012,
+      },
+    ];
+    const siteIds: Record<string, string> = {};
+    for (const [index, site] of sites.entries()) {
+      const id = fixtureId('location', index);
+      siteIds[site.key] = id;
+      const data = {
+        name: site.name,
+        lat: site.lat,
+        lng: site.lng,
+        deletedAt: null,
+      };
+      await prisma.location.upsert({
+        where: { id },
+        create: { id, ...data },
+        update: data,
+      });
+    }
+
     const random = makeRandom(20260831);
     const total = CHECK_INS_TODAY + CHECK_INS_EARLIER;
     let linked = 0;
@@ -206,6 +240,91 @@ async function main(): Promise<void> {
         create: { id, ...data },
         update: data,
       });
+    }
+
+    // Tie two open follow-ups to the two sites and give each a check-in: one on
+    // site, one far away. Nothing else about those activities is touched.
+    const gateAgent = await prisma.user.findFirst({
+      where: { email: 'admin@emarath.com', deletedAt: null },
+      select: { id: true },
+    });
+    const gateAgentId = gateAgent?.id ?? agents[0].id;
+
+    // Idempotent: reuse the follow-ups this fixture already tied to its own sites
+    // before claiming new ones, or a re-run would tie a fresh pair every time and
+    // leave a growing trail of location-tied activities behind it.
+    const existingTargets = await prisma.activity.findMany({
+      where: { deletedAt: null, locationId: { in: Object.values(siteIds) } },
+      select: { id: true, locationId: true },
+      orderBy: { dueAt: 'asc' },
+    });
+    const claimed = new Map(
+      existingTargets.map((a) => [a.locationId as string, a.id]),
+    );
+    const spare = await prisma.activity.findMany({
+      where: { completedAt: null, deletedAt: null, locationId: null },
+      select: { id: true },
+      orderBy: { dueAt: 'asc' },
+      take: 2,
+    });
+    let spareIndex = 0;
+
+    const GATE_CASES = [
+      { site: 'depot', offset: 0.0004, label: 'on-site (completes)' },
+      { site: 'showroom', offset: 0.02, label: 'too far (blocked)' },
+    ];
+
+    for (const [index, scenario] of GATE_CASES.entries()) {
+      const siteId = siteIds[scenario.site];
+      const site = sites.find((s) => s.key === scenario.site)!;
+      const targetId = claimed.get(siteId) ?? spare[spareIndex++]?.id;
+      if (!targetId) break;
+      const target = { id: targetId };
+      // The gate is checked against the *calling* user, so the fixture attaches these
+      // check-ins to the admin account: it is the one login a developer or reviewer
+      // can actually sign in as to exercise the gate by hand.
+      const agentId = gateAgentId;
+
+      await prisma.activity.update({
+        where: { id: target.id },
+        data: {
+          location: { connect: { id: siteId } },
+          // Assigned to the same account, so the follow-up is visible to whoever
+          // signs in to test the gate.
+          assignees: {
+            connectOrCreate: {
+              where: {
+                activityId_userId: {
+                  activityId: target.id,
+                  userId: gateAgentId,
+                },
+              },
+              create: { userId: gateAgentId },
+            },
+          },
+        },
+      });
+
+      const id = fixtureId('gate-check-in', index);
+      const data = {
+        agentId,
+        checkInAt: new Date(),
+        checkInLat: Number((site.lat + scenario.offset).toFixed(6)),
+        checkInLng: Number(site.lng.toFixed(6)),
+        checkOutAt: null,
+        checkOutLat: null,
+        checkOutLng: null,
+        activityId: target.id,
+        deletedAt: null,
+      };
+      await prisma.checkIn.upsert({
+        where: { id },
+        create: { id, ...data },
+        update: data,
+      });
+      console.log(
+        `[gps] gate fixture: activity ${target.id} @ ${site.name} — ${scenario.label}`,
+      );
     }
 
     const [checkInCount, pointCount] = await Promise.all([
