@@ -19,14 +19,17 @@ function makeService(
   leadGroups: { leadId: string; _count: { _all: number } }[],
   leads: Lead[],
   role: UserRole = UserRole.SUPERADMIN,
+  stages: { name: string; pipeline: string }[] = [],
 ) {
   const callGroupBy = jest.fn((args: { by: string[] }) =>
     Promise.resolve(args.by[0] === 'outcome' ? outcomes : leadGroups),
   );
   const leadFindMany = jest.fn().mockResolvedValue(leads);
+  const stageFindMany = jest.fn().mockResolvedValue(stages);
   const prisma = {
     call: { groupBy: callGroupBy },
     lead: { findMany: leadFindMany },
+    stage: { findMany: stageFindMany },
   } as unknown as PrismaService;
   const currentUser = {
     resolve: jest.fn().mockResolvedValue({ id: USER_ID, role }),
@@ -34,6 +37,7 @@ function makeService(
   return {
     service: new CallAnalyticsService(prisma, currentUser),
     callGroupBy,
+    stageFindMany,
   };
 }
 
@@ -74,9 +78,24 @@ describe('CallAnalyticsService.getAnalytics', () => {
         { leadId: 'c', _count: { _all: 2 } },
       ],
       [
-        { id: 'a', source: 'DoubleTick', status: 'New', pipeline: 'Lead Pipeline' },
-        { id: 'b', source: 'DoubleTick', status: 'HOT', pipeline: 'Lead Pipeline' },
-        { id: 'c', source: 'Broadcast', status: 'New', pipeline: 'Lead Pipeline' },
+        {
+          id: 'a',
+          source: 'DoubleTick',
+          status: 'New',
+          pipeline: 'Lead Pipeline',
+        },
+        {
+          id: 'b',
+          source: 'DoubleTick',
+          status: 'HOT',
+          pipeline: 'Lead Pipeline',
+        },
+        {
+          id: 'c',
+          source: 'Broadcast',
+          status: 'New',
+          pipeline: 'Lead Pipeline',
+        },
       ],
     );
     const { bySource, total } = await service.getAnalytics(query);
@@ -141,5 +160,52 @@ describe('CallAnalyticsService.getAnalytics', () => {
     expect(result.bySource).toEqual([]);
     expect(result.byStage).toEqual([]);
     expect(result.total).toBe(0);
+  });
+
+  it('lists every catalogued stage in board order, holding untouched ones at zero', async () => {
+    const { service } = makeService(
+      [],
+      [{ leadId: 'a', _count: { _all: 3 } }],
+      [{ id: 'a', source: null, status: 'Warm', pipeline: 'Lead Pipeline' }],
+      UserRole.SUPERADMIN,
+      [
+        { name: 'Initial Contact', pipeline: 'Lead Pipeline' },
+        { name: 'Warm', pipeline: 'Lead Pipeline' },
+        { name: 'Cold', pipeline: 'Lead Pipeline' },
+      ],
+    );
+    const { byStage } = await service.getAnalytics(query);
+    expect(byStage).toEqual([
+      { label: 'Initial Contact (LP)', count: 0 },
+      { label: 'Warm (LP)', count: 3 },
+      { label: 'Cold (LP)', count: 0 },
+    ]);
+  });
+
+  it('still lists the stage catalogue at zero when the period has no calls', async () => {
+    const { service } = makeService([], [], [], UserRole.SUPERADMIN, [
+      { name: 'Warm', pipeline: 'Lead Pipeline' },
+      { name: 'Cold', pipeline: 'Lead Pipeline' },
+    ]);
+    const { byStage } = await service.getAnalytics(query);
+    expect(byStage).toEqual([
+      { label: 'Warm (LP)', count: 0 },
+      { label: 'Cold (LP)', count: 0 },
+    ]);
+  });
+
+  it('keeps calls on a stage the catalogue no longer lists', async () => {
+    const { service } = makeService(
+      [],
+      [{ leadId: 'a', _count: { _all: 2 } }],
+      [{ id: 'a', source: null, status: 'Retired', pipeline: 'Lead Pipeline' }],
+      UserRole.SUPERADMIN,
+      [{ name: 'Warm', pipeline: 'Lead Pipeline' }],
+    );
+    const { byStage } = await service.getAnalytics(query);
+    expect(byStage).toEqual([
+      { label: 'Warm (LP)', count: 0 },
+      { label: 'Retired (LP)', count: 2 },
+    ]);
   });
 });

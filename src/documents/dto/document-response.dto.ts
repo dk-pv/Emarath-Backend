@@ -77,6 +77,9 @@ export const DOCUMENT_LIST_SELECT = {
   contentType: true,
   createdAt: true,
   uploader: { select: { id: true, name: true } },
+  // The "Access" column names who the document is shared with. Selected here
+  // rather than fetched per row, so the list stays one query.
+  access: { select: { user: { select: { id: true, name: true } } } },
 } satisfies Prisma.DocumentSelect;
 
 type DocumentListRow = Prisma.DocumentGetPayload<{
@@ -94,6 +97,8 @@ export interface DocumentListItem {
   contentType: string;
   createdAt: string;
   uploadedBy: DocumentUserRef;
+  /** "Access" column — the users this document is shared with (DOC-01.1 AC3). */
+  access: DocumentUserRef[];
   /** Short-lived signed link to the stored file (AC2). Never a raw storage key. */
   downloadUrl: string;
 }
@@ -115,6 +120,7 @@ export function toDocumentListItem(
     contentType: row.contentType,
     createdAt: row.createdAt.toISOString(),
     uploadedBy: row.uploader,
+    access: row.access.map((grant) => grant.user),
     downloadUrl,
   };
 }

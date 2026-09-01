@@ -18,6 +18,7 @@ const TO = '2026-07-28T00:00:00.000Z';
 type Where = {
   outcome?: CallOutcome;
   agentId?: string;
+  flagged?: boolean;
   startedAt?: { gte: Date; lt: Date };
   lead?: Record<string, unknown>;
   OR?: unknown[];
@@ -120,7 +121,7 @@ describe('CallLogService.getLog', () => {
       skip: number;
       take: number;
     };
-    expect(args.orderBy).toEqual({ startedAt: 'desc' });
+    expect(args.orderBy).toEqual([{ startedAt: 'desc' }]);
     expect(args.skip).toBe(50); // (3 - 1) × 25
     expect(args.take).toBe(25);
   });
@@ -153,6 +154,45 @@ describe('CallLogService.getLog', () => {
       where: Where;
     };
     expect(where.lead).toMatchObject({ deletedAt: null, status: 'HOT' });
+  });
+
+  it('restricts to flagged calls only when asked, and to neither otherwise', async () => {
+    const { service, callFindMany } = makeService();
+    await service.getLog(query({ flagged: true }));
+    const flagged = (callFindMany.mock.calls as unknown[][])[0][0] as {
+      where: Where;
+    };
+    expect(flagged.where.flagged).toBe(true);
+
+    const off = makeService();
+    await off.service.getLog(query({ flagged: false }));
+    const unflagged = (off.callFindMany.mock.calls as unknown[][])[0][0] as {
+      where: Where;
+    };
+    // Never `flagged: false` — an unset checkbox shows both kinds.
+    expect(unflagged.where.flagged).toBeUndefined();
+  });
+
+  it('orders by call timing by default and by duration on the other Time Metric', async () => {
+    const timing = makeService();
+    await timing.service.getLog(query({}));
+    const byTiming = (timing.callFindMany.mock.calls as unknown[][])[0][0] as {
+      orderBy: unknown;
+    };
+    expect(byTiming.orderBy).toEqual([{ startedAt: 'desc' }]);
+
+    const duration = makeService();
+    await duration.service.getLog(query({ timeMetric: 'CALL_DURATION' }));
+    const byDuration = (
+      duration.callFindMany.mock.calls as unknown[][]
+    )[0][0] as {
+      orderBy: unknown;
+    };
+    // Longest first, with the chronological tiebreak that keeps paging stable.
+    expect(byDuration.orderBy).toEqual([
+      { duration: 'desc' },
+      { startedAt: 'desc' },
+    ]);
   });
 
   it('filters by agent when supplied (CALL-06.1)', async () => {
