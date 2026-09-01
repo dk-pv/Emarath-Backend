@@ -1,13 +1,16 @@
 import {
   ArrayMaxSize,
   IsArray,
+  IsInt,
   IsNotEmpty,
   IsOptional,
   IsString,
   Matches,
+  Max,
   MaxLength,
+  Min,
 } from 'class-validator';
-import { Transform } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 
 /**
  * A saved table layout: the manageable column ids in the user's chosen order,
@@ -38,6 +41,32 @@ export interface KanbanPins {
  * carry spaces/punctuation ("SUPER HOT", "QC NOT APPROVED - WON"), so they are length-
  * bounded rather than pattern-matched like the safe column-id keys above.
  */
+/**
+ * The Lead Aging report's banding thresholds (RPT-02.8), in days: leads up to `green`
+ * are healthy, up to `amber` need attention, and anything older is stale. Stored per user
+ * in the same `UserViewPreference` table under the fixed `lead-aging-thresholds` key, as
+ * the Kanban pins are — a report preference, not a table layout.
+ */
+export interface AgingThresholds {
+  green: number;
+  amber: number;
+}
+
+/** Both bounds are whole days; amber must sit above green, and a year caps both. */
+export class SetAgingThresholdsDto implements AgingThresholds {
+  @Type(() => Number)
+  @IsInt({ message: 'green must be an integer' })
+  @Min(1, { message: 'green must be 1 or greater' })
+  @Max(365, { message: 'green must be at most 365' })
+  green!: number;
+
+  @Type(() => Number)
+  @IsInt({ message: 'amber must be an integer' })
+  @Min(2, { message: 'amber must be 2 or greater' })
+  @Max(365, { message: 'amber must be at most 365' })
+  amber!: number;
+}
+
 export class SetKanbanPinDto {
   @Transform(trim)
   @IsString()

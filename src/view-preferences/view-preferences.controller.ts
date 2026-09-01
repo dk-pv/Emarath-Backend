@@ -5,6 +5,8 @@ import {
   KanbanPins,
   SaveViewPreferenceDto,
   SetKanbanPinDto,
+  AgingThresholds,
+  SetAgingThresholdsDto,
 } from './dto/view-preference.dto';
 
 /**
@@ -35,6 +37,27 @@ export class ViewPreferencesController {
   @Put('kanban-pins')
   setKanbanPin(@Body() dto: SetKanbanPinDto): Promise<KanbanPins> {
     return this.service.setKanbanPin(dto.pipeline, dto.stage ?? null);
+  }
+
+  /**
+   * GET /api/view-preferences/lead-aging-thresholds — the caller's Lead Aging bands
+   * (RPT-02.8), falling back to the report's defaults. Declared before `:viewKey` so the
+   * static segment is never captured as a view key.
+   */
+  @Get('lead-aging-thresholds')
+  getAgingThresholds(): Promise<AgingThresholds> {
+    return this.service.getAgingThresholds();
+  }
+
+  /** PUT /api/view-preferences/lead-aging-thresholds — saves the caller's bands. */
+  @Put('lead-aging-thresholds')
+  setAgingThresholds(
+    @Body() dto: SetAgingThresholdsDto,
+  ): Promise<AgingThresholds> {
+    return this.service.saveAgingThresholds({
+      green: dto.green,
+      amber: dto.amber,
+    });
   }
 
   /** GET /api/view-preferences/:viewKey — the caller's saved layout, or null. */

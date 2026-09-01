@@ -93,3 +93,51 @@ describe('ViewPreferencesService.save', () => {
     expect(upsert).not.toHaveBeenCalled();
   });
 });
+
+describe('ViewPreferencesService aging thresholds (RPT-02.8)', () => {
+  it('rejects an amber bound that does not sit above green', async () => {
+    const { service, upsert } = makeService();
+
+    await expect(
+      service.saveAgingThresholds({ green: 29, amber: 13 }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.saveAgingThresholds({ green: 13, amber: 13 }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('stores a valid pair under the caller’s own key', async () => {
+    const { service, upsert } = makeService('u9');
+
+    await expect(
+      service.saveAgingThresholds({ green: 7, amber: 20 }),
+    ).resolves.toEqual({ green: 7, amber: 20 });
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          userId_viewKey: {
+            userId: 'u9',
+            viewKey: 'lead-aging-thresholds',
+          },
+        },
+      }),
+    );
+  });
+
+  it('falls back to the defaults when the stored row is unreadable', async () => {
+    const { service, findUnique } = makeService();
+
+    findUnique.mockResolvedValue({ layout: { green: 'nope' } });
+    await expect(service.getAgingThresholds()).resolves.toEqual({
+      green: 13,
+      amber: 29,
+    });
+
+    findUnique.mockResolvedValue(null);
+    await expect(service.getAgingThresholds()).resolves.toEqual({
+      green: 13,
+      amber: 29,
+    });
+  });
+});
