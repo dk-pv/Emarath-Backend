@@ -3,13 +3,16 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
+import type { GpsConfig } from '../config/gps.config';
 import { PrismaService } from '../prisma/prisma.service';
 import { CheckInDto } from './dto/check-in.dto';
 import { CheckOutDto } from './dto/check-out.dto';
 import { RecordLocationPointDto } from './dto/record-location-point.dto';
 import { GpsSummaryFilterDto } from './dto/gps-summary-filter.dto';
+import { distanceInMeters } from './geo-distance';
 import { resolveGpsBounds } from './gps-period';
 import { activityScopeWhere } from '../activities/activity-scope';
 import { gpsAgentWhere } from './gps-scope';
@@ -126,11 +129,27 @@ function toLocationPointRecord(row: LocationPointRow): LocationPointRecord {
  * `hasValidCheckIn`. Injects PrismaService + CurrentUserService directly, like
  * the Calls services.
  */
+/**
+ * Why a location-tied completion was refused, or the check-in that satisfied it.
+ * `meters` is the nearest candidate's distance, so the caller can be specific.
+ */
+export type CheckInVerification =
+  | { ok: true; checkInId: string; meters: number }
+  | { ok: false; reason: 'NO_LOCATION' | 'NO_CHECK_IN' }
+  | {
+      ok: false;
+      reason: 'TOO_FAR';
+      meters: number;
+      radius: number;
+      locationName: string;
+    };
+
 @Injectable()
 export class GpsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
+    private readonly config: ConfigService,
   ) {}
 
   /** Record a check-in for the calling agent (AC1). */
@@ -187,15 +206,88 @@ export class GpsService {
   }
 
   /**
-   * Whether the agent has a check-in verifying this follow-up — the ACT-10.1
-   * completion gate (AC3). Existence is the current test; geofencing against the
-   * expected location's coordinates awaits the location catalogue (deferred).
+   * Verifies that a location-tied follow-up may be completed (GPS-09.1).
+   *
+   * This is the whole gate. The Activities service calls it and throws on a
+   * failure; the rule lives here, in the module that owns check-ins and
+   * coordinates, so there is one implementation and the UI cannot go around it —
+   * completion is a server operation and the check runs inside it.
+   *
+   * A check-in is valid when it is **the agent's own**, **linked to this
+   * follow-up**, not soft-deleted, and **within the site's radius**. The first two
+   * are expressed in the query, so another agent's check-in is not merely rejected
+   * later — it is never a candidate. Distance is measured against the site the
+   * follow-up is tied to, using the site's own `radiusMeters` when it sets one and
+   * the configured default otherwise.
+   *
+   * Returns the nearest candidate's distance on failure so the caller can say how
+   * far away the agent actually was, rather than a bare "not allowed".
+   */
+  async verifyLocationCheckIn(
+    agentId: string,
+    activityId: string,
+  ): Promise<CheckInVerification> {
+    const activity = await this.prisma.activity.findUnique({
+      where: { id: activityId },
+      select: {
+        location: {
+          select: {
+            id: true,
+            name: true,
+            lat: true,
+            lng: true,
+            radiusMeters: true,
+          },
+        },
+      },
+    });
+
+    // A follow-up whose `locationId` points at no site cannot be verified against
+    // anything. Failing closed is the only safe answer for a gate.
+    const site = activity?.location;
+    if (!site) return { ok: false, reason: 'NO_LOCATION' };
+
+    const candidates = await this.prisma.checkIn.findMany({
+      where: { agentId, activityId, deletedAt: null },
+      select: { id: true, checkInLat: true, checkInLng: true },
+    });
+    if (candidates.length === 0) return { ok: false, reason: 'NO_CHECK_IN' };
+
+    const radius =
+      site.radiusMeters ??
+      this.config.getOrThrow<GpsConfig>('gps').checkInRadiusMeters;
+    const centre = { lat: site.lat.toNumber(), lng: site.lng.toNumber() };
+
+    let nearest: { id: string; meters: number } | null = null;
+    for (const candidate of candidates) {
+      const meters = distanceInMeters(centre, {
+        lat: candidate.checkInLat.toNumber(),
+        lng: candidate.checkInLng.toNumber(),
+      });
+      if (!nearest || meters < nearest.meters) {
+        nearest = { id: candidate.id, meters };
+      }
+    }
+
+    // `nearest` is non-null: `candidates` was checked for emptiness above.
+    if (nearest!.meters <= radius) {
+      return { ok: true, checkInId: nearest!.id, meters: nearest!.meters };
+    }
+    return {
+      ok: false,
+      reason: 'TOO_FAR',
+      meters: nearest!.meters,
+      radius,
+      locationName: site.name,
+    };
+  }
+
+  /**
+   * Back-compat shim for the ACT-10.1 gate's boolean call site.
+   * Prefer {@link verifyLocationCheckIn}, which carries the reason.
    */
   async hasValidCheckIn(agentId: string, activityId: string): Promise<boolean> {
-    const count = await this.prisma.checkIn.count({
-      where: { agentId, activityId, deletedAt: null },
-    });
-    return count > 0;
+    return (await this.verifyLocationCheckIn(agentId, activityId)).ok;
   }
 
   /**

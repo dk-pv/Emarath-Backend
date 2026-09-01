@@ -74,8 +74,12 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
 
   // The GPS gate (ACT-10.1 / GPS-02.1): no valid check-in by default, so a
   // location-tied completion is blocked unless a test says otherwise.
+  const gpsVerify = jest
+    .fn()
+    .mockResolvedValue({ ok: false, reason: 'NO_CHECK_IN' });
   const gpsHasValidCheckIn = jest.fn().mockResolvedValue(false);
   const gps = {
+    verifyLocationCheckIn: gpsVerify,
     hasValidCheckIn: gpsHasValidCheckIn,
   } as unknown as GpsService;
 
@@ -89,6 +93,7 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     activityFindFirst,
     activityUpdate,
     gpsHasValidCheckIn,
+    gpsVerify,
   };
 }
 
@@ -165,7 +170,7 @@ describe('ActivitiesService.create', () => {
     expect(data.data.lead).toEqual({ connect: { id: LEAD_ID } });
     expect(data.data.dueAt).toEqual(new Date(DUE));
     expect(data.data.endAt).toBeNull();
-    expect(data.data.locationId).toBeNull();
+    expect(data.data.location).toBeUndefined();
     expect(data.data.assignees).toEqual({
       create: [{ user: { connect: { id: AGENT_ID } } }],
     });
@@ -188,7 +193,7 @@ describe('ActivitiesService.create', () => {
       data: Record<string, unknown>;
     };
     expect(data.data.endAt).toEqual(new Date(end));
-    expect(data.data.locationId).toBe(loc);
+    expect(data.data.location).toEqual({ connect: { id: loc } });
   });
 
   it('rejects an End Time on a Call', async () => {
@@ -461,6 +466,54 @@ describe('ActivitiesService.complete', () => {
     expect((caught as ConflictException).message).toBe(LOCATION_GATE_MESSAGE);
   });
 
+  // GPS-09.1 AC2 — the refusal says *why*, not just "no".
+  it('GPS-09.1 explains a too-far check-in with the distance and radius', async () => {
+    const LOC_ID = '55555555-5555-5555-5555-555555555555';
+    const { service, activityFindFirst, activityUpdate, gpsVerify } =
+      makeService();
+    activityFindFirst.mockResolvedValue({
+      id: ACT_ID,
+      completedAt: null,
+      locationId: LOC_ID,
+      lead: { name: 'Acme' },
+    });
+    gpsVerify.mockResolvedValue({
+      ok: false,
+      reason: 'TOO_FAR',
+      meters: 182.37,
+      radius: 150,
+      locationName: 'Kozhikode Depot',
+    });
+
+    let caught: unknown;
+    try {
+      await service.complete(ACT_ID);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ConflictException);
+    expect((caught as ConflictException).message).toBe(
+      'Your check-in was 182 m from Kozhikode Depot, outside the 150 m required to complete this activity.',
+    );
+    expect(activityUpdate).not.toHaveBeenCalled();
+  });
+
+  it('GPS-09.1 keeps the plain message when there is no check-in at all', async () => {
+    const LOC_ID = '55555555-5555-5555-5555-555555555555';
+    const { service, activityFindFirst, gpsVerify } = makeService();
+    activityFindFirst.mockResolvedValue({
+      id: ACT_ID,
+      completedAt: null,
+      locationId: LOC_ID,
+      lead: { name: 'Acme' },
+    });
+    gpsVerify.mockResolvedValue({ ok: false, reason: 'NO_CHECK_IN' });
+
+    await expect(service.complete(ACT_ID)).rejects.toThrow(
+      LOCATION_GATE_MESSAGE,
+    );
+  });
+
   // ACT-10.1 — AC4: non-location activities complete normally
   it('ACT-10.1 does not gate activities without a location (AC4)', async () => {
     const { service, activityFindFirst, activityUpdate } = makeService();
@@ -482,7 +535,7 @@ describe('ActivitiesService.complete', () => {
   // GPS-02.1 AC3: a valid check-in satisfies the location gate.
   it('completes a location-tied activity once the agent has a valid check-in (GPS-02.1)', async () => {
     const LOC_ID = '55555555-5555-5555-5555-555555555555';
-    const { service, activityFindFirst, activityUpdate, gpsHasValidCheckIn } =
+    const { service, activityFindFirst, activityUpdate, gpsVerify } =
       makeService();
     activityFindFirst.mockResolvedValue({
       id: ACT_ID,
@@ -490,13 +543,13 @@ describe('ActivitiesService.complete', () => {
       locationId: LOC_ID,
       lead: { name: 'Acme' },
     });
-    gpsHasValidCheckIn.mockResolvedValue(true);
+    gpsVerify.mockResolvedValue({ ok: true, checkInId: 'c1', meters: 12 });
     activityUpdate.mockResolvedValue(
       activityRow({ completedAt: new Date('2026-07-24T10:00:00.000Z') }),
     );
 
     await expect(service.complete(ACT_ID)).resolves.toBeDefined();
-    expect(gpsHasValidCheckIn).toHaveBeenCalledWith('u1', ACT_ID);
+    expect(gpsVerify).toHaveBeenCalledWith('u1', ACT_ID);
     expect(activityUpdate).toHaveBeenCalledTimes(1);
   });
 });
@@ -594,7 +647,9 @@ describe('ActivitiesService.duplicate', () => {
     };
     expect(data.data.lead).toEqual({ connect: { id: LEAD_ID } });
     expect(data.data.description).toBe('meet them');
-    expect(data.data.locationId).toBe('44444444-4444-4444-4444-444444444444');
+    expect(data.data.location).toEqual({
+      connect: { id: '44444444-4444-4444-4444-444444444444' },
+    });
     expect(data.data.assignees).toEqual({
       create: [{ user: { connect: { id: AGENT_ID } } }],
     });

@@ -4,6 +4,7 @@ import appConfig from './config/configuration';
 import authConfig from './config/auth.config';
 import mailConfig from './config/mail.config';
 import storageConfig from './config/storage.config';
+import gpsConfig from './config/gps.config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { ActivitiesModule } from './activities/activities.module';
@@ -14,6 +15,7 @@ import { DocumentsModule } from './documents/documents.module';
 import { GpsModule } from './gps/gps.module';
 import { GpsExportModule } from './gps/export/gps-export.module';
 import { HealthModule } from './health/health.module';
+import { IntegrationsModule } from './integrations/integrations.module';
 import { LeadCustomFieldsModule } from './lead-custom-fields/lead-custom-fields.module';
 import { LeadsModule } from './leads/leads.module';
 import { LeadsBoardModule } from './leads/board/leads-board.module';
@@ -37,7 +39,7 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     ConfigModule.forRoot({
       isGlobal: true,
       cache: true,
-      load: [appConfig, authConfig, mailConfig, storageConfig],
+      load: [appConfig, authConfig, mailConfig, storageConfig, gpsConfig],
       // Environment is selected via NODE_ENV, without code changes.
       // Files are optional; on hosted platforms (Render/Vercel) values come
       // from real environment variables. Load order: most specific wins.
@@ -53,6 +55,7 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     GpsModule,
     GpsExportModule,
     HealthModule,
+    IntegrationsModule,
     // The sibling /leads/* modules (static paths) must register BEFORE LeadsModule:
     // its GET /leads/:id is a single-segment catch-all that would otherwise shadow a
     // static route like /leads/export and 400 it on the ParseUUIDPipe. Keep LeadsModule

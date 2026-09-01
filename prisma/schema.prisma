@@ -248,14 +248,14 @@ model Lead {
   callAttempts     Int @default(0) @map("call_attempts")
   whatsappAttempts Int @default(0) @map("whatsapp_attempts")
 
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  deletedAt DateTime? @map("deleted_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  deletedAt       DateTime? @map("deleted_at")
   /// When `status` last changed — kept by the `leads_status_changed_at` trigger
   /// (migration 20260830120000), never by app code, so every write path stays covered.
   /// Backfilled to `created_at`. Drives the Leads By Status report's "Status Changed
   /// Date" window (RPT-02.3).
-  statusChangedAt DateTime @default(now()) @map("status_changed_at")
+  statusChangedAt DateTime  @default(now()) @map("status_changed_at")
 
   assignments       LeadAssignment[]
   tags              LeadTag[]
@@ -593,6 +593,7 @@ model Activity {
   dueAt       DateTime     @map("due_at")
   endAt       DateTime?    @map("end_at")
   completedAt DateTime?    @map("completed_at")
+  /// GPS-09.1: the site this follow-up must be carried out at. Null = not location-tied.
   locationId  String?      @map("location_id") @db.Uuid
 
   createdAt DateTime  @default(now()) @map("created_at")
@@ -600,6 +601,9 @@ model Activity {
   deletedAt DateTime? @map("deleted_at")
 
   lead      Lead               @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  /// Restrict: a site with follow-ups tied to it must not vanish and silently
+  /// un-gate them.
+  location  Location?          @relation(fields: [locationId], references: [id], onDelete: Restrict)
   assignees ActivityAssignee[]
   /// GPS-01.1: the field check-ins that verify this follow-up (ACT-10.1 gate).
   checkIns  CheckIn[]
@@ -720,6 +724,33 @@ model CheckIn {
   @@index([agentId, checkInAt])
   @@index([activityId])
   @@map("check_ins")
+}
+
+/// A named site a follow-up can be tied to (GPS-09.1).
+///
+/// ADR-0027 modelled `Activity.locationId` as "a soft reference to a location whose
+/// catalogue is the GPS module's (no FK until that table exists)". This is that table:
+/// the completion gate needs a coordinate to measure a check-in against, and there was
+/// nowhere to store one. Owned by GPS because the gate and the check-ins are.
+model Location {
+  id           String  @id @default(uuid()) @db.Uuid
+  name         String  @db.VarChar(160)
+  /// The site's centre. Same precision as CheckIn's coordinates so a distance
+  /// between the two is computed from like-for-like values.
+  lat          Decimal @db.Decimal(9, 6)
+  lng          Decimal @db.Decimal(9, 6)
+  /// Per-site override of the configured default radius, in metres. Null = use the
+  /// default; a large depot legitimately needs a wider gate than a shop doorway.
+  radiusMeters Int?    @map("radius_meters")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  activities Activity[]
+
+  @@index([deletedAt])
+  @@map("locations")
 }
 
 /// A passive automatic-tracking location point (GPS-01.1) — a stream of pings per
@@ -873,4 +904,51 @@ model LeadCustomFieldValue {
   /// Reverse lookup: all leads' values for one field (future sort/filter).
   @@index([customFieldId])
   @@map("lead_custom_field_values")
+}
+
+/// INT-01.1 (ADR-0054): the integration library catalogue — one row per integration,
+/// driving the library grid, its provider/category tags and its enabled count.
+///
+/// App-global, like Stage/Tag/LeadCustomField: the platform is single-tenant, so AC4's
+/// "per-organization enablement" is the deployment itself. No Organization model is
+/// introduced; if multi-tenancy ever arrives this table migrates like every other.
+///
+/// Addressed by `key`, not `id` — a UUID regenerated on each rebuild cannot appear in a
+/// seed or a URL, and `@unique` makes re-seeding an update rather than a duplicate.
+model Integration {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// Stable slug ("facebook", "google-ads"); matches the frontend registry ids.
+  key String @unique @db.VarChar(64)
+
+  name        String @db.VarChar(120)
+  description String @db.VarChar(400)
+
+  /// Provider/category tag (AC1). A string, not an enum: the reference set carries four
+  /// values and Workpex already shows a fifth. Nothing branches on it — it is display
+  /// text and a client-side filter key, so an enum would cost a migration per tag.
+  category String @db.VarChar(64)
+
+  /// AC1's "logo". The product ships no per-provider logo assets, so this holds the icon
+  /// key the frontend already resolves; a real asset path drops in with no schema change.
+  logo String @db.VarChar(120)
+
+  /// AC2 — enabled vs merely available. Default false: integrations are opt-in.
+  enabled Boolean @default(false)
+
+  /// AC3 — optional detail link, null on integrations with no detail page.
+  detailUrl String? @map("detail_url") @db.VarChar(300)
+
+  /// Library grid order, preserving the verified card sequence in
+  /// ui-reference/integrations/integrations-library-grid-top-web-form-card-hover.png.
+  position Int
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  /// The list reads live rows in grid order; soft delete has no automatic filter yet
+  /// (CLAUDE.md §11), so every query names deletedAt explicitly.
+  @@index([deletedAt, position])
+  @@map("integrations")
 }
