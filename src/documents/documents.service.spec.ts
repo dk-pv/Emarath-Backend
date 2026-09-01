@@ -35,7 +35,7 @@ const storedRow = {
   access: [{ user: { id: 'user-2', name: 'Agent Two' } }],
 };
 
-/** A row as DOCUMENT_LIST_SELECT projects it (no `access`, keeps `storageKey`). */
+/** A row as DOCUMENT_LIST_SELECT projects it (keeps `storageKey`). */
 const listRow = {
   id: 'doc-1',
   title: 'Product Images',
@@ -45,6 +45,7 @@ const listRow = {
   contentType: 'image/png',
   createdAt: new Date('2026-06-12T11:56:24.000Z'),
   uploader: { id: 'user-1', name: 'Ahamed Emarath' },
+  access: [{ user: { id: 'user-2', name: 'Agent Two' } }],
 };
 
 describe('DocumentsService', () => {
@@ -202,6 +203,7 @@ describe('DocumentsService', () => {
         contentType: 'image/png',
         createdAt: '2026-06-12T11:56:24.000Z',
         uploadedBy: { id: 'user-1', name: 'Ahamed Emarath' },
+        access: [{ id: 'user-2', name: 'Agent Two' }],
         downloadUrl: 'https://signed/link',
       },
     ]);

@@ -96,6 +96,8 @@ export class CallLogService {
       startedAt: { gte: start, lt: end },
       ...(query.outcome ? { outcome: query.outcome } : {}),
       ...(query.agentId ? { agentId: query.agentId } : {}),
+      // "Show flagged calls only" — absent means both, never `flagged: false`.
+      ...(query.flagged ? { flagged: true } : {}),
       ...this.searchWhere(query.search),
     };
 
@@ -112,7 +114,13 @@ export class CallLogService {
       this.prisma.call.findMany({
         where,
         select: CALL_LOG_SELECT,
-        orderBy: { startedAt: 'desc' }, // chronological, most recent first (AC1)
+        // Time Metric: the longest calls first when ordering by duration,
+        // otherwise the chronological default (AC1). `startedAt` breaks ties so
+        // the page order is stable either way.
+        orderBy:
+          query.timeMetric === 'CALL_DURATION'
+            ? [{ duration: 'desc' as const }, { startedAt: 'desc' as const }]
+            : [{ startedAt: 'desc' as const }],
         skip: (query.page - 1) * query.size,
         take: query.size,
       }),
@@ -151,7 +159,10 @@ export class CallLogService {
    * here — the update is filtered by `callScopeWhere`, so an agent cannot flag a
    * call on someone else's lead by posting its id.
    */
-  async setFlagged(id: string, flagged: boolean): Promise<{ flagged: boolean }> {
+  async setFlagged(
+    id: string,
+    flagged: boolean,
+  ): Promise<{ flagged: boolean }> {
     const user = await this.currentUser.resolve();
     const { count } = await this.prisma.call.updateMany({
       where: { ...callScopeWhere(user), id },

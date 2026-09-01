@@ -62,7 +62,7 @@ export class CallAnalyticsService {
       ...(query.agentId ? { agentId: query.agentId } : {}),
     };
 
-    const [outcomes, leadGroups] = await Promise.all([
+    const [outcomes, leadGroups, stages] = await Promise.all([
       this.prisma.call.groupBy({
         by: ['outcome'],
         where,
@@ -75,6 +75,15 @@ export class CallAnalyticsService {
         by: ['leadId'],
         where,
         _count: { _all: true },
+      }),
+      // The Kanban stage catalogue, in board order. The reference lists every
+      // stage of the pipeline whether or not the period touched it — its own
+      // panel shows six stages sitting at zero — so the rows come from here
+      // rather than from the calls, and a quiet period still reads as a list of
+      // zeros instead of an empty card.
+      this.prisma.stage.findMany({
+        select: { name: true, pipeline: true },
+        orderBy: [{ pipeline: 'asc' }, { position: 'asc' }],
       }),
     ]);
 
@@ -112,10 +121,22 @@ export class CallAnalyticsService {
       stageTotals.set(stage, (stageTotals.get(stage) ?? 0) + count);
     }
 
+    // Every catalogued stage in board order, then any stage a lead still carries
+    // that the catalogue no longer lists — a renamed or retired stage must not
+    // silently drop calls out of the panel.
+    const stageRows = stages.map(({ name, pipeline }) => {
+      const label = `${name} (${initials(pipeline)})`;
+      return { label, count: stageTotals.get(label) ?? 0 };
+    });
+    const catalogued = new Set(stageRows.map((row) => row.label));
+    const uncatalogued = [...stageTotals]
+      .filter(([label]) => !catalogued.has(label))
+      .map(([label, count]) => ({ label, count }));
+
     return {
       byStatus,
       bySource: toRows(sourceTotals),
-      byStage: toRows(stageTotals),
+      byStage: [...stageRows, ...uncatalogued],
       total,
     };
   }
@@ -126,7 +147,10 @@ function initials(pipeline: string): string {
   const words = pipeline.trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) return '--';
   if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return words.map((word) => word[0]).join('').toUpperCase();
+  return words
+    .map((word) => word[0])
+    .join('')
+    .toUpperCase();
 }
 
 /** Highest count first, then alphabetical — a stable order across reloads. */

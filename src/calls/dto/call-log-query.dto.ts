@@ -1,7 +1,9 @@
 import { Transform, Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
@@ -26,6 +28,21 @@ export const MAX_SEARCH_LENGTH = 200;
 const emptyToUndefined = ({ value }: { value: unknown }): unknown => {
   const trimmed = typeof value === 'string' ? value.trim() : value;
   return trimmed === '' ? undefined : trimmed;
+};
+
+/**
+ * The reference's Time Metric: which measure the log is ordered by. Both read
+ * columns the Call already stores — no new concept, and `CALL_TIMING` is the
+ * existing default ordering under its product name.
+ */
+export const TIME_METRICS = ['CALL_TIMING', 'CALL_DURATION'] as const;
+export type TimeMetric = (typeof TIME_METRICS)[number];
+
+/** A query string carries "true"/"false", not a boolean. */
+const toBoolean = ({ value }: { value: unknown }): unknown => {
+  if (value === 'true' || value === true) return true;
+  if (value === 'false' || value === false) return false;
+  return value === '' || value === undefined ? undefined : value;
 };
 
 export class CallLogQueryDto {
@@ -81,4 +98,18 @@ export class CallLogQueryDto {
   @IsUUID('4', { message: 'agentId must be a valid id' })
   @IsOptional()
   agentId?: string;
+
+  /** Time Metric — orders the log by call timing (default) or by duration. */
+  @Transform(emptyToUndefined)
+  @IsIn(TIME_METRICS, {
+    message: 'timeMetric must be CALL_TIMING or CALL_DURATION',
+  })
+  @IsOptional()
+  timeMetric?: TimeMetric;
+
+  /** "Show flagged calls only" — restricts the page to flagged attempts. */
+  @Transform(toBoolean)
+  @IsBoolean({ message: 'flagged must be true or false' })
+  @IsOptional()
+  flagged?: boolean;
 }
