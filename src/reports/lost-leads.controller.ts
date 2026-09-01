@@ -23,7 +23,8 @@ export class LostLeadsController {
     return this.lostLeads.listDetailed(query);
   }
 
-  /** GET /api/reports/leads/lost/summary — lost-lead counts per assignee. */
+  /** GET /api/reports/leads/lost/filter-options — the team values the filter offers. */
+  /** GET /api/reports/leads/lost/summary — lost-lead counts per reason (AC1/AC2). */
   @Get('summary')
   summary(
     @Query() query: LostLeadsQueryDto,
@@ -31,7 +32,6 @@ export class LostLeadsController {
     return this.lostLeads.summary(query);
   }
 
-  /** GET /api/reports/leads/lost/filter-options — the team values the filter offers. */
   @Get('filter-options')
   filterOptions(): Promise<LostLeadsFilterOptions> {
     return this.lostLeads.filterOptions();

@@ -15,6 +15,18 @@ export interface LeadsByOwnershipFilters {
   from?: string;
   /** Optional upper bound of the creation window; rarely set (the UI sends only `from`). */
   to?: string;
+  /** Which date the window applies to; `statusChanged` reads `Lead.statusChangedAt`. */
+  dateField?: 'created' | 'statusChanged';
+  /** Assigned-agent user ids — matched through the assignment join. */
+  agent?: string[];
+  /** Lead source values to narrow to (exact match). */
+  source?: string[];
+  /** One exact board name. */
+  pipeline?: string;
+  /** The condition builder's JSON payload, whitelisted by the leads module. */
+  conditions?: string;
+  /** Only leads with no assignee — what the legend's "Unassigned" slice drills into. */
+  unassigned?: boolean;
 }
 
 /**
@@ -30,10 +42,26 @@ export function buildLeadsByOwnershipWhere(
   user: CurrentUser,
   filters: LeadsByOwnershipFilters,
 ): Prisma.LeadWhereInput {
+  const byStatusChange = filters.dateField === 'statusChanged';
   const conditions: Prisma.LeadWhereInput[] = [
-    buildLeadWhere(user, { createdFrom: filters.from, createdTo: filters.to }),
+    buildLeadWhere(user, {
+      createdFrom: byStatusChange ? undefined : filters.from,
+      createdTo: byStatusChange ? undefined : filters.to,
+      source: filters.source,
+      assignedAgent: filters.agent,
+      pipeline: filters.pipeline,
+      conditions: filters.conditions,
+      unassigned: filters.unassigned,
+    }),
   ];
   if (filters.team?.length) conditions.push(teamWhere(filters.team));
-
+  if (byStatusChange && (filters.from || filters.to)) {
+    conditions.push({
+      statusChangedAt: {
+        gte: filters.from ? new Date(filters.from) : undefined,
+        lt: filters.to ? new Date(filters.to) : undefined,
+      },
+    });
+  }
   return conditions.length === 1 ? conditions[0] : { AND: conditions };
 }

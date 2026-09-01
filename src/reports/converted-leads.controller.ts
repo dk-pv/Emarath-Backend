@@ -2,10 +2,7 @@ import { Controller, Get, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { ConvertedLeadsReportService } from './converted-leads.service';
 import { ConvertedLeadsQueryDto } from './dto/converted-leads-query.dto';
-import {
-  ConvertedLeadsListResponse,
-  ConvertedLeadsSummaryResponse,
-} from './dto/converted-leads-response.dto';
+import { ConvertedLeadsListResponse } from './dto/converted-leads-response.dto';
 
 /**
  * The Converted Leads report's HTTP surface (RPT-02.6). Thin by design: the DTO validates the
@@ -22,14 +19,6 @@ export class ConvertedLeadsController {
     @Query() query: ConvertedLeadsQueryDto,
   ): Promise<ConvertedLeadsListResponse> {
     return this.convertedLeads.listDetailed(query);
-  }
-
-  /** GET /api/reports/leads/converted/summary — count + converted amount per assignee. */
-  @Get('summary')
-  summary(
-    @Query() query: ConvertedLeadsQueryDto,
-  ): Promise<ConvertedLeadsSummaryResponse> {
-    return this.convertedLeads.summary(query);
   }
 
   /** GET /api/reports/leads/converted/export — the same scoped set as a CSV download. */

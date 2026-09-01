@@ -236,26 +236,37 @@ export class NoActivityReportService {
   }
 
   /**
-   * The most recent completed-activity instant per lead, for one page of ids, in a single
-   * `groupBy` — so the "last activity" column costs one query, not one per row. Leads with
-   * no completed activity are simply absent from the map (rendered as "No activity").
+   * The most recent engagement per lead — the later of its last completed activity and its
+   * last logged call — for one page of ids, in two `groupBy`s (not one query per row). Leads
+   * with neither are simply absent from the map (rendered as "No activity").
    */
   private async lastActivityByLead(ids: string[]): Promise<Map<string, Date>> {
     if (ids.length === 0) return new Map();
-    const grouped = await this.prisma.activity.groupBy({
-      by: ['leadId'],
-      where: {
-        leadId: { in: ids },
-        deletedAt: null,
-        completedAt: { not: null },
-      },
-      _max: { completedAt: true },
-    });
-    return new Map(
-      grouped
-        .filter((group) => group._max.completedAt)
-        .map((group) => [group.leadId, group._max.completedAt as Date]),
-    );
+    const [activities, calls] = await Promise.all([
+      this.prisma.activity.groupBy({
+        by: ['leadId'],
+        where: {
+          leadId: { in: ids },
+          deletedAt: null,
+          completedAt: { not: null },
+        },
+        _max: { completedAt: true },
+      }),
+      this.prisma.call.groupBy({
+        by: ['leadId'],
+        where: { leadId: { in: ids }, deletedAt: null },
+        _max: { startedAt: true },
+      }),
+    ]);
+    const last = new Map<string, Date>();
+    const note = (leadId: string, at: Date | null) => {
+      if (!at) return;
+      const current = last.get(leadId);
+      if (!current || at > current) last.set(leadId, at);
+    };
+    for (const group of activities) note(group.leadId, group._max.completedAt);
+    for (const group of calls) note(group.leadId, group._max.startedAt);
+    return last;
   }
 }
 

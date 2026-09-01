@@ -74,9 +74,24 @@ describe('CallAnalyticsService.getAnalytics', () => {
         { leadId: 'c', _count: { _all: 2 } },
       ],
       [
-        { id: 'a', source: 'DoubleTick', status: 'New', pipeline: 'Lead Pipeline' },
-        { id: 'b', source: 'DoubleTick', status: 'HOT', pipeline: 'Lead Pipeline' },
-        { id: 'c', source: 'Broadcast', status: 'New', pipeline: 'Lead Pipeline' },
+        {
+          id: 'a',
+          source: 'DoubleTick',
+          status: 'New',
+          pipeline: 'Lead Pipeline',
+        },
+        {
+          id: 'b',
+          source: 'DoubleTick',
+          status: 'HOT',
+          pipeline: 'Lead Pipeline',
+        },
+        {
+          id: 'c',
+          source: 'Broadcast',
+          status: 'New',
+          pipeline: 'Lead Pipeline',
+        },
       ],
     );
     const { bySource, total } = await service.getAnalytics(query);

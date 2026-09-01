@@ -295,6 +295,27 @@ const PRODUCT = [
  * The config-backed lookup lists, keyed by the `:type` the endpoint accepts.
  * `tags` and `agents` are intentionally absent — they come from the database.
  */
+/**
+ * The Leads list "Activity" filter (and the ownership report's Contacted / No Activity
+ * drill-downs): the two engagement states `lead-engagement-where.ts` defines.
+ */
+const LEAD_ACTIVITY = ['Contacted', 'No Activity'];
+
+/**
+ * Why a lead was lost (RPT-02.7 v2) — offered when a lead is moved to LOST and grouped by
+ * the Lost Leads report. Business-editable here, like every config catalogue.
+ */
+const LOST_REASON = [
+  'Price too high',
+  'Chose competitor',
+  'No budget',
+  'Not interested',
+  'Unresponsive',
+  'Wrong / invalid number',
+  'Duplicate',
+  'Other',
+];
+
 export const LOOKUP_DATA = {
   pipelines: options(PIPELINE),
   languages: options(LANGUAGE),
@@ -305,6 +326,8 @@ export const LOOKUP_DATA = {
   paymentMethods: options(PAYMENT_METHOD),
   complaintReasons: options(COMPLAINT_REASON),
   products: options(PRODUCT),
+  leadActivity: options(LEAD_ACTIVITY),
+  lostReasons: options(LOST_REASON),
 } as const;
 
 export type LookupType = keyof typeof LOOKUP_DATA;

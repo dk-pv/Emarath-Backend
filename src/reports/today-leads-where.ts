@@ -1,5 +1,6 @@
 import { Prisma } from '../generated/prisma/client';
 import { CurrentUser } from '../auth/current-user';
+import { answeredCallWhere } from '../leads/lead-engagement-where';
 import { buildLeadWhere } from '../leads/lead-where';
 
 /** The filters the Today Leads report (RPT-02.2) accepts, already parsed. */
@@ -26,8 +27,8 @@ export interface TodayLeadsFilters {
  * "Recently contacted" as a query fragment (RPT-02.2, definition A — decided with the
  * product owner over the Lead's own outreach counters, which carry no timestamp).
  *
- * A lead is a Today Lead when it has at least one non-deleted `Call` whose `startedAt`
- * falls in the selected window — a Call row (CALL-01.1) is the only timestamped record of
+ * A lead is a Today Lead when it has at least one non-deleted ANSWERED `Call` whose
+ * `startedAt` falls in the selected window — a Call row (CALL-01.1) is the only timestamped record of
  * an actual contact event, so it is the honest signal for "recently contacted". `some`
  * compiles to EXISTS, so the test runs in the database and is backed by Call's
  * `@@index([leadId, deletedAt])` + `@@index([startedAt])`. With no window this reads
@@ -40,18 +41,7 @@ export interface TodayLeadsFilters {
 export function recentlyContactedWhere(
   filters: TodayLeadsFilters,
 ): Prisma.LeadWhereInput {
-  const startedAt: Prisma.DateTimeFilter = {};
-  if (filters.from) startedAt.gte = new Date(filters.from);
-  if (filters.to) startedAt.lt = new Date(filters.to);
-
-  return {
-    calls: {
-      some: {
-        deletedAt: null,
-        ...(filters.from || filters.to ? { startedAt } : {}),
-      },
-    },
-  };
+  return answeredCallWhere(filters);
 }
 
 /**

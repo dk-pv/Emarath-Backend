@@ -9,9 +9,10 @@ const admin: CurrentUser = { id: 'admin-1', role: UserRole.SUPERADMIN };
 const agent: CurrentUser = { id: 'agent-1', role: UserRole.SALES_AGENT };
 
 describe('noRecentActivityWhere', () => {
-  it('defaults to "no completed activity ever" when no window is given', () => {
+  it('defaults to "no completed activity and no logged call ever" when no window is given', () => {
     expect(noRecentActivityWhere({})).toEqual({
       activities: { none: { deletedAt: null, completedAt: { not: null } } },
+      calls: { none: { deletedAt: null, startedAt: {} } },
     });
   });
 
@@ -37,9 +38,10 @@ describe('buildNoActivityWhere', () => {
   it('ANDs role scope with the no-recent-activity predicate', () => {
     const where = buildNoActivityWhere(admin, {});
     expect(where.AND).toHaveLength(2);
-    // Second fragment is always the activity predicate.
+    // Second fragment is always the no-engagement predicate.
     expect(where.AND?.[1]).toEqual({
       activities: { none: { deletedAt: null, completedAt: { not: null } } },
+      calls: { none: { deletedAt: null, startedAt: {} } },
     });
   });
 
@@ -83,5 +85,19 @@ describe('buildNoActivityWhere', () => {
     const lead = JSON.stringify(where.AND?.[0]);
     expect(lead).toContain('QC');
     expect(lead).toContain('agent-1');
+  });
+
+  it('also requires no logged call in the window (the call log never writes activities)', () => {
+    const from = '2026-08-01T00:00:00.000Z';
+    const where = noRecentActivityWhere({ from });
+    expect(where.calls).toEqual({
+      none: { deletedAt: null, startedAt: { gte: new Date(from) } },
+    });
+  });
+
+  it('reads "never called" for the call predicate when no window is given', () => {
+    expect(noRecentActivityWhere({}).calls).toEqual({
+      none: { deletedAt: null, startedAt: {} },
+    });
   });
 });

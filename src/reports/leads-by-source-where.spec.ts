@@ -32,4 +32,27 @@ describe('buildLeadsBySourceWhere', () => {
     const where = buildLeadsBySourceWhere(agent, { team: ['Sales'] });
     expect(JSON.stringify(where)).toContain('"userId":"agent-1"');
   });
+
+  it('passes agent, source and pipeline through to the reused leads where', () => {
+    const json = JSON.stringify(
+      buildLeadsBySourceWhere(admin, {
+        agent: ['11111111-1111-4111-8111-111111111111'],
+        source: ['Broadcast'],
+        pipeline: 'LOGISTICS',
+      }),
+    );
+    expect(json).toContain('11111111-1111-4111-8111-111111111111');
+    expect(json).toContain('Broadcast');
+    expect(json).toContain('LOGISTICS');
+  });
+
+  it('applies the window to statusChangedAt when dateField is statusChanged', () => {
+    const from = '2026-07-01T00:00:00.000Z';
+    const where = buildLeadsBySourceWhere(admin, {
+      from,
+      dateField: 'statusChanged',
+    });
+    expect(JSON.stringify(where)).toContain('statusChangedAt');
+    expect(JSON.stringify(where.AND?.[0])).not.toContain('createdAt');
+  });
 });

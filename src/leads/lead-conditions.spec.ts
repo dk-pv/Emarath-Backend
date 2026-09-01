@@ -186,4 +186,41 @@ describe('leadConditionWhere', () => {
       ),
     ).toThrow(BadRequestException);
   });
+
+  it('matches team through the assignee (the Leads By Status drill-down)', () => {
+    expect(
+      leadConditionWhere([
+        { field: 'team', operator: 'is', values: ['Sales'] } as LeadCondition,
+      ]),
+    ).toEqual([
+      { assignments: { some: { user: { team: { in: ['Sales'] } } } } },
+    ]);
+    expect(
+      parseLeadConditions(
+        JSON.stringify([
+          { field: 'team', operator: 'isnt', values: ['Sales'] },
+        ]),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('matches Activity through the shared engagement predicates', () => {
+    const [contacted] = leadConditionWhere([
+      {
+        field: 'activity',
+        operator: 'is',
+        values: ['Contacted'],
+      } as LeadCondition,
+    ]);
+    expect(JSON.stringify(contacted)).toContain('"outcome":"ANSWERED"');
+    const [none] = leadConditionWhere([
+      {
+        field: 'activity',
+        operator: 'is',
+        values: ['No Activity'],
+      } as LeadCondition,
+    ]);
+    expect(none.activities?.none).toBeDefined();
+    expect(none.calls?.none).toBeDefined();
+  });
 });

@@ -1,23 +1,16 @@
 import { Prisma } from '../../generated/prisma/client';
+import { LeadListItem } from '../../leads/dto/lead-response.dto';
 
 /** The bucket label for leads whose `source` is null or blank (AC1 accounts for every lead). */
 export const NO_SOURCE_LABEL = 'No Source';
 
-/** An assignee reference, exactly the shape the Leads list already exposes. */
-export interface LeadsBySourceAgentRef {
-  id: string;
-  name: string;
-}
-
-/** One lead in the detailed view (RPT-02.4). `source` is null when none was recorded. */
-export interface LeadsBySourceLeadRow {
-  id: string;
-  name: string;
-  firstName: string | null;
-  primaryPhone: string;
-  source: string | null;
-  assignedTo: LeadsBySourceAgentRef[];
-}
+/**
+ * One lead in the detailed view: the Leads list's own row shape (so the list's column cells
+ * render it unchanged) plus the resolved Stage colour for the status pill.
+ */
+export type LeadsBySourceLeadRow = LeadListItem & {
+  statusColor: string | null;
+};
 
 export interface LeadsBySourceListResponse {
   rows: LeadsBySourceLeadRow[];
@@ -32,6 +25,10 @@ export interface LeadsBySourceListResponse {
 export interface SourceCountRow {
   source: string;
   count: number;
+  /** The bucket's share of the filtered total, as a percentage 0–100 (AC2). */
+  share: number;
+  /** Share of the bucket that has converted (status WON), as a percentage 0–100. */
+  conversionRate: number;
 }
 
 export interface LeadsBySourceSummaryResponse {
@@ -45,7 +42,7 @@ export interface LeadsBySourceFilterOptions {
   teams: string[];
 }
 
-/** The lead fields the report reads — identity, source and assignees only. */
+/** The export's projection: the CSV's five columns plus the assignees' names. */
 export const LEADS_BY_SOURCE_SELECT = {
   id: true,
   name: true,
@@ -56,24 +53,3 @@ export const LEADS_BY_SOURCE_SELECT = {
     select: { user: { select: { id: true, name: true } } },
   },
 } satisfies Prisma.LeadSelect;
-
-type LeadsBySourceLead = Prisma.LeadGetPayload<{
-  select: typeof LEADS_BY_SOURCE_SELECT;
-}>;
-
-/** Shapes a selected lead into a response row. */
-export function toLeadsBySourceRow(
-  lead: LeadsBySourceLead,
-): LeadsBySourceLeadRow {
-  return {
-    id: lead.id,
-    name: lead.name,
-    firstName: lead.firstName,
-    primaryPhone: lead.primaryPhone,
-    source: lead.source,
-    assignedTo: lead.assignments.map((assignment) => ({
-      id: assignment.user.id,
-      name: assignment.user.name,
-    })),
-  };
-}

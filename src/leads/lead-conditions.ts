@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
+import { answeredCallWhere, noEngagementWhere } from './lead-engagement-where';
 
 /**
  * The Leads advanced filter condition engine (Workpex "Filter" — ADR-0039, expanded
@@ -44,12 +45,17 @@ export interface LeadCondition {
   values: string[];
 }
 
-type FieldKind = 'text' | 'numeric' | 'date' | 'enum' | 'user' | 'tags';
+type FieldKind =
+  'text' | 'numeric' | 'date' | 'enum' | 'user' | 'tags' | 'team' | 'activity';
 
 type FieldSpec =
   | { kind: 'text' | 'numeric' | 'date' | 'enum'; column: string }
   | { kind: 'user' }
   | { kind: 'tags' }
+  /** The assignee's team (`User.team`) — what the Leads By Status Team filter drills through. */
+  | { kind: 'team' }
+  /** Engagement state — "Contacted" / "No Activity" — from `lead-engagement-where.ts`. */
+  | { kind: 'activity' }
   /** A date read through a related table (Assigned Date, Follow Up Date). */
   | { kind: 'date'; relation: 'assignments' | 'activities'; relColumn: string }
   /** A text read through a related table (Complaints). */
@@ -90,9 +96,13 @@ const FIELDS: Record<string, FieldSpec> = {
   whatsappAttempts: { kind: 'numeric', column: 'whatsappAttempts' },
   // Scalar date
   createdAt: { kind: 'date', column: 'createdAt' },
+  /** Kept by the `leads_status_changed_at` trigger; the Leads By Status "Status Changed Date" drill-down. */
+  statusChangedAt: { kind: 'date', column: 'statusChangedAt' },
   bookingDate: { kind: 'date', column: 'bookingDate' },
   // Join fields
   assignedAgent: { kind: 'user' },
+  team: { kind: 'team' },
+  activity: { kind: 'activity' },
   tags: { kind: 'tags' },
   assignedDate: {
     kind: 'date',
@@ -138,6 +148,8 @@ const OPERATORS_FOR: Record<FieldKind, LeadConditionOperator[]> = {
   enum: ['is', 'isnt', 'isEmpty', 'isNotEmpty'],
   user: ['is', 'isnt', 'isEmpty', 'isNotEmpty'],
   tags: ['is', 'isnt', 'isEmpty', 'isNotEmpty'],
+  team: ['is', 'isnt', 'isEmpty', 'isNotEmpty'],
+  activity: ['is', 'isnt'],
 };
 
 const VALUELESS: ReadonlySet<LeadConditionOperator> = new Set([
@@ -336,6 +348,52 @@ function dateScalarWhere(
   }
 }
 
+/**
+ * Team is a property of the assignee, so it reads through the assignment join — the same
+ * shape the reports' `teamWhere` and the manager scope use. Empty means "no assignee with
+ * a team".
+ */
+function teamWhere(
+  op: LeadConditionOperator,
+  v: string[],
+): Prisma.LeadWhereInput {
+  switch (op) {
+    case 'is':
+      return { assignments: { some: { user: { team: { in: v } } } } };
+    case 'isnt':
+      return { NOT: { assignments: { some: { user: { team: { in: v } } } } } };
+    case 'isEmpty':
+      return { assignments: { none: { user: { team: { not: null } } } } };
+    case 'isNotEmpty':
+      return { assignments: { some: { user: { team: { not: null } } } } };
+    default:
+      return {};
+  }
+}
+
+/** The engagement states the Activity filter names, keyed by their lookup value. */
+const ACTIVITY_WHERE: Record<string, Prisma.LeadWhereInput> = {
+  contacted: answeredCallWhere(),
+  noactivity: noEngagementWhere(),
+};
+
+/**
+ * "Activity is Contacted / No Activity" — the same predicates the Today Leads and No
+ * Activity reports (and the ownership metrics) run, so a drill-down lands on exactly the
+ * counted leads. Values are matched case- and space-insensitively ("No Activity").
+ */
+function activityWhere(
+  op: LeadConditionOperator,
+  v: string[],
+): Prisma.LeadWhereInput {
+  const picked = v
+    .map((value) => ACTIVITY_WHERE[value.toLowerCase().replace(/\s+/g, '')])
+    .filter((where): where is Prisma.LeadWhereInput => Boolean(where));
+  if (picked.length === 0) return {};
+  const any = picked.length === 1 ? picked[0] : { OR: picked };
+  return op === 'isnt' ? { NOT: any } : any;
+}
+
 function userWhere(
   op: LeadConditionOperator,
   v: string[],
@@ -448,6 +506,10 @@ export function leadConditionWhere(
         return userWhere(c.operator, c.values);
       case 'tags':
         return tagsWhere(c.operator, c.values);
+      case 'team':
+        return teamWhere(c.operator, c.values);
+      case 'activity':
+        return activityWhere(c.operator, c.values);
       case 'text':
         return textScalarWhere(spec.column, c.operator, c.values);
       case 'numeric':

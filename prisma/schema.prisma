@@ -255,6 +255,12 @@ model Lead {
   /// (migration 20260830120000), never by app code, so every write path stays covered.
   /// Backfilled to `created_at`. Drives the Leads By Status report's "Status Changed
   /// Date" window (RPT-02.3).
+  /// Why the lead was lost (RPT-02.7 v2). Set when status moves to LOST, cleared when it
+  /// leaves LOST; null on historical losses ("No reason recorded"). Values come from the
+  /// lostReasons lookup — a string, not an enum, so the business can edit the catalogue
+  /// without a migration (the same rule as `status`).
+  lostReason String? @map("lost_reason") @db.VarChar(120)
+
   statusChangedAt DateTime @default(now()) @map("status_changed_at")
 
   assignments       LeadAssignment[]
