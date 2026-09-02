@@ -88,6 +88,10 @@ export class AuthService {
       userAgent,
     );
 
+    // Roster activity columns (Settings > Users & Access). Stamped after the credentials
+    // pass, so a failed attempt never advances either timestamp.
+    await this.touchActivity(user.id, true);
+
     return { accessToken, refreshToken, user: toPublicUser(user) };
   }
 
@@ -115,6 +119,10 @@ export class AuthService {
       user.role,
       user.team,
     );
+
+    // A refresh means the user is still working, so presence advances — but this is not a
+    // new login, so `lastLoginAt` is left alone.
+    await this.touchActivity(user.id, false);
 
     return { accessToken, refreshToken, user: toPublicUser(user) };
   }
@@ -186,6 +194,33 @@ export class AuthService {
       data: { passwordHash },
     });
     await this.refreshTokens.revokeAllForUser(user.id);
+  }
+
+  /**
+   * Advances the roster's activity columns.
+   *
+   * Deliberately only on login and refresh rather than on every authenticated request: a
+   * write per request would put the roster's cosmetic "Last Seen" column in the hot path of
+   * every API call. Refresh recurs on its own as the access token expires, so this tracks
+   * presence closely enough for a directory without that cost.
+   *
+   * Failure is swallowed: presence is display data, and a write blip must never turn a
+   * successful login into a failed one.
+   */
+  private async touchActivity(userId: string, isLogin: boolean): Promise<void> {
+    const now = new Date();
+    try {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { lastSeenAt: now, ...(isLogin ? { lastLoginAt: now } : {}) },
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Could not record activity for user ${userId}: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      );
+    }
   }
 
   /**

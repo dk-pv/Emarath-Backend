@@ -80,6 +80,9 @@ import type { MailConfig } from '../config/mail.config';
   ],
   // MailerService is exported (AuthModule is @Global) so outreach features reuse the one
   // configured transport — the Lead Email composer (ADR-0032) injects it, no second mailer.
-  exports: [CurrentUserService, MailerService],
+  // RefreshTokenService is exported so account administration (Settings > Users & Access)
+  // can revoke a user's live sessions when their account is deactivated, deleted or has its
+  // password reset by an admin — reusing the one revocation path rather than a second copy.
+  exports: [CurrentUserService, MailerService, RefreshTokenService],
 })
 export class AuthModule {}
