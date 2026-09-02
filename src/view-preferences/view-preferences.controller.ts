@@ -7,6 +7,8 @@ import {
   SetKanbanPinDto,
   AgingThresholds,
   SetAgingThresholdsDto,
+  FirstResponseSettings,
+  SetFirstResponseSettingsDto,
 } from './dto/view-preference.dto';
 
 /**
@@ -57,6 +59,26 @@ export class ViewPreferencesController {
     return this.service.saveAgingThresholds({
       green: dto.green,
       amber: dto.amber,
+    });
+  }
+
+  /**
+   * GET /api/view-preferences/lead-first-response-settings — the caller's First Response
+   * settings (RPT-02.9). Declared before `:viewKey` so the static segment is never
+   * captured as a view key.
+   */
+  @Get('lead-first-response-settings')
+  getFirstResponseSettings(): Promise<FirstResponseSettings> {
+    return this.service.getFirstResponseSettings();
+  }
+
+  /** PUT /api/view-preferences/lead-first-response-settings — saves them. */
+  @Put('lead-first-response-settings')
+  setFirstResponseSettings(
+    @Body() dto: SetFirstResponseSettingsDto,
+  ): Promise<FirstResponseSettings> {
+    return this.service.saveFirstResponseSettings({
+      lateHours: dto.lateHours,
     });
   }
 

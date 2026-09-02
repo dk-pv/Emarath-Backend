@@ -7,12 +7,17 @@ import {
   isViewKey,
   KanbanPins,
   AgingThresholds,
+  FirstResponseSettings,
 } from './dto/view-preference.dto';
 
 /** The fixed view key that holds a user's Kanban stage pins (one row per user). */
 const KANBAN_PINS_KEY = 'kanban-pins';
 
 const AGING_THRESHOLDS_KEY = 'lead-aging-thresholds';
+const FIRST_RESPONSE_KEY = 'lead-first-response-settings';
+
+/** The report's shipped default, used until the caller saves their own. */
+const DEFAULT_FIRST_RESPONSE: FirstResponseSettings = { lateHours: 24 };
 
 /** The report's shipped defaults, used until the caller saves their own. */
 const DEFAULT_AGING_THRESHOLDS: AgingThresholds = { green: 13, amber: 29 };
@@ -158,6 +163,42 @@ export class ViewPreferencesService {
       update: { layout },
     });
     return thresholds;
+  }
+
+  /** The caller's First Response settings, falling back to the report's default. */
+  async getFirstResponseSettings(): Promise<FirstResponseSettings> {
+    const user = await this.currentUser.resolve();
+    const row = await this.prisma.userViewPreference.findUnique({
+      where: {
+        userId_viewKey: { userId: user.id, viewKey: FIRST_RESPONSE_KEY },
+      },
+      select: { layout: true },
+    });
+    const hours = (row?.layout as { lateHours?: unknown } | null)?.lateHours;
+    return typeof hours === 'number' && Number.isInteger(hours) && hours >= 1
+      ? { lateHours: hours }
+      : DEFAULT_FIRST_RESPONSE;
+  }
+
+  /** Upserts the caller's First Response settings; one row per user. */
+  async saveFirstResponseSettings(
+    settings: FirstResponseSettings,
+  ): Promise<FirstResponseSettings> {
+    const user = await this.currentUser.resolve();
+    const layout = settings as unknown as Prisma.InputJsonValue;
+
+    await this.prisma.userViewPreference.upsert({
+      where: {
+        userId_viewKey: { userId: user.id, viewKey: FIRST_RESPONSE_KEY },
+      },
+      create: {
+        user: { connect: { id: user.id } },
+        viewKey: FIRST_RESPONSE_KEY,
+        layout,
+      },
+      update: { layout },
+    });
+    return settings;
   }
 }
 
