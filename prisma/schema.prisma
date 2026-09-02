@@ -59,6 +59,65 @@ model User {
   isActive     Boolean   @default(true) @map("is_active")
   /// Team association, used later for role scoping (AUTH-01.1 AC1/AC3).
   team         String?   @db.VarChar(120)
+
+  /// Profile fields the Team Members roster displays (Settings > Users & Access).
+  /// Optional: every existing account predates them, and neither is a credential —
+  /// `phone` is display/contact only and is NOT a login identity (see STATUS R-3).
+  jobTitle     String?   @map("job_title") @db.VarChar(120)
+  phone        String?   @db.VarChar(32)
+
+  /// Roster activity columns. `lastLoginAt` is stamped by a successful login;
+  /// `lastSeenAt` also advances on token refresh, so it approximates presence without
+  /// a write on every authenticated request. Null until the account first signs in.
+  lastLoginAt  DateTime? @map("last_login_at")
+  lastSeenAt   DateTime? @map("last_seen_at")
+
+  /// Wizard name split (the reference asks First/Last separately). `name` stays the
+  /// canonical display value the whole product reads; these two exist so an edit can
+  /// prefill real halves instead of guessing at a split of "ADWAITHA T M".
+  firstName    String?   @map("first_name") @db.VarChar(80)
+  lastName     String?   @map("last_name") @db.VarChar(80)
+
+  /// The organisational role the wizard picked (ADR-0055). Authorization does NOT read
+  /// this: `role` (the enum) stays the JWT claim and the guard/scoping input, and the
+  /// service sets it from Role.baseRole whenever roleId changes. Null on accounts that
+  /// predate the roles table — display falls back to the enum label.
+  roleId       String?   @map("role_id") @db.Uuid
+
+  /// Who this member reports to (the wizard's "Reporting To"). Organisational only —
+  /// no scoping reads it yet (the R-2 agent-tree question is still open).
+  reportingToId String?  @map("reporting_to_id") @db.Uuid
+
+  /// The lead form assigned in the wizard's Permission step.
+  leadFormId   String?   @map("lead_form_id") @db.Uuid
+
+  /// Pipelines this member works (wizard's multi-select). Values come from the
+  /// `pipelines` lookup — strings, because pipelines are lookup data, not a table.
+  pipelines    String[]  @default([])
+
+  /// Permissions & Tracking toggles (wizard step 3). All default off, matching the
+  /// reference's fresh-member state; none is read by any guard yet — they are stored
+  /// configuration surfaced back through the API.
+  appAccess            Boolean @default(false) @map("app_access")
+  trackCheckInOut      Boolean @default(false) @map("track_check_in_out")
+  trackMeetingLocation Boolean @default(false) @map("track_meeting_location")
+  includeInReporting   Boolean @default(false) @map("include_in_reporting")
+  autoFollowUpPrompt   Boolean @default(false) @map("auto_follow_up_prompt")
+
+  /// WhatsApp inbox access level ("RESTRICTED" | "FULL"), nullable = not set.
+  whatsappInboxAccess String? @map("whatsapp_inbox_access") @db.VarChar(20)
+
+  /// The member's picked button colour — user data (like a pin colour), not a design
+  /// token, so it is stored as the hex the picker produced.
+  colorCode    String?   @map("color_code") @db.VarChar(9)
+
+  /// Target Settings: monthly goal in AED. Decimal, never float (money rule).
+  monthlyGoalAmount Decimal? @map("monthly_goal_amount") @db.Decimal(12, 2)
+
+  /// Profile picture's storage key (FND-05.2 store); responses carry a signed URL,
+  /// never the key's raw location.
+  avatarKey    String?   @map("avatar_key") @db.VarChar(300)
+
   createdAt    DateTime  @default(now()) @map("created_at")
   updatedAt    DateTime  @updatedAt @map("updated_at")
   deletedAt    DateTime? @map("deleted_at")
@@ -88,7 +147,78 @@ model User {
   /// LEAD-10.2 (ADR-0035): lead notes this user authored via the row "Add Note" action.
   leadNotes           LeadNote[]
 
+  /// Settings > Users & Access: organisational role, reporting line, assigned lead
+  /// form and the per-module permission matrix.
+  orgRole           Role?                  @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  reportingTo       User?                  @relation("UserReportingTo", fields: [reportingToId], references: [id], onDelete: SetNull)
+  reports           User[]                 @relation("UserReportingTo")
+  leadForm          LeadForm?              @relation(fields: [leadFormId], references: [id], onDelete: Restrict)
+  modulePermissions UserModulePermission[]
+
   @@map("users")
+}
+
+/// Settings > Users & Access (ADR-0055): a role in the organisation's own words —
+/// "QC ROLE", "LOGISTICS MANAGER" — the wizard's Role dropdown lists.
+///
+/// Authorization deliberately does NOT read this table. Every row maps onto one of the
+/// five seeded UserRole values via `baseRole`; the service copies that onto User.role
+/// whenever roleId changes, so the JWT claim, RolesGuard and all data scoping keep
+/// working off the enum exactly as before. Custom-role *creation* is the Roles &
+/// Permissions screen's job; this task seeds the five built-ins.
+model Role {
+  id       String   @id @default(uuid()) @db.Uuid
+  name     String   @unique @db.VarChar(120)
+  baseRole UserRole @map("base_role")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  users User[]
+
+  @@map("roles")
+}
+
+/// Settings > Users & Access: a lead form the wizard's "Assign Lead Form" offers.
+/// The form *builder* (Data & Schema Management) is separate scope; this is the
+/// catalogue that assignment needs, seeded with the one built-in form.
+model LeadForm {
+  id   String @id @default(uuid()) @db.Uuid
+  name String @unique @db.VarChar(160)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  users User[]
+
+  @@map("lead_forms")
+}
+
+/// One row of the wizard's User Permissions matrix: what `userId` may do in `module`.
+/// "All" is never stored — it is the derived state of every applicable flag being on.
+/// Which flags are applicable per module is the permission catalogue (users DTO), and
+/// the service rejects a write that sets an inapplicable flag, so a disabled cell can
+/// not be forged through the API either.
+model UserModulePermission {
+  id      String  @id @default(uuid()) @db.Uuid
+  userId  String  @map("user_id") @db.Uuid
+  /// Catalogue key ("LEADS", "GPS_MAP", ...). A string, validated in the service —
+  /// an enum would cost a migration per module for no integrity the catalogue check
+  /// does not already give.
+  module  String  @db.VarChar(40)
+  canView Boolean @default(false) @map("can_view")
+  canAdd  Boolean @default(false) @map("can_add")
+  canEdit Boolean @default(false) @map("can_edit")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, module])
+  @@map("user_module_permissions")
 }
 
 /// A refresh-token session (AUTH-01.3, ADR-0029 §3). The token itself is an opaque

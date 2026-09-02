@@ -29,6 +29,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { ReportsModule } from './reports/reports.module';
 import { StagesModule } from './stages/stages.module';
 import { StorageModule } from './storage/storage.module';
+import { UsersModule } from './users/users.module';
 import { SavedFiltersModule } from './saved-filters/saved-filters.module';
 import { ViewPreferencesModule } from './view-preferences/view-preferences.module';
 
@@ -73,6 +74,7 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     ReportsModule,
     SavedFiltersModule,
     StagesModule,
+    UsersModule,
     ViewPreferencesModule,
   ],
   controllers: [AppController],
