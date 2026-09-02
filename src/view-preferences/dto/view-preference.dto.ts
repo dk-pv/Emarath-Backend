@@ -67,6 +67,23 @@ export class SetAgingThresholdsDto implements AgingThresholds {
   amber!: number;
 }
 
+/**
+ * The Lead First Response report's settings (RPT-02.9): the "responded late" bound, in
+ * hours. Stored per user in the same `UserViewPreference` table under the fixed
+ * `lead-first-response-settings` key, as the Kanban pins and aging thresholds are.
+ */
+export interface FirstResponseSettings {
+  lateHours: number;
+}
+
+export class SetFirstResponseSettingsDto implements FirstResponseSettings {
+  @Type(() => Number)
+  @IsInt({ message: 'lateHours must be an integer' })
+  @Min(1, { message: 'lateHours must be 1 or greater' })
+  @Max(720, { message: 'lateHours must be at most 720' })
+  lateHours!: number;
+}
+
 export class SetKanbanPinDto {
   @Transform(trim)
   @IsString()

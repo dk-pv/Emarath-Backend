@@ -12,6 +12,10 @@ import { LeadsByOwnershipReportService } from './leads-by-ownership.service';
 import { ConvertedLeadsController } from './converted-leads.controller';
 import { ConvertedLeadsReportService } from './converted-leads.service';
 import { LeadAgingController } from './lead-aging.controller';
+import { DuplicateEnquiriesController } from './duplicate-enquiries.controller';
+import { DuplicateEnquiriesService } from './duplicate-enquiries.service';
+import { LeadFirstResponseController } from './lead-first-response.controller';
+import { LeadFirstResponseService } from './lead-first-response.service';
 import { LeadAgingReportService } from './lead-aging.service';
 import { LostLeadsController } from './lost-leads.controller';
 import { LostLeadsReportService } from './lost-leads.service';
@@ -36,6 +40,8 @@ import { OverdueFollowUpsReportService } from './overdue-follow-ups.service';
     ConvertedLeadsController,
     LostLeadsController,
     LeadAgingController,
+    LeadFirstResponseController,
+    DuplicateEnquiriesController,
     OverdueFollowUpsController,
   ],
   providers: [
@@ -47,6 +53,8 @@ import { OverdueFollowUpsReportService } from './overdue-follow-ups.service';
     ConvertedLeadsReportService,
     LostLeadsReportService,
     LeadAgingReportService,
+    LeadFirstResponseService,
+    DuplicateEnquiriesService,
     OverdueFollowUpsReportService,
   ],
 })
