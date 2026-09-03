@@ -1,4 +1,4 @@
-import { Prisma } from '../generated/prisma/client';
+import { ActivityType, Prisma } from '../generated/prisma/client';
 import { CurrentUser } from '../auth/current-user';
 import { activityScopeWhere } from '../activities/activity-scope';
 import {
@@ -27,6 +27,10 @@ export interface OverdueFollowUpsFilters {
    */
   from?: string;
   to?: string;
+  /** Lead pipeline values (the toolbar's "Pipeline" filter) — matched on the linked lead. */
+  pipeline?: string[];
+  /** Follow-up types (the toolbar's "Follow Up Type" filter) — Call / Meeting / Task. */
+  type?: ActivityType[];
 }
 
 /**
@@ -56,7 +60,8 @@ function createdAtWhere(
  * Reuses the Activities domain verbatim: role scope + soft-delete from `activityScopeWhere`, and
  * the overdue definition (`completedAt IS NULL AND dueAt < todayStart`) from
  * `activityBucketWhere('overdue', …)` — never a second copy. The agent filter reuses
- * `activityFilterWhere`; the period and team predicates are ANDed on top. So the report can never
+ * `activityFilterWhere`, which also supplies the pipeline (on the linked lead) and follow-up
+ * type predicates; the period and team predicates are ANDed on top. So the report can never
  * leak an activity outside the caller's scope (AC4) and its figures reconcile with the Activities
  * module's overdue tab (AC3).
  */
@@ -75,7 +80,13 @@ export function buildOverdueFollowUpsWhere(
   const conditions: Prisma.ActivityWhereInput[] = [
     activityScopeWhere(user),
     activityBucketWhere('overdue', boundaries),
-    ...activityFilterWhere({ assignedAgent: filters.agent }),
+    // Agent, pipeline and type are the Activities module's own filter fragments — the report
+    // adds no second copy of them, so it can never disagree with the worklist's own filtering.
+    ...activityFilterWhere({
+      assignedAgent: filters.agent,
+      pipeline: filters.pipeline,
+      type: filters.type,
+    }),
   ];
   const created = createdAtWhere(filters.from, filters.to);
   if (created) conditions.push(created);

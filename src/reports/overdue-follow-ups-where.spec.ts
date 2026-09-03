@@ -1,4 +1,4 @@
-import { UserRole } from '../generated/prisma/client';
+import { ActivityType, UserRole } from '../generated/prisma/client';
 import { CurrentUser } from '../auth/current-user';
 import { buildOverdueFollowUpsWhere } from './overdue-follow-ups-where';
 
@@ -70,5 +70,37 @@ describe('buildOverdueFollowUpsWhere', () => {
     // No period → no createdAt fragment.
     const noPeriod = fragments(admin, { todayStart: TODAY_START });
     expect(noPeriod.find((part) => 'createdAt' in part)).toBeUndefined();
+  });
+
+  it('threads the pipeline filter through the linked lead', () => {
+    const parts = fragments(admin, {
+      todayStart: TODAY_START,
+      pipeline: ['Lead Pipeline', 'Complaints'],
+    });
+    expect(parts).toContainEqual({
+      lead: { pipeline: { in: ['Lead Pipeline', 'Complaints'] } },
+    });
+  });
+
+  it('threads the follow-up type filter through the activity type', () => {
+    const parts = fragments(admin, {
+      todayStart: TODAY_START,
+      type: [ActivityType.CALL, ActivityType.TASK],
+    });
+    expect(parts).toContainEqual({
+      type: { in: [ActivityType.CALL, ActivityType.TASK] },
+    });
+  });
+
+  it('adds neither predicate when pipeline and type are empty', () => {
+    const json = JSON.stringify(
+      buildOverdueFollowUpsWhere(admin, {
+        todayStart: TODAY_START,
+        pipeline: [],
+        type: [],
+      }),
+    );
+    expect(json).not.toContain('pipeline');
+    expect(json).not.toContain('"type"');
   });
 });

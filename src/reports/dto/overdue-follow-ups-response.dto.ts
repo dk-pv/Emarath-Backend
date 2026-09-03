@@ -7,16 +7,22 @@ export interface OverdueFollowUpsAgentRef {
 }
 
 /**
- * One overdue follow-up in the detailed view (RPT-03.2). No Workpex detailed capture exists, so
- * the columns follow the Activities-list + RPT-02.x conventions: the linked customer, the
- * follow-up type, its due date (the field that makes it overdue) and the assignees.
+ * One overdue follow-up in the detailed view (RPT-03.2), carrying the reference's six columns:
+ * Lead Name, Lead Status, Assigned User, Follow up Type, Date and Time, Notes. `leadId` is what
+ * makes the name a link to that customer's details; `statusColor` is the lead status's real
+ * Stage colour, so the badge can never invent a hue the pipeline does not use.
  */
 export interface OverdueFollowUpRow {
   id: string;
   type: ActivityType;
+  leadId: string;
   customerName: string;
   primaryPhone: string;
+  status: string;
+  statusColor: string | null;
   dueAt: string;
+  /** The follow-up's own description — the reference's Notes column. */
+  notes: string | null;
   assignedTo: OverdueFollowUpsAgentRef[];
 }
 
@@ -39,8 +45,9 @@ export interface OverdueFollowUpsSummaryRow {
 export interface OverdueFollowUpsSummaryResponse {
   rows: OverdueFollowUpsSummaryRow[];
   /**
-   * Distinct overdue follow-ups. A per-agent count can exceed this when a follow-up is
-   * co-assigned (each assignee is counted once), so the two are reported separately.
+   * How many assignee rows match — the `ListResult` total the "Rows per page" control pages on,
+   * not a follow-up count. The per-agent counts can sum higher than the distinct number of
+   * overdue follow-ups, because a co-assigned one is counted once for each of its assignees.
    */
   total: number;
 }
@@ -54,7 +61,8 @@ export const OVERDUE_FOLLOW_UPS_SELECT = {
   id: true,
   type: true,
   dueAt: true,
-  lead: { select: { name: true, primaryPhone: true } },
+  description: true,
+  lead: { select: { id: true, name: true, primaryPhone: true, status: true } },
   assignees: { select: { user: { select: { id: true, name: true } } } },
 } satisfies Prisma.ActivitySelect;
 
@@ -65,13 +73,18 @@ type OverdueFollowUp = Prisma.ActivityGetPayload<{
 /** Shapes a selected overdue follow-up into a response row. */
 export function toOverdueFollowUpRow(
   activity: OverdueFollowUp,
+  statusColor: string | null = null,
 ): OverdueFollowUpRow {
   return {
     id: activity.id,
     type: activity.type,
+    leadId: activity.lead.id,
     customerName: activity.lead.name,
     primaryPhone: activity.lead.primaryPhone,
+    status: activity.lead.status,
+    statusColor,
     dueAt: activity.dueAt.toISOString(),
+    notes: activity.description,
     assignedTo: activity.assignees.map((assignment) => ({
       id: assignment.user.id,
       name: assignment.user.name,

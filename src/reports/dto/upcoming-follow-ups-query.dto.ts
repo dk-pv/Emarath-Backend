@@ -14,28 +14,26 @@ import {
 } from 'class-validator';
 import { ActivityType } from '../../generated/prisma/client';
 import { normalizeFilterValues } from '../../leads/lead-filter';
+import { MAX_FILTER_VALUE_LENGTH } from '../../leads/dto/list-leads-query.dto';
 import {
   DEFAULT_REPORT_PAGE_SIZE,
   MAX_FILTER_VALUES,
   MAX_REPORT_PAGE_SIZE,
 } from './no-activity-query.dto';
-import { MAX_FILTER_VALUE_LENGTH } from '../../leads/dto/list-leads-query.dto';
-import { MAX_TEAM_LENGTH } from './leads-by-status-query.dto';
-
-const ACTIVITY_TYPES = Object.values(ActivityType);
 
 const trim = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' ? value.trim() : value;
 
+const ACTIVITY_TYPES = Object.values(ActivityType);
+
 /**
- * The Overdue Follow Ups report query (RPT-03.2): paging, the required `todayStart` (the client's
- * local midnight — the overdue cutoff), and the period/agent/team/pipeline/type filters (AC2). `agent`/`team`
- * accept repeated params (`?agent=…&agent=…`), coerced to clean arrays (or dropped when blank) by
- * the shared `normalizeFilterValues`. `todayStart`/`from`/`to` are ISO instants the client computes
- * in its own timezone. Validated before the service runs, so an invalid request is a clean 400 with
- * nothing queried.
+ * The Upcoming Follow Ups report query (RPT-03.3): paging, the required `todayEnd`
+ * (the client's next local midnight — where "upcoming" starts), the By Date window over the due
+ * date, and the agent/pipeline/type filters the toolbar offers. Repeated params (`?agent=…&agent=…`) are coerced to clean arrays
+ * by the shared `normalizeFilterValues`. Validated before the service runs, so an invalid
+ * request is a clean 400 with nothing queried.
  */
-export class OverdueFollowUpsQueryDto {
+export class UpcomingFollowUpsQueryDto {
   @Type(() => Number)
   @IsInt({ message: 'page must be an integer' })
   @Min(1, { message: 'page must be 1 or greater' })
@@ -52,9 +50,10 @@ export class OverdueFollowUpsQueryDto {
   size: number = DEFAULT_REPORT_PAGE_SIZE;
 
   @Transform(trim)
-  @IsDateString({}, { message: 'todayStart must be an ISO date' })
-  todayStart!: string;
+  @IsDateString({}, { message: 'todayEnd must be an ISO date' })
+  todayEnd!: string;
 
+  /** The By Date window over the due date — half-open, both edges optional. */
   @Transform(trim)
   @IsDateString({}, { message: 'from must be an ISO date' })
   @IsOptional()
@@ -79,22 +78,6 @@ export class OverdueFollowUpsQueryDto {
   @Transform(({ value }: { value: unknown }): unknown =>
     normalizeFilterValues(value),
   )
-  @IsArray({ message: 'team must be one or more values' })
-  @IsString({ each: true, message: 'each team must be a string' })
-  @MaxLength(MAX_TEAM_LENGTH, {
-    each: true,
-    message: `each team must be at most ${MAX_TEAM_LENGTH} characters`,
-  })
-  @ArrayMaxSize(MAX_FILTER_VALUES, {
-    message: `team accepts at most ${MAX_FILTER_VALUES} values`,
-  })
-  @IsOptional()
-  team?: string[];
-
-  /** Lead pipeline values — matched on the linked lead, the toolbar's "Pipeline" filter. */
-  @Transform(({ value }: { value: unknown }): unknown =>
-    normalizeFilterValues(value),
-  )
   @IsArray({ message: 'pipeline must be one or more values' })
   @IsString({ each: true, message: 'each pipeline must be a string' })
   @MaxLength(MAX_FILTER_VALUE_LENGTH, {
@@ -107,7 +90,6 @@ export class OverdueFollowUpsQueryDto {
   @IsOptional()
   pipeline?: string[];
 
-  /** Follow-up type — the toolbar's "Follow Up Type" filter (Call / Meeting / Task). */
   @Transform(({ value }: { value: unknown }): unknown =>
     normalizeFilterValues(value),
   )
