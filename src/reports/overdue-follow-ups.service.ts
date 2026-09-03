@@ -33,12 +33,14 @@ const TYPE_LABEL: Record<ActivityType, string> = {
   TASK: 'Task',
 };
 
+/** The Detailed View's own columns, in its order — the file matches what the screen shows. */
 const EXPORT_HEADERS = [
-  'Customer Name',
-  'Follow Up Type',
-  'Due Date',
-  'Primary Phone',
-  'Assigned',
+  'Lead Name',
+  'Lead Status',
+  'Assigned User',
+  'Follow up Type',
+  'Date and Time',
+  'Notes',
 ] as const;
 
 /**
@@ -67,18 +69,29 @@ export class OverdueFollowUpsReportService {
     const user = await this.currentUser.resolve();
     const where = buildOverdueFollowUpsWhere(user, query);
 
-    const [rows, total] = await this.prisma.$transaction([
-      this.prisma.activity.findMany({
-        where,
-        select: OVERDUE_FOLLOW_UPS_SELECT,
-        orderBy: ORDER_BY,
-        skip: (query.page - 1) * query.size,
-        take: query.size,
-      }),
-      this.prisma.activity.count({ where }),
+    const [[rows, total], colorByStatus] = await Promise.all([
+      this.prisma.$transaction([
+        this.prisma.activity.findMany({
+          where,
+          select: OVERDUE_FOLLOW_UPS_SELECT,
+          orderBy: ORDER_BY,
+          skip: (query.page - 1) * query.size,
+          take: query.size,
+        }),
+        this.prisma.activity.count({ where }),
+      ]),
+      this.stageColorByName(),
     ]);
 
-    return { rows: rows.map(toOverdueFollowUpRow), total };
+    return {
+      rows: rows.map((activity) =>
+        toOverdueFollowUpRow(
+          activity,
+          colorByStatus.get(activity.lead.status) ?? null,
+        ),
+      ),
+      total,
+    };
   }
 
   /**
@@ -104,10 +117,7 @@ export class OverdueFollowUpsReportService {
         }),
       ]);
       if (count === 0 || !self) return { rows: [], total: 0 };
-      return {
-        rows: [{ agentId: self.id, agentName: self.name, count }],
-        total: count,
-      };
+      return page([{ agentId: self.id, agentName: self.name, count }], query);
     }
 
     const [grouped, unassigned, total] = await Promise.all([
@@ -143,13 +153,13 @@ export class OverdueFollowUpsReportService {
       rows.push({ agentId: null, agentName: 'Unassigned', count: unassigned });
     }
 
-    return { rows, total };
+    return page(rows, query);
   }
 
   /**
    * Streams the overdue follow-ups to a CSV download. The `where` is the same scoped query as the
    * visible report, so the file can never expose an activity the caller cannot see and always
-   * reflects the active period/agent/team filters. Rows are pulled in batches and written straight
+   * reflects the active filters, and carries the Detailed View's own columns. Rows are pulled in batches and written straight
    * to the response, so memory stays flat regardless of match count.
    */
   async exportCsv(
@@ -189,10 +199,11 @@ export class OverdueFollowUpsReportService {
         chunk +=
           [
             csvCell(activity.lead.name),
+            csvCell(activity.lead.status),
+            csvCell(activity.assignees.map((a) => a.user.name).join('; ')),
             csvCell(TYPE_LABEL[activity.type]),
             csvCell(activity.dueAt.toISOString()),
-            csvCell(activity.lead.primaryPhone),
-            csvCell(activity.assignees.map((a) => a.user.name).join('; ')),
+            csvCell(activity.description ?? ''),
           ].join(',') + '\r\n';
       }
       res.write(chunk);
@@ -202,6 +213,22 @@ export class OverdueFollowUpsReportService {
     }
 
     res.end();
+  }
+
+  /**
+   * Stage colour by status name — the first stage carrying a name wins across pipelines, the
+   * same resolution every RPT-02.x report uses, so a status pill reads identically everywhere.
+   */
+  private async stageColorByName(): Promise<Map<string, string>> {
+    const stages = await this.prisma.stage.findMany({
+      select: { name: true, color: true },
+      orderBy: [{ pipeline: 'asc' }, { position: 'asc' }],
+    });
+    const map = new Map<string, string>();
+    for (const stage of stages) {
+      if (!map.has(stage.name)) map.set(stage.name, stage.color);
+    }
+    return map;
   }
 
   /** The team values the filter offers (AC2): the distinct non-empty `User.team` labels. */
@@ -218,6 +245,21 @@ export class OverdueFollowUpsReportService {
         .filter((team): team is string => team !== null),
     };
   }
+}
+
+/**
+ * One page of the assignee breakdown. The rows are the assignees themselves (bounded by the
+ * user table, so they are built in full and then sliced rather than paged in SQL), and `total`
+ * is their count — the `ListResult` shape every list in the app pages on, which is what the
+ * summary's "Rows per page" control reads. The distinct-follow-up count is not this number:
+ * a co-assigned follow-up is counted once per assignee, so the per-agent counts can sum higher.
+ */
+function page(
+  rows: OverdueFollowUpsSummaryRow[],
+  query: OverdueFollowUpsQueryDto,
+): OverdueFollowUpsSummaryResponse {
+  const start = (query.page - 1) * query.size;
+  return { rows: rows.slice(start, start + query.size), total: rows.length };
 }
 
 /** A timestamped, download-safe name: `overdue-follow-ups-YYYYMMDD-HHmmss.csv`. */
