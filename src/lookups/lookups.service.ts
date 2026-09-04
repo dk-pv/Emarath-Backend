@@ -13,7 +13,7 @@ import {
  *
  * Most lists are config-backed (`lookups.data.ts`). Three are read from the database
  * so the form always reflects live, user-managed data: `tags` from the `Tag` table
- * (LEAD-12.1), and `leadStatus` from the `Stage` catalogue (KAN-05.1) — the same
+ * (LEAD-12.1), `categories` from the `Category` catalogue, and `leadStatus` from the `Stage` catalogue (KAN-05.1) — the same
  * canonical source the board and list badges read, so the status dropdown can no
  * longer drift from the stages — and `teams` from `User.team`, for the Team filters. All three return the same `{ value, label }` shape,
  * so the frontend treats every lookup identically.
@@ -25,6 +25,7 @@ export class LookupsService {
   async byType(type: string): Promise<LookupOption[]> {
     if (type === 'tags') return this.tags();
     if (type === 'leadStatus') return this.stages();
+    if (type === 'categories') return this.categories();
     if (type === 'teams') return this.teams();
     if (isConfigLookup(type)) return [...LOOKUP_DATA[type]];
     throw new NotFoundException(`Unknown lookup type: ${type}`);
@@ -52,6 +53,21 @@ export class LookupsService {
       orderBy: { position: 'asc' },
     });
     return stages.map((stage) => ({ value: stage.name, label: stage.name }));
+  }
+
+  /**
+   * Enquiry categories, read from the `Category` catalogue the Settings screen manages.
+   * Only active ones are offered — an inactive category stays on existing leads but is
+   * not something new ones should be filed under. In tree order, as the settings screen
+   * lists them; the value IS the name, which is what `Lead.category` stores.
+   */
+  private async categories(): Promise<LookupOption[]> {
+    const rows = await this.prisma.category.findMany({
+      where: { isActive: true },
+      select: { name: true },
+      orderBy: [{ position: 'asc' }, { name: 'asc' }],
+    });
+    return rows.map((row) => ({ value: row.name, label: row.name }));
   }
 
   /** The teams users belong to — distinct `User.team`, the value the Team filters match on. */

@@ -106,7 +106,7 @@ export default registerAs('storage', (): StorageConfig => {
     allowedExtensions,
     localDir: process.env.STORAGE_LOCAL_DIR ?? '.storage',
     localBaseUrl:
-      process.env.STORAGE_LOCAL_BASE_URL ?? 'http://localhost:5000/api',
+      process.env.STORAGE_LOCAL_BASE_URL ?? 'http://localhost:5001/api',
     localSigningSecret:
       process.env.STORAGE_SIGNING_SECRET ?? DEV_INSECURE_SIGNING_SECRET,
   };

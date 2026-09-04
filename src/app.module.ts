@@ -26,11 +26,14 @@ import { LeadsRowActionsModule } from './leads/row-actions/leads-row-actions.mod
 import { LeadsTagsModule } from './leads/tags/leads-tags.module';
 import { LookupsModule } from './lookups/lookups.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { RolesModule } from './roles/roles.module';
 import { ReportsModule } from './reports/reports.module';
 import { StagesModule } from './stages/stages.module';
 import { StorageModule } from './storage/storage.module';
 import { UsersModule } from './users/users.module';
 import { SavedFiltersModule } from './saved-filters/saved-filters.module';
+import { CategoriesModule } from './categories/categories.module';
+import { SettingsModule } from './settings/settings.module';
 import { ViewPreferencesModule } from './view-preferences/view-preferences.module';
 
 const nodeEnv = process.env.NODE_ENV ?? 'development';
@@ -47,8 +50,10 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
       envFilePath: [`.env.${nodeEnv}.local`, `.env.${nodeEnv}`, '.env'],
     }),
     PrismaModule,
+    RolesModule,
     StorageModule,
     ActivitiesModule,
+    CategoriesModule,
     AuthModule,
     CallsModule,
     DashboardModule,
@@ -73,6 +78,7 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     LookupsModule,
     ReportsModule,
     SavedFiltersModule,
+    SettingsModule,
     StagesModule,
     UsersModule,
     ViewPreferencesModule,

@@ -46,54 +46,54 @@ enum UserRole {
 /// never plaintext. Login, sessions and the JWT identity are AUTH-01.2/01.3, which
 /// consume this model without reshaping it.
 model User {
-  id           String    @id @default(uuid()) @db.Uuid
-  name         String    @db.VarChar(120)
-  email        String    @unique @db.VarChar(180)
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String   @db.VarChar(120)
+  email        String   @unique @db.VarChar(180)
   /// Second credential AC5 dedupes alongside email.
-  username     String    @unique @db.VarChar(120)
+  username     String   @unique @db.VarChar(120)
   /// bcrypt hash (AC4). Never the plaintext password.
-  passwordHash String    @map("password_hash") @db.VarChar(255)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
   role         UserRole
   /// Whether the account may log in (AUTH-01.2 AC4). Disabled accounts are rejected
   /// at login with the same generic error as bad credentials.
-  isActive     Boolean   @default(true) @map("is_active")
+  isActive     Boolean  @default(true) @map("is_active")
   /// Team association, used later for role scoping (AUTH-01.1 AC1/AC3).
-  team         String?   @db.VarChar(120)
+  team         String?  @db.VarChar(120)
 
   /// Profile fields the Team Members roster displays (Settings > Users & Access).
   /// Optional: every existing account predates them, and neither is a credential —
   /// `phone` is display/contact only and is NOT a login identity (see STATUS R-3).
-  jobTitle     String?   @map("job_title") @db.VarChar(120)
-  phone        String?   @db.VarChar(32)
+  jobTitle String? @map("job_title") @db.VarChar(120)
+  phone    String? @db.VarChar(32)
 
   /// Roster activity columns. `lastLoginAt` is stamped by a successful login;
   /// `lastSeenAt` also advances on token refresh, so it approximates presence without
   /// a write on every authenticated request. Null until the account first signs in.
-  lastLoginAt  DateTime? @map("last_login_at")
-  lastSeenAt   DateTime? @map("last_seen_at")
+  lastLoginAt DateTime? @map("last_login_at")
+  lastSeenAt  DateTime? @map("last_seen_at")
 
   /// Wizard name split (the reference asks First/Last separately). `name` stays the
   /// canonical display value the whole product reads; these two exist so an edit can
   /// prefill real halves instead of guessing at a split of "ADWAITHA T M".
-  firstName    String?   @map("first_name") @db.VarChar(80)
-  lastName     String?   @map("last_name") @db.VarChar(80)
+  firstName String? @map("first_name") @db.VarChar(80)
+  lastName  String? @map("last_name") @db.VarChar(80)
 
   /// The organisational role the wizard picked (ADR-0055). Authorization does NOT read
   /// this: `role` (the enum) stays the JWT claim and the guard/scoping input, and the
   /// service sets it from Role.baseRole whenever roleId changes. Null on accounts that
   /// predate the roles table — display falls back to the enum label.
-  roleId       String?   @map("role_id") @db.Uuid
+  roleId String? @map("role_id") @db.Uuid
 
   /// Who this member reports to (the wizard's "Reporting To"). Organisational only —
   /// no scoping reads it yet (the R-2 agent-tree question is still open).
-  reportingToId String?  @map("reporting_to_id") @db.Uuid
+  reportingToId String? @map("reporting_to_id") @db.Uuid
 
   /// The lead form assigned in the wizard's Permission step.
-  leadFormId   String?   @map("lead_form_id") @db.Uuid
+  leadFormId String? @map("lead_form_id") @db.Uuid
 
   /// Pipelines this member works (wizard's multi-select). Values come from the
   /// `pipelines` lookup — strings, because pipelines are lookup data, not a table.
-  pipelines    String[]  @default([])
+  pipelines String[] @default([])
 
   /// Permissions & Tracking toggles (wizard step 3). All default off, matching the
   /// reference's fresh-member state; none is read by any guard yet — they are stored
@@ -109,18 +109,18 @@ model User {
 
   /// The member's picked button colour — user data (like a pin colour), not a design
   /// token, so it is stored as the hex the picker produced.
-  colorCode    String?   @map("color_code") @db.VarChar(9)
+  colorCode String? @map("color_code") @db.VarChar(9)
 
   /// Target Settings: monthly goal in AED. Decimal, never float (money rule).
   monthlyGoalAmount Decimal? @map("monthly_goal_amount") @db.Decimal(12, 2)
 
   /// Profile picture's storage key (FND-05.2 store); responses carry a signed URL,
   /// never the key's raw location.
-  avatarKey    String?   @map("avatar_key") @db.VarChar(300)
+  avatarKey String? @map("avatar_key") @db.VarChar(300)
 
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
-  deletedAt    DateTime? @map("deleted_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
 
   assignments         LeadAssignment[]
   /// ADR-0031: this user's personal lead pins (their own float-to-top list).
@@ -149,9 +149,12 @@ model User {
 
   /// Settings > Users & Access: organisational role, reporting line, assigned lead
   /// form and the per-module permission matrix.
-  orgRole           Role?                  @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  orgRole           Role?                  @relation("UserOrgRole", fields: [roleId], references: [id], onDelete: Restrict)
   reportingTo       User?                  @relation("UserReportingTo", fields: [reportingToId], references: [id], onDelete: SetNull)
   reports           User[]                 @relation("UserReportingTo")
+  /// Roles this user authored — surfaced by the Roles & Permissions info popover.
+  rolesCreated      Role[]                 @relation("RoleCreatedBy")
+  categoriesCreated Category[]             @relation("CategoryCreatedBy")
   leadForm          LeadForm?              @relation(fields: [leadFormId], references: [id], onDelete: Restrict)
   modulePermissions UserModulePermission[]
 
@@ -171,12 +174,30 @@ model Role {
   name     String   @unique @db.VarChar(120)
   baseRole UserRole @map("base_role")
 
+  /// Hierarchy parent (ADR-0056). Null is a root role. `Restrict` rather than cascade:
+  /// deleting a parent must never silently take its subtree — the service refuses while
+  /// children remain, so a delete is always an explicit, one-role decision.
+  parentId String? @map("parent_id") @db.Uuid
+  parent   Role?   @relation("RoleHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children Role[]  @relation("RoleHierarchy")
+
+  /// Order among siblings sharing a parent; the tree reads `[parentId, position]`.
+  position Int @default(0)
+
+  /// Author, for the info popover. Nullable because the seeded roles predate this
+  /// column, and `SetNull` so removing a team member never deletes the roles they made.
+  createdById String? @map("created_by_id") @db.Uuid
+  createdBy   User?   @relation("RoleCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   deletedAt DateTime? @map("deleted_at")
 
-  users User[]
+  users User[] @relation("UserOrgRole")
 
+  /// The tree is read whole, ordered by depth then sibling position; soft delete has no
+  /// automatic filter (CLAUDE.md §11) so every query names deletedAt explicitly.
+  @@index([deletedAt, parentId, position])
   @@map("roles")
 }
 
@@ -378,9 +399,9 @@ model Lead {
   callAttempts     Int @default(0) @map("call_attempts")
   whatsappAttempts Int @default(0) @map("whatsapp_attempts")
 
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt @map("updated_at")
-  deletedAt       DateTime? @map("deleted_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  deletedAt  DateTime? @map("deleted_at")
   /// When `status` last changed — kept by the `leads_status_changed_at` trigger
   /// (migration 20260830120000), never by app code, so every write path stays covered.
   /// Backfilled to `created_at`. Drives the Leads By Status report's "Status Changed
@@ -389,7 +410,7 @@ model Lead {
   /// leaves LOST; null on historical losses ("No reason recorded"). Values come from the
   /// lostReasons lookup — a string, not an enum, so the business can edit the catalogue
   /// without a migration (the same rule as `status`).
-  lostReason String? @map("lost_reason") @db.VarChar(120)
+  lostReason String?   @map("lost_reason") @db.VarChar(120)
 
   statusChangedAt DateTime @default(now()) @map("status_changed_at")
 
@@ -1087,4 +1108,74 @@ model Integration {
   /// (CLAUDE.md §11), so every query names deletedAt explicitly.
   @@index([deletedAt, position])
   @@map("integrations")
+}
+
+/// App-global configuration for one Settings screen (single-tenant, ADR-0054 — the
+/// deployment *is* the organization, so there is no tenant key here either).
+///
+/// One row per screen, keyed by its slug, holding that screen's payload as JSON. This is
+/// deliberately the same key + JSON + upsert shape as `UserViewPreference`, minus the user
+/// scope: these are company policy (how leads display for everyone, whether mobile numbers
+/// are masked), not a personal preference, so scoping them to a user would be wrong.
+///
+/// A column per setting was rejected: the Settings area has five more screens behind this
+/// one, and each would otherwise cost a migration. The JSON is not a free-for-all — every
+/// field is validated by a DTO on write and re-read defensively on read, so a row that
+/// predates a shape change degrades to defaults rather than reaching the client malformed.
+///
+/// No `deletedAt`: a settings row is configuration, not domain data — the same reading as
+/// `Stage` and `UserViewPreference`, which also omit it.
+model AppSetting {
+  id  String @id @default(uuid()) @db.Uuid
+  key String @unique @db.VarChar(64)
+
+  value Json
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("app_settings")
+}
+
+/// The enquiry Category catalogue — Settings → Sales & CRM Configuration → Category.
+///
+/// Replaces the hard-coded `categories` lookup exactly as `Stage` replaced the config-backed
+/// stage list: a category's `name` IS the value a lead stores in `Lead.category` (a plain
+/// string under the ADR-0005 lookup convention), so a rename cascades to the leads carrying
+/// the old name and a delete is refused while any lead still references it. The catalogue can
+/// never orphan a lead's category.
+///
+/// `name` is unique across the whole table rather than per parent: a lead identifies its
+/// category by name alone, so two categories sharing a name would be indistinguishable to
+/// every lead, filter, export and report.
+///
+/// `parentId` carries the hierarchy the reference screen draws (connector lines and the
+/// per-row "+ Add Category"). Cycles are refused in the service; no depth cap is imposed,
+/// because unlike the role tree this screen has no level legend to define one.
+///
+/// No soft delete — a category is a catalogue entry, not domain data, and the delete is
+/// guarded, the same reading `Stage` records.
+model Category {
+  id       String  @id @default(uuid()) @db.Uuid
+  name     String  @unique @db.VarChar(120)
+  parentId String? @map("parent_id") @db.Uuid
+  position Int     @default(0)
+
+  /// The reference row's green Active / grey Inactive badge.
+  isActive Boolean @default(true) @map("is_active")
+
+  /// The info popover's "Created by"; null once that user is removed.
+  createdById String? @map("created_by_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// Restrict, not Cascade: deleting a parent must never silently take its children with it.
+  parent    Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children  Category[] @relation("CategoryTree")
+  createdBy User?      @relation("CategoryCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  /// The only read path: the whole tree in sibling order.
+  @@index([parentId, position])
+  @@map("categories")
 }

@@ -55,6 +55,15 @@ const STAGES: ReadonlyArray<{ name: string; color: string }> = [
  * `Tag` table live — so the reference set is seeded here rather than in config. Verified against
  * the live Workpex Tags list; the dropdown sorts by name, which matches this (alphabetical) order.
  */
+/**
+ * The enquiry Category catalogue (Settings → Sales & CRM Configuration → Category).
+ *
+ * These two are the set the Workpex reference screen shows, and the pair that previously
+ * lived in `lookups.data.ts` before the catalogue became a table. Seeded here for the same
+ * reason tags are: the dropdown and the settings screen both read the table live.
+ */
+const CATEGORIES: readonly string[] = ['Default', 'Logistics'];
+
 const TAGS: readonly string[] = [
   'BDE RISK',
   'BDM APPROVED',
@@ -225,6 +234,17 @@ async function main(): Promise<void> {
       });
     }
     console.log(`[seed] ${TAGS.length} tags upserted.`);
+
+    // Upsert by unique name → idempotent: re-running never duplicates a category, and it
+    // never resets the status, order or parent a user has since changed.
+    for (const [position, name] of CATEGORIES.entries()) {
+      await prisma.category.upsert({
+        where: { name },
+        update: {},
+        create: { name, position },
+      });
+    }
+    console.log(`[seed] ${CATEGORIES.length} categories upserted.`);
   } finally {
     await prisma.$disconnect();
   }

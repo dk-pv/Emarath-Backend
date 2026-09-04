@@ -10,7 +10,7 @@ describe('HealthController', () => {
   const appConfig: AppConfig = {
     name: 'Emarath Backend',
     environment: 'development',
-    port: 5000,
+    port: 5001,
     apiPrefix: 'api',
     corsOrigin: ['http://localhost:3000'],
   };

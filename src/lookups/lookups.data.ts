@@ -64,8 +64,6 @@ const CALL_STATUS = [
 /** The dropdown offers these fixed counts; the field itself stores an integer. */
 const ATTEMPT_COUNT = ['0', '1', '2', '3', '4'] as const;
 
-const CATEGORY = ['Default', 'Logistics'] as const;
-
 const PAYMENT_METHOD = [
   'COD',
   'Account Transfer',
@@ -322,7 +320,6 @@ export const LOOKUP_DATA = {
   sources: options(SOURCE),
   callStatus: options(CALL_STATUS),
   attemptCounts: options(ATTEMPT_COUNT),
-  categories: options(CATEGORY),
   paymentMethods: options(PAYMENT_METHOD),
   complaintReasons: options(COMPLAINT_REASON),
   products: options(PRODUCT),

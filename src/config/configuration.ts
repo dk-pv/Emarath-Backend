@@ -48,7 +48,7 @@ function resolveEnvironment(): AppEnvironment {
 }
 
 function resolvePort(): number {
-  const raw = process.env.PORT ?? '5000';
+  const raw = process.env.PORT ?? '5001';
   const port = Number.parseInt(raw, 10);
 
   if (Number.isNaN(port) || port <= 0) {
