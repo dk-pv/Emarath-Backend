@@ -8,6 +8,10 @@ import {
   UpdateSalesCrmDuplicateDto,
 } from './dto/sales-crm-duplicate.dto';
 import {
+  OrganizationGeneralSettings,
+  UpdateOrganizationGeneralDto,
+} from './dto/organization-general.dto';
+import {
   SalesCrmGeneralSettings,
   UpdateSalesCrmGeneralDto,
 } from './dto/sales-crm-general.dto';
@@ -29,6 +33,20 @@ export class SettingsController {
     private readonly service: SettingsService,
     private readonly currentUser: CurrentUserService,
   ) {}
+
+  /** GET /api/settings/organization/general — the saved payload, or the defaults. */
+  @Get('organization/general')
+  getOrganizationGeneral(): Promise<OrganizationGeneralSettings> {
+    return this.service.getOrganizationGeneral();
+  }
+
+  /** PUT /api/settings/organization/general — replaces the payload; returns what was stored. */
+  @Put('organization/general')
+  saveOrganizationGeneral(
+    @Body() dto: UpdateOrganizationGeneralDto,
+  ): Promise<OrganizationGeneralSettings> {
+    return this.service.saveOrganizationGeneral(dto);
+  }
 
   /** GET /api/settings/sales-crm/duplicate — the saved payload, or the shipped defaults. */
   @Get('sales-crm/duplicate')

@@ -12,6 +12,12 @@ import {
   SALES_CRM_DUPLICATE_KEY,
   UpdateSalesCrmDuplicateDto,
 } from './dto/sales-crm-duplicate.dto';
+import {
+  ORGANIZATION_GENERAL_DEFAULTS,
+  ORGANIZATION_GENERAL_KEY,
+  UpdateOrganizationGeneralDto,
+  toMinutes,
+} from './dto/organization-general.dto';
 
 /**
  * Mocks held as locals so assertions never reference an unbound class method — the
@@ -322,5 +328,126 @@ describe('SettingsService — Duplicate Settings', () => {
     const log = storedValue(upsert).log as { changes: string[] }[];
     expect(log).toHaveLength(2);
     expect(log[1].changes).toEqual(['earlier']);
+  });
+});
+
+describe('SettingsService — Organization General Settings', () => {
+  const dto = (over: Partial<UpdateOrganizationGeneralDto> = {}) => ({
+    ...ORGANIZATION_GENERAL_DEFAULTS,
+    ...over,
+  });
+
+  const storedValue = (upsert: jest.Mock) =>
+    (
+      upsert.mock.calls[0] as [{ create: { value: Record<string, unknown> } }]
+    )[0].create.value;
+
+  it('returns the reference defaults when nothing is stored', async () => {
+    const { service, findUnique } = makeService();
+    findUnique.mockResolvedValue(null);
+
+    await expect(service.getOrganizationGeneral()).resolves.toEqual(
+      ORGANIZATION_GENERAL_DEFAULTS,
+    );
+  });
+
+  it('writes to its own key, leaving the other settings rows alone', async () => {
+    const { service, upsert } = makeService();
+
+    await service.saveOrganizationGeneral(dto({ currency: 'INR' }));
+
+    const [call] = upsert.mock.calls[0] as [{ where: { key: string } }];
+    expect(call.where.key).toBe(ORGANIZATION_GENERAL_KEY);
+    expect(call.where.key).not.toBe(SALES_CRM_GENERAL_KEY);
+    expect(call.where.key).not.toBe(SALES_CRM_DUPLICATE_KEY);
+  });
+
+  it('stores off days in weekday order, whatever order they were picked in', async () => {
+    const { service, upsert } = makeService();
+
+    await service.saveOrganizationGeneral(
+      dto({ offDays: ['Friday', 'Sunday', 'Wednesday'] }),
+    );
+
+    expect(storedValue(upsert).offDays).toEqual([
+      'Sunday',
+      'Wednesday',
+      'Friday',
+    ]);
+  });
+
+  it('falls back per field when a stored row is half-formed', async () => {
+    const { service, findUnique } = makeService();
+    findUnique.mockResolvedValue({
+      value: {
+        currency: 'NOT_A_CURRENCY',
+        dateDisplayFormat: 'nonsense',
+        tablePaginationLimit: 37,
+        shiftStartHour: 99,
+        shiftStartPeriod: 'XX',
+        offDays: ['Sunday', 'Blursday', 'Sunday'],
+        productModuleEnabled: true,
+      },
+    });
+
+    const settings = await service.getOrganizationGeneral();
+
+    expect(settings.currency).toBe('AED');
+    expect(settings.dateDisplayFormat).toBe('d-m-Y');
+    expect(settings.tablePaginationLimit).toBe(100);
+    expect(settings.shiftStartHour).toBe(10);
+    expect(settings.shiftStartPeriod).toBe('AM');
+    // Unknown names dropped, duplicates collapsed, week order restored.
+    expect(settings.offDays).toEqual(['Sunday']);
+    // The one valid field survives.
+    expect(settings.productModuleEnabled).toBe(true);
+  });
+
+  it('keeps a real stored payload intact', async () => {
+    const { service, findUnique } = makeService();
+    findUnique.mockResolvedValue({
+      value: {
+        ...ORGANIZATION_GENERAL_DEFAULTS,
+        currency: 'INR',
+        dateDisplayFormat: 'Y-m-d',
+        tablePaginationLimit: 20,
+        organizationalGrouping: true,
+        shiftStartHour: 9,
+        shiftStartMinute: 30,
+        shiftEndHour: 6,
+        offDays: ['Friday', 'Saturday'],
+      },
+    });
+
+    await expect(service.getOrganizationGeneral()).resolves.toMatchObject({
+      currency: 'INR',
+      dateDisplayFormat: 'Y-m-d',
+      tablePaginationLimit: 20,
+      organizationalGrouping: true,
+      shiftStartHour: 9,
+      shiftStartMinute: 30,
+      offDays: ['Friday', 'Saturday'],
+    });
+  });
+
+  it('accepts an empty off-days list', async () => {
+    const { service, upsert } = makeService();
+
+    await service.saveOrganizationGeneral(dto({ offDays: [] }));
+
+    expect(storedValue(upsert).offDays).toEqual([]);
+  });
+});
+
+describe('toMinutes', () => {
+  it('folds 12 AM to midnight and 12 PM to noon', () => {
+    expect(toMinutes(12, 0, 'AM')).toBe(0);
+    expect(toMinutes(12, 0, 'PM')).toBe(720);
+  });
+
+  it('places the reference shift correctly', () => {
+    expect(toMinutes(10, 0, 'AM')).toBe(600);
+    expect(toMinutes(7, 0, 'PM')).toBe(1140);
+    expect(toMinutes(10, 0, 'AM')).toBeLessThan(toMinutes(7, 0, 'PM'));
   });
 });
