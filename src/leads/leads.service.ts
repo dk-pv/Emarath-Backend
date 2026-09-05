@@ -9,6 +9,7 @@ import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { LeadCustomFieldsService } from '../lead-custom-fields/lead-custom-fields.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
+import { LeadAssignmentEngine } from '../assignment-rules/lead-assignment.engine';
 import type {
   BlockedDuplicateResponse,
   DuplicateMatchDto,
@@ -67,6 +68,7 @@ export class LeadsService {
     private readonly customFields: LeadCustomFieldsService,
     private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
+    private readonly assignment: LeadAssignmentEngine,
   ) {}
 
   async list(query: ListLeadsQueryDto): Promise<LeadListResponse> {
@@ -215,6 +217,18 @@ export class LeadsService {
 
     const assigneeIds = new Set(dto.assignedAgentIds ?? []);
     if (user.role === UserRole.SALES_AGENT) assigneeIds.add(user.id);
+
+    /*
+      Automatic assignment (Settings → Assignment) only fills a gap: a lead the form
+      already routed to someone keeps that choice, because an explicit assignee is a
+      decision and the rule is a fallback for when nobody made one. The engine returns
+      null whenever the feature is off, no active rule applies, or no agent is eligible,
+      and it never throws — an unassigned lead is the state this create had before.
+    */
+    if (assigneeIds.size === 0) {
+      const auto = await this.assignment.pickAssignee();
+      if (auto) assigneeIds.add(auto);
+    }
 
     const customFieldValues = await this.customFields.prepareValues(
       dto.customFields,

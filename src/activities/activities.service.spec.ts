@@ -7,6 +7,7 @@ import { ActivityType, Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { GpsService } from '../gps/gps.service';
+import { SettingsService } from '../settings/settings.service';
 import { ActivitiesService, LOCATION_GATE_MESSAGE } from './activities.service';
 import { CreateActivityDto } from './dto/create-activity.dto';
 
@@ -83,12 +84,25 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     hasValidCheckIn: gpsHasValidCheckIn,
   } as unknown as GpsService;
 
-  const service = new ActivitiesService(prisma, currentUser, gps);
+  // Settings → Activity and Reminders supplies the overdue rule; the shipped end-of-day
+  // rule keeps these expectations reading exactly as they did before it was configurable.
+  const getActivityGeneral = jest.fn().mockResolvedValue({
+    autoPromptFollowUpOnCompletion: true,
+    followUpMandatoryOnStatusChange: true,
+    remindersEnabled: true,
+    reminderTime: 'AT_TIME_OF_EVENT',
+    overdueMode: 'END_OF_DAY',
+    overdueAfterMinutes: 15,
+  });
+  const settings = { getActivityGeneral } as unknown as SettingsService;
+
+  const service = new ActivitiesService(prisma, currentUser, gps, settings);
   return {
     service,
     leadFindFirst,
     activityCreate,
     activityFindMany,
+    getActivityGeneral,
     activityCount,
     activityFindFirst,
     activityUpdate,
@@ -304,6 +318,59 @@ describe('ActivitiesService.list', () => {
     expect(row.title).toBe('Call with Acme');
     expect(row.lead.id).toBe(LEAD_ID);
     expect(row.assignees).toEqual([{ id: AGENT_ID, name: 'Agent Two' }]);
+  });
+
+  it('applies the configured overdue rule to the page and every tab count', async () => {
+    const { service, activityFindMany, activityCount, getActivityGeneral } =
+      makeService();
+    activityFindMany.mockReturnValue([]);
+    activityCount.mockReturnValue(0);
+    // Settings → Activity and Reminders: overdue 15 minutes after the due time.
+    getActivityGeneral.mockResolvedValue({
+      autoPromptFollowUpOnCompletion: true,
+      followUpMandatoryOnStatusChange: true,
+      remindersEnabled: true,
+      reminderTime: 'AT_TIME_OF_EVENT',
+      overdueMode: 'CUSTOM_TIME_SPAN',
+      overdueAfterMinutes: 15,
+    });
+
+    const before = Date.now();
+    await service.list({ bucket: 'overdue', page: 1, size: 100, ...BOUNDS });
+
+    const args = (activityFindMany.mock.calls as unknown[][])[0][0] as {
+      where: { AND: { dueAt?: { lt?: Date } }[] };
+    };
+    const cutoff = args.where.AND.at(-1)?.dueAt?.lt as Date;
+
+    // Fifteen minutes back from now, not midnight — the shipped rule would be todayStart.
+    expect(cutoff.getTime()).toBeGreaterThanOrEqual(before - 15 * 60_000);
+    expect(cutoff.getTime()).toBeLessThanOrEqual(
+      Date.now() - 15 * 60_000 + 5_000,
+    );
+
+    // The badge counts read the same instant, so a tab cannot disagree with its count.
+    const counted = (activityCount.mock.calls as unknown[][])[1][0] as {
+      where: { AND: { dueAt?: { lt?: Date } }[] };
+    };
+    expect(counted.where.AND.at(-1)?.dueAt?.lt).toEqual(cutoff);
+  });
+
+  it('falls back to the end-of-day rule when the settings row cannot be read', async () => {
+    const { service, activityFindMany, activityCount, getActivityGeneral } =
+      makeService();
+    activityFindMany.mockReturnValue([]);
+    activityCount.mockReturnValue(0);
+    getActivityGeneral.mockRejectedValue(new Error('settings unavailable'));
+
+    await service.list({ bucket: 'overdue', page: 1, size: 100, ...BOUNDS });
+
+    const args = (activityFindMany.mock.calls as unknown[][])[0][0] as {
+      where: { AND: { dueAt?: { lt?: Date } }[] };
+    };
+    expect(args.where.AND.at(-1)?.dueAt?.lt).toEqual(
+      new Date(BOUNDS.todayStart),
+    );
   });
 
   it('scopes a sales agent to their own activities', async () => {

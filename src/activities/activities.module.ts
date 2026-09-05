@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ActivitiesController } from './activities.controller';
 import { ActivitiesService } from './activities.service';
 import { GpsModule } from '../gps/gps.module';
+import { SettingsModule } from '../settings/settings.module';
 
 /**
  * The Activities feature. ACT-01.1 landed the data model; ACT-03.1 adds the
@@ -10,7 +11,8 @@ import { GpsModule } from '../gps/gps.module';
  * from AuthModule) are injected, so no imports are needed.
  */
 @Module({
-  imports: [GpsModule],
+  // SettingsModule exports the service holding the configured overdue rule.
+  imports: [GpsModule, SettingsModule],
   controllers: [ActivitiesController],
   providers: [ActivitiesService],
 })
