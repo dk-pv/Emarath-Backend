@@ -8,9 +8,14 @@ import { ActivityType, Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { GpsService, type CheckInVerification } from '../gps/gps.service';
+import { SettingsService } from '../settings/settings.service';
 import { leadScopeWhere } from '../leads/lead-scope';
 import { activityScopeWhere } from './activity-scope';
-import { activityBucketWhere, DayBoundaries } from './activity-buckets';
+import {
+  activityBucketWhere,
+  DayBoundaries,
+  type OverdueRule,
+} from './activity-buckets';
 import { activityFilterWhere, activitySearchWhere } from './activity-filters';
 import {
   activityDateWindowWhere,
@@ -70,6 +75,7 @@ export class ActivitiesService {
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
     private readonly gps: GpsService,
+    private readonly settings: SettingsService,
   ) {}
 
   /**
@@ -126,13 +132,22 @@ export class ActivitiesService {
     );
     if (dueRange) base.push(dueRange);
 
+    // The one overdue rule, read from Settings → Activity and Reminders. The page and
+    // every tab count share it, so a badge can never disagree with the tab it labels.
+    const overdueRule = await this.overdueRule();
+
     const where: Prisma.ActivityWhereInput = {
-      AND: [...base, activityBucketWhere(query.bucket, boundaries)],
+      AND: [
+        ...base,
+        activityBucketWhere(query.bucket, boundaries, overdueRule),
+      ],
     };
 
     const bucketCount = (bucket: Parameters<typeof activityBucketWhere>[0]) =>
       this.prisma.activity.count({
-        where: { AND: [...base, activityBucketWhere(bucket, boundaries)] },
+        where: {
+          AND: [...base, activityBucketWhere(bucket, boundaries, overdueRule)],
+        },
       });
 
     // One transaction, not two: the page, its total and the five tab counts all
@@ -352,6 +367,25 @@ export class ActivitiesService {
       select: ACTIVITY_SELECT,
     });
     return toActivityItem(created, source.lead.name);
+  }
+
+  /**
+   * "Make Appointment as Overdue", as a rule the bucket predicate can apply.
+   *
+   * A settings row that cannot be read must not take the worklist down with it, so a
+   * failure falls back to the shipped end-of-day rule rather than propagating.
+   */
+  private async overdueRule(): Promise<OverdueRule> {
+    try {
+      const general = await this.settings.getActivityGeneral();
+      return {
+        mode: general.overdueMode,
+        minutes: general.overdueAfterMinutes,
+        now: new Date(),
+      };
+    } catch {
+      return { mode: 'END_OF_DAY', minutes: 0, now: new Date() };
+    }
   }
 
   /**

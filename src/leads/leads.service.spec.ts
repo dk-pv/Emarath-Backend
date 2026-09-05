@@ -6,6 +6,7 @@ import { ListLeadsQueryDto } from './dto/list-leads-query.dto';
 import { LeadCustomFieldsService } from '../lead-custom-fields/lead-custom-fields.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
+import { LeadAssignmentEngine } from '../assignment-rules/lead-assignment.engine';
 import { SALES_CRM_DUPLICATE_DEFAULTS } from '../settings/dto/sales-crm-duplicate.dto';
 import { LeadsRepository } from './leads.repository';
 import { LeadsService } from './leads.service';
@@ -144,12 +145,20 @@ function makeService(
   const settings = {
     getSalesCrmDuplicate,
   } as unknown as SettingsService;
+  /*
+    The assignment engine is stubbed to "nothing applies", which is what it returns for a
+    tenant with no active rule — so these cases keep asserting the assignment behaviour
+    the form itself produces. Automatic assignment has its own suite.
+  */
+  const pickAssignee = jest.fn().mockResolvedValue(null);
+  const assignment = { pickAssignee } as unknown as LeadAssignmentEngine;
   const service = new LeadsService(
     repository,
     currentUser,
     customFields,
     prisma,
     settings,
+    assignment,
   );
   const dataOf = (call = 0): Prisma.LeadCreateInput =>
     (create.mock.calls[call] as [Prisma.LeadCreateInput])[0];

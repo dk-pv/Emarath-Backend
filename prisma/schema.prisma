@@ -159,6 +159,10 @@ model User {
   blockedEnquiries      BlockedEnquiry[]       @relation("BlockedEnquiryBlockedBy")
   /// Lead sources this user added (Settings → Sales & CRM Configuration → Lead Source).
   leadSourcesCreated    LeadSource[]           @relation("LeadSourceCreatedBy")
+  /// Settings → Communication → Templates: message templates this user authored.
+  messageTemplates      MessageTemplate[]      @relation("MessageTemplateCreatedBy")
+  /// Settings → Assignment → Assignment Rules: rules this user authored.
+  assignmentRules       AssignmentRule[]       @relation("AssignmentRuleCreatedBy")
   pipelinesCreated      Pipeline[]             @relation("PipelineCreatedBy")
   /// Pipelines that reassign their expired leads to this user (wizard step 3).
   pipelineReassignments Pipeline[]             @relation("PipelineReassignExpiredTo")
@@ -1387,4 +1391,132 @@ model PipelinePermission {
   /// The only read path: one pipeline's grants.
   @@index([pipelineId])
   @@map("pipeline_permissions")
+}
+
+/// Settings → Communication → Templates: the Email/WhatsApp message templates the
+/// Templates screen manages (ADR-0068).
+///
+/// A real table rather than an `app_settings` row, unlike its Organization Setup
+/// neighbours: this is a searched, filtered, paginated collection with per-row status and
+/// authorship, and the list is served straight from indexed columns.
+///
+/// Distinct from `whatsapp-templates.ts` on the frontend, which stands in for the BSP's
+/// own approved-template feed (INT-05.x, not built). These are templates the organisation
+/// authors here; those are templates Meta approves. Nothing joins the two yet.
+model MessageTemplate {
+  id      String                @id @default(uuid()) @db.Uuid
+  name    String                @db.VarChar(180)
+  type    MessageTemplateType
+  /// The editor's HTML. Validated against a tag allow-list on the way in, never sanitised
+  /// after the fact, so what is stored is exactly what was accepted.
+  content String
+  status  MessageTemplateStatus @default(ACTIVE)
+
+  createdById String? @map("created_by_id") @db.Uuid
+  createdBy   User?   @relation("MessageTemplateCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  /// Soft delete has no automatic filter yet (CLAUDE.md §11) — every query names it.
+  deletedAt DateTime? @map("deleted_at")
+
+  /// The list filters by type and status and searches by name, always within the live set.
+  @@index([deletedAt, type])
+  @@index([deletedAt, status])
+  @@index([deletedAt, name])
+  @@map("message_templates")
+}
+
+/// The two types the Add Template dropdown offers. Workpex's own data also carries a
+/// legacy "Text" row; the reference's create form and its type filter both offer only
+/// these two, so only these two are modelled.
+enum MessageTemplateType {
+  EMAIL
+  WHATSAPP
+}
+
+/// The two states the reference's Status column draws — a green check beside "Active",
+/// a red cross beside "Verification Pending".
+enum MessageTemplateStatus {
+  ACTIVE
+  VERIFICATION_PENDING
+}
+
+/// Settings → Assignment → Assignment Rules (ADR-0069): a named, ordered set of
+/// conditions deciding which users a new lead is distributed to.
+///
+/// A real table rather than an `app_settings` row, unlike the Assignment General Settings
+/// beside it: rules are searched, filtered by status, paged, individually edited and
+/// ordered, and each owns a list of configuration groups. A JSON blob would have to be
+/// read whole to answer "page 2 of the active ones".
+model AssignmentRule {
+  id          String              @id @default(uuid()) @db.Uuid
+  name        String              @db.VarChar(180)
+  description String              @db.VarChar(600)
+  algorithm   AssignmentAlgorithm @default(ROUND_ROBIN)
+  status      AssignmentRuleStatus @default(ACTIVE)
+
+  createdById String? @map("created_by_id") @db.Uuid
+  createdBy   User?   @relation("AssignmentRuleCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  groups AssignmentRuleGroup[]
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  /// Soft delete has no automatic filter yet (CLAUDE.md §11) — every query names it.
+  deletedAt DateTime? @map("deleted_at")
+
+  /// The list filters by status and searches by name, always within the live set; the
+  /// assignment engine reads the active ones in creation order.
+  @@index([deletedAt, status])
+  @@index([deletedAt, name])
+  @@map("assignment_rules")
+}
+
+/// One configuration group inside a rule — the wizard's step 2 cards.
+///
+/// `position` is the group's own order, which the drag handle rewrites. Ordering is a
+/// stored property, not a rendering accident: the reference numbers the cards, and the
+/// review step lists them by that number.
+model AssignmentRuleGroup {
+  id     String @id @default(uuid()) @db.Uuid
+  ruleId String @map("rule_id") @db.Uuid
+  rule   AssignmentRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  name     String @db.VarChar(180)
+  position Int
+  applyTo  AssignmentApplyTo @default(ALL_RECORDS) @map("apply_to")
+  target   AssignmentTarget  @default(ALL_USERS)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// Two groups of one rule never share a position, so the order is unambiguous.
+  @@unique([ruleId, position])
+  @@index([ruleId])
+  @@map("assignment_rule_groups")
+}
+
+/// The only algorithm the reference offers — its step 1 shows a single locked choice,
+/// "Assignment Algorithm | Round Robin". Modelled as an enum so a second one is an
+/// additive migration rather than a free-text field nothing validates.
+enum AssignmentAlgorithm {
+  ROUND_ROBIN
+}
+
+/// The reference's Status filter offers exactly these two.
+enum AssignmentRuleStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/// The reference's "Apply this rule to" dropdown shows one option, "All Records".
+enum AssignmentApplyTo {
+  ALL_RECORDS
+}
+
+/// The reference's "Assign Leads Based on The Rules to" dropdown shows one option,
+/// "All Users".
+enum AssignmentTarget {
+  ALL_USERS
 }
