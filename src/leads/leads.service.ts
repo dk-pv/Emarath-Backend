@@ -15,22 +15,6 @@ import type {
 } from '../settings/dto/sales-crm-duplicate.dto';
 import { duplicateWhere, matchedField } from './lead-duplicates';
 
-/** At most this many matches are reported; the warning names examples, not a list. */
-const MAX_DUPLICATE_MATCHES = 5;
-
-/** Just enough of a matched lead to explain the match and, optionally, name its owners. */
-const DUPLICATE_MATCH_SELECT = {
-  id: true,
-  name: true,
-  primaryPhone: true,
-  secondaryPhone: true,
-  email: true,
-  assignments: { select: { user: { select: { name: true } } } },
-} satisfies Prisma.LeadSelect;
-
-type DuplicateLeadRow = Prisma.LeadGetPayload<{
-  select: typeof DUPLICATE_MATCH_SELECT;
-}>;
 import { LeadsRepository } from './leads.repository';
 import { leadScopeWhere } from './lead-scope';
 import { buildLeadWhere } from './lead-where';
@@ -48,6 +32,23 @@ import {
 import { LeadFilterOptions } from './dto/lead-filter-options.dto';
 import { CreateLeadDto } from './dto/create-lead.dto';
 import { ListLeadsQueryDto } from './dto/list-leads-query.dto';
+
+/** At most this many matches are reported; the warning names examples, not a list. */
+const MAX_DUPLICATE_MATCHES = 5;
+
+/** Just enough of a matched lead to explain the match and, optionally, name its owners. */
+const DUPLICATE_MATCH_SELECT = {
+  id: true,
+  name: true,
+  primaryPhone: true,
+  secondaryPhone: true,
+  email: true,
+  assignments: { select: { user: { select: { name: true } } } },
+} satisfies Prisma.LeadSelect;
+
+type DuplicateLeadRow = Prisma.LeadGetPayload<{
+  select: typeof DUPLICATE_MATCH_SELECT;
+}>;
 
 /**
  * Lead reads (LEAD-02.1, LEAD-03.1, LEAD-03.2).
@@ -192,9 +193,13 @@ export class LeadsService {
     const user = await this.currentUser.resolve();
 
     // Duplicate Settings decides what happens next; the matching rule itself is fixed
-    // (primary phone, secondary phone, email) and is not configurable.
-    const duplicates = await this.findDuplicates(dto);
+    // (primary phone, secondary phone, email) and is not configurable. Read once and
+    // passed down, so creating a lead costs one settings read rather than two.
     const config = await this.settings.getSalesCrmDuplicate();
+    const duplicates = await this.findDuplicates(
+      dto,
+      config.checkArchivedLeads,
+    );
     if (duplicates.length > 0 && config.mode === 'BLOCK_HARD_STOP') {
       await this.recordBlockedEnquiry(dto, duplicates[0], user.id);
       const body: BlockedDuplicateResponse = {
@@ -461,9 +466,9 @@ export class LeadsService {
    */
   private async findDuplicates(
     dto: CreateLeadDto,
+    includeArchived: boolean,
   ): Promise<DuplicateLeadRow[]> {
-    const config = await this.settings.getSalesCrmDuplicate();
-    const where = duplicateWhere(dto, config.checkArchivedLeads);
+    const where = duplicateWhere(dto, includeArchived);
     if (!where) return [];
 
     return this.prisma.lead.findMany({

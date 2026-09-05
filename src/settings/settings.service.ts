@@ -29,6 +29,24 @@ import {
   SalesCrmDuplicateSettings,
   UpdateSalesCrmDuplicateDto,
 } from './dto/sales-crm-duplicate.dto';
+import {
+  DATE_DISPLAY_FORMATS,
+  DateDisplayFormat,
+  MAX_SHIFT_HOUR,
+  MAX_SHIFT_MINUTE,
+  MERIDIEMS,
+  Meridiem,
+  MIN_SHIFT_HOUR,
+  MIN_SHIFT_MINUTE,
+  ORGANIZATION_GENERAL_DEFAULTS,
+  ORGANIZATION_GENERAL_KEY,
+  OrganizationGeneralSettings,
+  PAGINATION_LIMITS,
+  PaginationLimit,
+  UpdateOrganizationGeneralDto,
+  WEEKDAYS,
+} from './dto/organization-general.dto';
+import { CURRENCY_CODES } from '../lookups/lookups.data';
 
 /**
  * App-global Settings, stored one JSON row per screen in `app_settings`.
@@ -42,6 +60,51 @@ import {
 @Injectable()
 export class SettingsService {
   constructor(private readonly prisma: PrismaService) {}
+
+  /** The Organization → General Settings payload, or the shipped defaults. */
+  async getOrganizationGeneral(): Promise<OrganizationGeneralSettings> {
+    const row = await this.prisma.appSetting.findUnique({
+      where: { key: ORGANIZATION_GENERAL_KEY },
+      select: { value: true },
+    });
+    return toOrganizationGeneral(row?.value);
+  }
+
+  /**
+   * Replaces the whole payload; one row per key, created on first save.
+   *
+   * Off days are stored in weekday order rather than click order, so the chips read the
+   * same way whatever sequence they were picked in.
+   */
+  async saveOrganizationGeneral(
+    dto: UpdateOrganizationGeneralDto,
+  ): Promise<OrganizationGeneralSettings> {
+    const settings: OrganizationGeneralSettings = {
+      currency: dto.currency,
+      dateDisplayFormat: dto.dateDisplayFormat,
+      tablePaginationLimit: dto.tablePaginationLimit,
+      organizationalGrouping: dto.organizationalGrouping,
+      shiftStartHour: dto.shiftStartHour,
+      shiftStartMinute: dto.shiftStartMinute,
+      shiftStartPeriod: dto.shiftStartPeriod,
+      shiftEndHour: dto.shiftEndHour,
+      shiftEndMinute: dto.shiftEndMinute,
+      shiftEndPeriod: dto.shiftEndPeriod,
+      offDays: [...WEEKDAYS].filter((day) => dto.offDays.includes(day)),
+      productModuleEnabled: dto.productModuleEnabled,
+    };
+
+    await this.prisma.appSetting.upsert({
+      where: { key: ORGANIZATION_GENERAL_KEY },
+      update: { value: settings as unknown as Prisma.InputJsonValue },
+      create: {
+        key: ORGANIZATION_GENERAL_KEY,
+        value: settings as unknown as Prisma.InputJsonValue,
+      },
+      select: { id: true },
+    });
+    return settings;
+  }
 
   /** The Sales & CRM → Duplicate Settings payload, or the shipped defaults. */
   async getSalesCrmDuplicate(): Promise<SalesCrmDuplicateSettings> {
@@ -348,4 +411,68 @@ function describeDuplicateChanges(
     if (was !== now) changes.push(`${label} turned ${now ? 'on' : 'off'}`);
   }
   return changes;
+}
+
+/**
+ * Reads a stored organization payload defensively, as the other screens are read: every
+ * field falls back to its shipped default individually, so a row written before a field
+ * existed — or hand-edited — costs that one value rather than the whole screen.
+ */
+function toOrganizationGeneral(value: unknown): OrganizationGeneralSettings {
+  const raw = (value ?? {}) as Record<string, unknown>;
+  const d = ORGANIZATION_GENERAL_DEFAULTS;
+
+  const bool = (key: keyof OrganizationGeneralSettings): boolean =>
+    typeof raw[key] === 'boolean' ? raw[key] : (d[key] as boolean);
+
+  const clock = (
+    key: keyof OrganizationGeneralSettings,
+    min: number,
+    max: number,
+  ) => {
+    const candidate = raw[key];
+    return typeof candidate === 'number' &&
+      Number.isInteger(candidate) &&
+      candidate >= min &&
+      candidate <= max
+      ? candidate
+      : (d[key] as number);
+  };
+
+  const meridiem = (key: keyof OrganizationGeneralSettings): Meridiem =>
+    MERIDIEMS.includes(raw[key] as Meridiem)
+      ? (raw[key] as Meridiem)
+      : (d[key] as Meridiem);
+
+  return {
+    currency: CURRENCY_CODES.includes(raw.currency as string)
+      ? (raw.currency as string)
+      : d.currency,
+    dateDisplayFormat: DATE_DISPLAY_FORMATS.includes(
+      raw.dateDisplayFormat as DateDisplayFormat,
+    )
+      ? (raw.dateDisplayFormat as DateDisplayFormat)
+      : d.dateDisplayFormat,
+    tablePaginationLimit: PAGINATION_LIMITS.includes(
+      raw.tablePaginationLimit as PaginationLimit,
+    )
+      ? (raw.tablePaginationLimit as PaginationLimit)
+      : d.tablePaginationLimit,
+    organizationalGrouping: bool('organizationalGrouping'),
+    shiftStartHour: clock('shiftStartHour', MIN_SHIFT_HOUR, MAX_SHIFT_HOUR),
+    shiftStartMinute: clock(
+      'shiftStartMinute',
+      MIN_SHIFT_MINUTE,
+      MAX_SHIFT_MINUTE,
+    ),
+    shiftStartPeriod: meridiem('shiftStartPeriod'),
+    shiftEndHour: clock('shiftEndHour', MIN_SHIFT_HOUR, MAX_SHIFT_HOUR),
+    shiftEndMinute: clock('shiftEndMinute', MIN_SHIFT_MINUTE, MAX_SHIFT_MINUTE),
+    shiftEndPeriod: meridiem('shiftEndPeriod'),
+    // Unknown or duplicated day names are dropped, and the rest come back in week order.
+    offDays: Array.isArray(raw.offDays)
+      ? [...WEEKDAYS].filter((day) => (raw.offDays as unknown[]).includes(day))
+      : d.offDays,
+    productModuleEnabled: bool('productModuleEnabled'),
+  };
 }
