@@ -33,6 +33,9 @@ import { StorageModule } from './storage/storage.module';
 import { UsersModule } from './users/users.module';
 import { SavedFiltersModule } from './saved-filters/saved-filters.module';
 import { CategoriesModule } from './categories/categories.module';
+import { PipelinesModule } from './pipelines/pipelines.module';
+import { LeadSourcesModule } from './lead-sources/lead-sources.module';
+import { TagsModule } from './tags/tags.module';
 import { SettingsModule } from './settings/settings.module';
 import { ViewPreferencesModule } from './view-preferences/view-preferences.module';
 
@@ -54,6 +57,9 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     StorageModule,
     ActivitiesModule,
     CategoriesModule,
+    PipelinesModule,
+    LeadSourcesModule,
+    TagsModule,
     AuthModule,
     CallsModule,
     DashboardModule,

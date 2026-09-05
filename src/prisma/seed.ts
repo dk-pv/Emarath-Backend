@@ -18,6 +18,7 @@ import 'dotenv/config';
 import bcrypt from 'bcryptjs';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient, UserRole } from '../generated/prisma/client';
+import { SOURCE } from '../lookups/lookups.data';
 
 /**
  * The initial stage catalogue for the default board (KAN-05.1). Transcribed from
@@ -63,6 +64,22 @@ const STAGES: ReadonlyArray<{ name: string; color: string }> = [
  * reason tags are: the dropdown and the settings screen both read the table live.
  */
 const CATEGORIES: readonly string[] = ['Default', 'Logistics'];
+
+/**
+ * The sales pipelines (Settings → Sales & CRM Configuration → Sales Pipeline).
+ *
+ * These four are the set the reference screen shows, and the set that previously lived in
+ * `lookups.data.ts` before the catalogue became a table — `Lead.pipeline` rows already
+ * carry these names. `Lead Pipeline` is the default, as the reference badge shows. No
+ * short codes: the reference list has no such column, and inventing one would be inventing
+ * data (the create form requires one for every pipeline made from here on).
+ */
+const PIPELINES: readonly string[] = [
+  'Lead Pipeline',
+  'Complaints',
+  'LOGISTICS',
+  'QC',
+];
 
 const TAGS: readonly string[] = [
   'BDE RISK',
@@ -245,6 +262,30 @@ async function main(): Promise<void> {
       });
     }
     console.log(`[seed] ${CATEGORIES.length} categories upserted.`);
+
+    // Upsert by unique name → idempotent: re-running never duplicates a pipeline, and it
+    // never resets a short code or a default a user has since changed.
+    for (const name of PIPELINES) {
+      await prisma.pipeline.upsert({
+        where: { name },
+        update: {},
+        create: { name, isDefault: name === DEFAULT_PIPELINE },
+      });
+    }
+    console.log(`[seed] ${PIPELINES.length} pipelines upserted.`);
+
+    // The lead source catalogue. Upsert by unique name → idempotent, and `update: {}` so
+    // re-running never reactivates a source a user has deactivated. The catalogue's own
+    // migration additionally back-fills any source value existing leads already carry, so
+    // no lead can sit on a source the catalogue does not list.
+    for (const name of SOURCE) {
+      await prisma.leadSource.upsert({
+        where: { name },
+        update: {},
+        create: { name },
+      });
+    }
+    console.log(`[seed] ${SOURCE.length} lead sources upserted.`);
   } finally {
     await prisma.$disconnect();
   }

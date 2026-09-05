@@ -7,6 +7,11 @@ import {
   SalesCrmGeneralSettings,
   UpdateSalesCrmGeneralDto,
 } from './dto/sales-crm-general.dto';
+import {
+  SALES_CRM_DUPLICATE_DEFAULTS,
+  SALES_CRM_DUPLICATE_KEY,
+  UpdateSalesCrmDuplicateDto,
+} from './dto/sales-crm-duplicate.dto';
 
 /**
  * Mocks held as locals so assertions never reference an unbound class method — the
@@ -15,11 +20,18 @@ import {
 function makeService() {
   const findUnique = jest.fn();
   const upsert = jest.fn().mockResolvedValue(undefined);
+  const userFindUnique = jest.fn().mockResolvedValue({ name: 'Emarath Admin' });
   const prisma = {
     appSetting: { findUnique, upsert },
+    user: { findUnique: userFindUnique },
   } as unknown as PrismaService;
 
-  return { service: new SettingsService(prisma), findUnique, upsert };
+  return {
+    service: new SettingsService(prisma),
+    findUnique,
+    upsert,
+    userFindUnique,
+  };
 }
 
 /** The one upsert argument shape the assertions read back. */
@@ -176,5 +188,139 @@ describe('SettingsService', () => {
         toSalesCrmGeneral({ maskingRole: UserRole.SALES_AGENT }).maskingRole,
       ).toBe(UserRole.SALES_AGENT);
     });
+  });
+});
+
+describe('SettingsService — Duplicate Settings', () => {
+  const dto = (over: Partial<UpdateSalesCrmDuplicateDto> = {}) => ({
+    mode: SALES_CRM_DUPLICATE_DEFAULTS.mode,
+    allowDuplicateSearch: SALES_CRM_DUPLICATE_DEFAULTS.allowDuplicateSearch,
+    displayAssigneeInfo: SALES_CRM_DUPLICATE_DEFAULTS.displayAssigneeInfo,
+    checkArchivedLeads: SALES_CRM_DUPLICATE_DEFAULTS.checkArchivedLeads,
+    ...over,
+  });
+
+  const storedValue = (upsert: jest.Mock) =>
+    (
+      upsert.mock.calls[0] as [{ create: { value: Record<string, unknown> } }]
+    )[0].create.value;
+
+  it('returns the shipped defaults when nothing is stored', async () => {
+    const { service, findUnique } = makeService();
+    findUnique.mockResolvedValue(null);
+
+    await expect(service.getSalesCrmDuplicate()).resolves.toEqual(
+      SALES_CRM_DUPLICATE_DEFAULTS,
+    );
+  });
+
+  it('falls back per field when a stored row is half-formed', async () => {
+    const { service, findUnique } = makeService();
+    findUnique.mockResolvedValue({
+      value: {
+        mode: 'NONSENSE',
+        allowDuplicateSearch: 'yes',
+        checkArchivedLeads: true,
+      },
+    });
+
+    const settings = await service.getSalesCrmDuplicate();
+
+    expect(settings.mode).toBe('WARN_ALLOW_SAVE');
+    expect(settings.allowDuplicateSearch).toBe(true);
+    // The one valid field survives.
+    expect(settings.checkArchivedLeads).toBe(true);
+  });
+
+  it('writes to its own key, leaving the general settings row alone', async () => {
+    const { service, findUnique, upsert } = makeService();
+    findUnique.mockResolvedValue(null);
+
+    await service.saveSalesCrmDuplicate(dto({ mode: 'BLOCK_HARD_STOP' }), 'u1');
+
+    const [call] = upsert.mock.calls[0] as [{ where: { key: string } }];
+    expect(call.where.key).toBe(SALES_CRM_DUPLICATE_KEY);
+    expect(call.where.key).not.toBe(SALES_CRM_GENERAL_KEY);
+  });
+
+  it('keeps the block toggles while Warn is selected, so switching back restores them', async () => {
+    const { service, findUnique, upsert } = makeService();
+    findUnique.mockResolvedValue(null);
+
+    await service.saveSalesCrmDuplicate(
+      dto({
+        mode: 'WARN_ALLOW_SAVE',
+        displayAssigneeInfo: true,
+        checkArchivedLeads: true,
+      }),
+      'u1',
+    );
+
+    expect(storedValue(upsert)).toMatchObject({
+      mode: 'WARN_ALLOW_SAVE',
+      displayAssigneeInfo: true,
+      checkArchivedLeads: true,
+    });
+  });
+
+  it('logs a mode change with the author’s name', async () => {
+    const { service, findUnique, upsert } = makeService();
+    findUnique.mockResolvedValue(null);
+
+    await service.saveSalesCrmDuplicate(dto({ mode: 'BLOCK_HARD_STOP' }), 'u1');
+
+    const log = storedValue(upsert).log as {
+      byName: string;
+      changes: string[];
+    }[];
+    expect(log).toHaveLength(1);
+    expect(log[0].byName).toBe('Emarath Admin');
+    expect(log[0].changes[0]).toContain('Warn, allow save');
+    expect(log[0].changes[0]).toContain('Block, hard stop');
+  });
+
+  it('logs one line per toggle that actually changed', async () => {
+    const { service, findUnique, upsert } = makeService();
+    findUnique.mockResolvedValue(null);
+
+    await service.saveSalesCrmDuplicate(
+      dto({ allowDuplicateSearch: false, checkArchivedLeads: true }),
+      'u1',
+    );
+
+    const log = storedValue(upsert).log as { changes: string[] }[];
+    expect(log[0].changes).toHaveLength(2);
+  });
+
+  it('records nothing — and looks up no user — when a save changes nothing', async () => {
+    const { service, findUnique, upsert, userFindUnique } = makeService();
+    findUnique.mockResolvedValue(null);
+
+    await service.saveSalesCrmDuplicate(dto(), 'u1');
+
+    expect(storedValue(upsert).log).toEqual([]);
+    expect(userFindUnique).not.toHaveBeenCalled();
+  });
+
+  it('keeps earlier entries, newest first', async () => {
+    const { service, findUnique, upsert } = makeService();
+    findUnique.mockResolvedValue({
+      value: {
+        ...SALES_CRM_DUPLICATE_DEFAULTS,
+        log: [
+          {
+            at: '2026-01-01T00:00:00.000Z',
+            byName: 'Old',
+            changes: ['earlier'],
+          },
+        ],
+      },
+    });
+
+    await service.saveSalesCrmDuplicate(dto({ mode: 'BLOCK_HARD_STOP' }), 'u1');
+
+    const log = storedValue(upsert).log as { changes: string[] }[];
+    expect(log).toHaveLength(2);
+    expect(log[1].changes).toEqual(['earlier']);
   });
 });

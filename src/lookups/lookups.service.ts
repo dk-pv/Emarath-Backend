@@ -11,7 +11,7 @@ import {
 /**
  * Serves the New Lead form's dropdown options (ADR-0005, Phase 1).
  *
- * Most lists are config-backed (`lookups.data.ts`). Three are read from the database
+ * Most lists are config-backed (`lookups.data.ts`). Several are read from the database
  * so the form always reflects live, user-managed data: `tags` from the `Tag` table
  * (LEAD-12.1), `categories` from the `Category` catalogue, and `leadStatus` from the `Stage` catalogue (KAN-05.1) — the same
  * canonical source the board and list badges read, so the status dropdown can no
@@ -26,15 +26,23 @@ export class LookupsService {
     if (type === 'tags') return this.tags();
     if (type === 'leadStatus') return this.stages();
     if (type === 'categories') return this.categories();
+    if (type === 'sources') return this.sources();
+    if (type === 'pipelines') return this.pipelines();
     if (type === 'teams') return this.teams();
     if (isConfigLookup(type)) return [...LOOKUP_DATA[type]];
     throw new NotFoundException(`Unknown lookup type: ${type}`);
   }
 
-  /** Tags carry an id as their value (create takes tag ids), unlike config lists. */
+  /**
+   * Tags carry an id as their value (create takes tag ids), unlike config lists.
+   *
+   * Active, undeleted rows only: a retired tag stays on the leads already carrying it —
+   * nothing rewrites `LeadTag` — but is not offered for new assignments, the same rule
+   * the category and lead-source lookups follow.
+   */
   private async tags(): Promise<LookupOption[]> {
     const tags = await this.prisma.tag.findMany({
-      where: { deletedAt: null },
+      where: { deletedAt: null, isActive: true },
       select: { id: true, name: true },
       orderBy: { name: 'asc' },
     });
@@ -66,6 +74,38 @@ export class LookupsService {
       where: { isActive: true },
       select: { name: true },
       orderBy: [{ position: 'asc' }, { name: 'asc' }],
+    });
+    return rows.map((row) => ({ value: row.name, label: row.name }));
+  }
+
+  /**
+   * Lead sources, read from the `LeadSource` catalogue the Settings screen manages.
+   *
+   * Only active ones are offered: a deactivated source stays on the leads that already
+   * carry it — nothing rewrites their `Lead.source` — but new leads should not be filed
+   * under a source the business has retired. The value IS the name, which is what
+   * `Lead.source` stores, so this replaces the old hard-coded list without changing a
+   * single stored value.
+   */
+  private async sources(): Promise<LookupOption[]> {
+    const rows = await this.prisma.leadSource.findMany({
+      where: { isActive: true },
+      select: { name: true },
+      orderBy: { name: 'asc' },
+    });
+    return rows.map((row) => ({ value: row.name, label: row.name }));
+  }
+
+  /**
+   * The sales pipelines, read from the `Pipeline` catalogue the Settings screen manages.
+   * Default first, then oldest first — the same order the settings list shows, so the
+   * pickers open on the pipeline new leads land in. The value IS the name, which is what
+   * `Lead.pipeline`, `Stage.pipeline` and `User.pipelines[]` all store.
+   */
+  private async pipelines(): Promise<LookupOption[]> {
+    const rows = await this.prisma.pipeline.findMany({
+      select: { name: true },
+      orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
     });
     return rows.map((row) => ({ value: row.name, label: row.name }));
   }

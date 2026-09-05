@@ -11,7 +11,6 @@ import { CurrentUserService } from '../auth/current-user';
 import { RefreshTokenService } from '../auth/refresh-token.service';
 import { StorageService } from '../storage/storage.service';
 import { extensionOf } from '../storage/storage-policy';
-import { LOOKUP_DATA } from '../lookups/lookups.data';
 import {
   CreateUserDto,
   ListUsersQueryDto,
@@ -30,11 +29,6 @@ const BCRYPT_ROUNDS = 10;
 const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
 const AVATAR_EXTENSIONS = new Set(['png', 'jpg', 'jpeg']);
 
-/** The pipeline values the wizard may store — the same lookup the Lead form reads. */
-const PIPELINE_VALUES = new Set(
-  LOOKUP_DATA.pipelines.map((option) => option.value),
-);
-
 /**
  * Columns the roster returns. `passwordHash` is not listed, so no response built from
  * this select can leak it — the guarantee is structural rather than a strip-after-read.
@@ -49,6 +43,9 @@ const USER_SELECT = {
   role: true,
   roleId: true,
   orgRole: { select: { name: true } },
+  /// The reporting line, so a consumer can build the org tree from one page rather than
+  /// a detail call per member (the pipeline wizard's "Reassign Expired Leads To").
+  reportingToId: true,
   jobTitle: true,
   phone: true,
   team: true,
@@ -62,7 +59,6 @@ const USER_SELECT = {
 
 const USER_DETAIL_SELECT = {
   ...USER_SELECT,
-  reportingToId: true,
   reportingTo: { select: { name: true } },
   leadFormId: true,
   pipelines: true,
@@ -458,9 +454,21 @@ export class UsersService {
       }
     }
 
-    for (const pipeline of dto.pipelines ?? []) {
-      if (!PIPELINE_VALUES.has(pipeline)) {
-        throw new BadRequestException(`"${pipeline}" is not a known pipeline.`);
+    // Pipelines are a managed catalogue now (ADR-0059), so the grants are checked against
+    // the table the Settings screen writes rather than a static list that could drift.
+    const wantedPipelines = dto.pipelines ?? [];
+    if (wantedPipelines.length > 0) {
+      const known = await this.prisma.pipeline.findMany({
+        where: { name: { in: wantedPipelines } },
+        select: { name: true },
+      });
+      const names = new Set(known.map((row) => row.name));
+      for (const pipeline of wantedPipelines) {
+        if (!names.has(pipeline)) {
+          throw new BadRequestException(
+            `"${pipeline}" is not a known pipeline.`,
+          );
+        }
       }
     }
 

@@ -26,8 +26,6 @@ function options(values: readonly string[]): LookupOption[] {
 // `LookupsService` serves `leadStatus` from that table; there is no hard-coded copy.
 
 /** Pipeline/board — separate axis from status (ADR-0005). Default "Lead Pipeline". */
-const PIPELINE = ['Lead Pipeline', 'Complaints', 'LOGISTICS', 'QC'] as const;
-
 const LANGUAGE = [
   'Malayalam',
   'English',
@@ -37,7 +35,15 @@ const LANGUAGE = [
   'Others',
 ] as const;
 
-const SOURCE = [
+/**
+ * The seed list for the `LeadSource` catalogue — no longer what the API serves.
+ *
+ * `GET /api/lookups/sources` reads the `lead_sources` table (the Settings screen manages
+ * it), exactly as `categories` reads the `Category` table. This array remains the
+ * deterministic set the seeds create, so a fresh database starts with the same sources
+ * it always did; editing it changes what is seeded, not what the API returns.
+ */
+export const SOURCE = [
   'Broadcast',
   'Cancel/Reorder',
   'Complaint',
@@ -315,8 +321,8 @@ const LOST_REASON = [
 ];
 
 export const LOOKUP_DATA = {
-  pipelines: options(PIPELINE),
   languages: options(LANGUAGE),
+  /** Seed/dev-dataset only; the live list comes from the catalogue (see `SOURCE`). */
   sources: options(SOURCE),
   callStatus: options(CALL_STATUS),
   attemptCounts: options(ATTEMPT_COUNT),

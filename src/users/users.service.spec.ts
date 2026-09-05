@@ -85,6 +85,22 @@ function makeService(actorId = ACTOR) {
   const findUniqueOrThrow = jest.fn();
   const roleFindFirst = jest.fn();
   const leadFormFindFirst = jest.fn();
+  // Pipelines are a managed catalogue now (ADR-0059), so the wizard's grants are checked
+  // against the table. The mock answers with whichever requested names actually exist.
+  const KNOWN_PIPELINES = new Set([
+    'Lead Pipeline',
+    'Complaints',
+    'LOGISTICS',
+    'QC',
+  ]);
+  const pipelineFindMany = jest.fn(
+    (args: { where: { name: { in: string[] } } }) =>
+      Promise.resolve(
+        args.where.name.in
+          .filter((name) => KNOWN_PIPELINES.has(name))
+          .map((name) => ({ name })),
+      ),
+  );
   const permissionDeleteMany = jest.fn();
   const permissionCreateMany = jest.fn();
   const revokeAllForUser = jest.fn().mockResolvedValue(undefined);
@@ -108,6 +124,7 @@ function makeService(actorId = ACTOR) {
     user: { findMany, findFirst, count, create, update, findUniqueOrThrow },
     role: { findFirst: roleFindFirst },
     leadForm: { findFirst: leadFormFindFirst },
+    pipeline: { findMany: pipelineFindMany },
     userModulePermission: {
       deleteMany: permissionDeleteMany,
       createMany: permissionCreateMany,
@@ -137,6 +154,7 @@ function makeService(actorId = ACTOR) {
     findUniqueOrThrow,
     roleFindFirst,
     leadFormFindFirst,
+    pipelineFindMany,
     permissionDeleteMany,
     permissionCreateMany,
     revokeAllForUser,
@@ -281,7 +299,7 @@ describe('UsersService.create', () => {
     expect(create).not.toHaveBeenCalled();
   });
 
-  it('rejects a pipeline that is not in the lookup', async () => {
+  it('rejects a pipeline that is not in the catalogue', async () => {
     const { service, create } = arrange();
 
     await expect(
