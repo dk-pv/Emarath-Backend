@@ -1,11 +1,36 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { LeadCustomFieldsService } from '../lead-custom-fields/lead-custom-fields.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { SettingsService } from '../settings/settings.service';
+import type {
+  BlockedDuplicateResponse,
+  DuplicateMatchDto,
+} from '../settings/dto/sales-crm-duplicate.dto';
+import { duplicateWhere, matchedField } from './lead-duplicates';
+
+/** At most this many matches are reported; the warning names examples, not a list. */
+const MAX_DUPLICATE_MATCHES = 5;
+
+/** Just enough of a matched lead to explain the match and, optionally, name its owners. */
+const DUPLICATE_MATCH_SELECT = {
+  id: true,
+  name: true,
+  primaryPhone: true,
+  secondaryPhone: true,
+  email: true,
+  assignments: { select: { user: { select: { name: true } } } },
+} satisfies Prisma.LeadSelect;
+
+type DuplicateLeadRow = Prisma.LeadGetPayload<{
+  select: typeof DUPLICATE_MATCH_SELECT;
+}>;
 import { LeadsRepository } from './leads.repository';
 import { leadScopeWhere } from './lead-scope';
 import { buildLeadWhere } from './lead-where';
@@ -39,6 +64,8 @@ export class LeadsService {
     private readonly repository: LeadsRepository,
     private readonly currentUser: CurrentUserService,
     private readonly customFields: LeadCustomFieldsService,
+    private readonly prisma: PrismaService,
+    private readonly settings: SettingsService,
   ) {}
 
   async list(query: ListLeadsQueryDto): Promise<LeadListResponse> {
@@ -163,6 +190,23 @@ export class LeadsService {
    */
   async create(dto: CreateLeadDto): Promise<LeadListItem> {
     const user = await this.currentUser.resolve();
+
+    // Duplicate Settings decides what happens next; the matching rule itself is fixed
+    // (primary phone, secondary phone, email) and is not configurable.
+    const duplicates = await this.findDuplicates(dto);
+    const config = await this.settings.getSalesCrmDuplicate();
+    if (duplicates.length > 0 && config.mode === 'BLOCK_HARD_STOP') {
+      await this.recordBlockedEnquiry(dto, duplicates[0], user.id);
+      const body: BlockedDuplicateResponse = {
+        message:
+          'This enquiry duplicates an existing lead, so it was not created. It has been logged to the Duplicate report.',
+        mode: config.mode,
+        matches: duplicates.map((match) =>
+          this.toMatch(match, dto, config.displayAssigneeInfo),
+        ),
+      };
+      throw new ConflictException(body);
+    }
 
     const assigneeIds = new Set(dto.assignedAgentIds ?? []);
     if (user.role === UserRole.SALES_AGENT) assigneeIds.add(user.id);
@@ -404,6 +448,79 @@ export class LeadsService {
     query: ListLeadsQueryDto,
   ): Prisma.LeadWhereInput {
     return buildLeadWhere(user, query);
+  }
+
+  /**
+   * Leads this enquiry duplicates, newest first.
+   *
+   * One indexed query against the fixed match fields; the only configurable input is
+   * whether archived (soft-deleted) leads count, which is the reference's "Check archived
+   * leads for duplicates?" toggle. Scope is deliberately *not* applied: a duplicate is a
+   * duplicate whoever owns it, and letting an agent create a second copy of a lead they
+   * cannot see is exactly the problem this setting exists to prevent.
+   */
+  private async findDuplicates(
+    dto: CreateLeadDto,
+  ): Promise<DuplicateLeadRow[]> {
+    const config = await this.settings.getSalesCrmDuplicate();
+    const where = duplicateWhere(dto, config.checkArchivedLeads);
+    if (!where) return [];
+
+    return this.prisma.lead.findMany({
+      where,
+      select: DUPLICATE_MATCH_SELECT,
+      orderBy: { createdAt: 'desc' },
+      take: MAX_DUPLICATE_MATCHES,
+    });
+  }
+
+  /**
+   * Records an enquiry Block mode refused, so the attempt is not lost — no `Lead` row is
+   * created in that mode, so nothing else would remember it.
+   */
+  private async recordBlockedEnquiry(
+    dto: CreateLeadDto,
+    match: DuplicateLeadRow,
+    actorId: string,
+  ): Promise<void> {
+    await this.prisma.blockedEnquiry.create({
+      data: {
+        name: dto.name,
+        primaryPhone: dto.primaryPhone,
+        secondaryPhone: dto.secondaryPhone ?? null,
+        email: dto.email ?? null,
+        matchedLeadId: match.id,
+        matchedOn: matchedField(dto, match),
+        blockedById: actorId,
+      },
+      select: { id: true },
+    });
+  }
+
+  /**
+   * One matched lead as the client sees it.
+   *
+   * `assignees` is omitted entirely unless "Display Assignee Information for Duplicate
+   * Leads" is on — the key is absent from the payload, so the information cannot leak
+   * through a field the client merely chooses not to render.
+   */
+  private toMatch(
+    lead: DuplicateLeadRow,
+    dto: CreateLeadDto,
+    showAssignees: boolean,
+  ): DuplicateMatchDto {
+    return {
+      id: lead.id,
+      name: lead.name,
+      matchedOn: matchedField(dto, lead),
+      ...(showAssignees
+        ? {
+            assignees: lead.assignments.map(
+              (assignment) => assignment.user.name,
+            ),
+          }
+        : {}),
+    };
   }
 
   /**

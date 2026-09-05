@@ -41,7 +41,7 @@ const S3_CONFIG: StorageConfig = {
   maxBytes: 1024,
   allowedExtensions: ['png', 'pdf'],
   localDir: '.storage',
-  localBaseUrl: 'http://localhost:5000/api',
+  localBaseUrl: 'http://localhost:5001/api',
   localSigningSecret: 'x',
 };
 

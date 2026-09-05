@@ -1,9 +1,12 @@
-import { NotFoundException } from '@nestjs/common';
+import { NotFoundException, ConflictException } from '@nestjs/common';
 import { CurrentUserService } from '../auth/current-user';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { CreateLeadDto } from './dto/create-lead.dto';
 import { ListLeadsQueryDto } from './dto/list-leads-query.dto';
 import { LeadCustomFieldsService } from '../lead-custom-fields/lead-custom-fields.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { SettingsService } from '../settings/settings.service';
+import { SALES_CRM_DUPLICATE_DEFAULTS } from '../settings/dto/sales-crm-duplicate.dto';
 import { LeadsRepository } from './leads.repository';
 import { LeadsService } from './leads.service';
 
@@ -127,12 +130,35 @@ function makeService(
   const customFields = {
     prepareValues,
   } as unknown as LeadCustomFieldsService;
-  const service = new LeadsService(repository, currentUser, customFields);
+  // Duplicate handling has its own suite; here no lead ever matches, so the create
+  // assertions below stay focused on the payload rather than the duplicate policy.
+  const leadFindMany = jest.fn().mockResolvedValue([]);
+  const blockedCreate = jest.fn();
+  const prisma = {
+    lead: { findMany: leadFindMany },
+    blockedEnquiry: { create: blockedCreate },
+  } as unknown as PrismaService;
+  const getSalesCrmDuplicate = jest
+    .fn()
+    .mockResolvedValue(SALES_CRM_DUPLICATE_DEFAULTS);
+  const settings = {
+    getSalesCrmDuplicate,
+  } as unknown as SettingsService;
+  const service = new LeadsService(
+    repository,
+    currentUser,
+    customFields,
+    prisma,
+    settings,
+  );
   const dataOf = (call = 0): Prisma.LeadCreateInput =>
     (create.mock.calls[call] as [Prisma.LeadCreateInput])[0];
   const updateArgsOf = (call = 0): UpdateArgs =>
     (update.mock.calls[call] as [string, UpdateArgs])[1];
   return {
+    leadFindMany,
+    blockedCreate,
+    getSalesCrmDuplicate,
     service,
     create,
     findById,
@@ -612,5 +638,138 @@ describe('LeadsService.setPinned', () => {
     );
     expect(pin).not.toHaveBeenCalled();
     expect(unpin).not.toHaveBeenCalled();
+  });
+});
+
+describe('LeadsService.create — duplicate handling', () => {
+  const enquiry = {
+    name: 'Repeat Caller',
+    primaryPhone: '+971500000001',
+    email: 'repeat@example.com',
+  };
+  const match = {
+    id: 'lead-1',
+    name: 'Original Lead',
+    primaryPhone: '+971500000001',
+    secondaryPhone: null,
+    email: 'repeat@example.com',
+    assignments: [{ user: { name: 'Aisha Khan' } }],
+  };
+
+  it('saves the lead in Warn mode, even when it duplicates an existing one', async () => {
+    const kit = makeService();
+    kit.leadFindMany.mockResolvedValue([match]);
+    kit.getSalesCrmDuplicate.mockResolvedValue({
+      ...SALES_CRM_DUPLICATE_DEFAULTS,
+      mode: 'WARN_ALLOW_SAVE',
+    });
+
+    await kit.service.create(enquiry);
+
+    // AC: the lead is saved, and nothing is logged as blocked.
+    expect(kit.create).toHaveBeenCalledTimes(1);
+    expect(kit.blockedCreate).not.toHaveBeenCalled();
+  });
+
+  it('refuses the lead in Block mode and creates no row', async () => {
+    const kit = makeService();
+    kit.leadFindMany.mockResolvedValue([match]);
+    kit.getSalesCrmDuplicate.mockResolvedValue({
+      ...SALES_CRM_DUPLICATE_DEFAULTS,
+      mode: 'BLOCK_HARD_STOP',
+    });
+
+    await expect(kit.service.create(enquiry as never)).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    // The guarantee that matters: no partial lead.
+    expect(kit.create).not.toHaveBeenCalled();
+  });
+
+  it('logs the blocked enquiry, naming the lead it duplicated', async () => {
+    const kit = makeService();
+    kit.leadFindMany.mockResolvedValue([match]);
+    kit.getSalesCrmDuplicate.mockResolvedValue({
+      ...SALES_CRM_DUPLICATE_DEFAULTS,
+      mode: 'BLOCK_HARD_STOP',
+    });
+
+    await kit.service.create(enquiry as never).catch(() => undefined);
+
+    const [call] = kit.blockedCreate.mock.calls[0] as [
+      { data: Record<string, unknown> },
+    ];
+    expect(call.data).toMatchObject({
+      name: 'Repeat Caller',
+      primaryPhone: '+971500000001',
+      matchedLeadId: 'lead-1',
+      matchedOn: 'primaryPhone',
+    });
+  });
+
+  it('omits assignee names entirely while that setting is off', async () => {
+    const kit = makeService();
+    kit.leadFindMany.mockResolvedValue([match]);
+    kit.getSalesCrmDuplicate.mockResolvedValue({
+      ...SALES_CRM_DUPLICATE_DEFAULTS,
+      mode: 'BLOCK_HARD_STOP',
+      displayAssigneeInfo: false,
+    });
+
+    const error = await kit.service
+      .create(enquiry as never)
+      .catch((caught: ConflictException) => caught);
+    const body = (error as ConflictException).getResponse() as {
+      matches: Record<string, unknown>[];
+    };
+    // Absent, not empty: the key never reaches the client.
+    expect(body.matches[0]).not.toHaveProperty('assignees');
+  });
+
+  it('includes assignee names when that setting is on', async () => {
+    const kit = makeService();
+    kit.leadFindMany.mockResolvedValue([match]);
+    kit.getSalesCrmDuplicate.mockResolvedValue({
+      ...SALES_CRM_DUPLICATE_DEFAULTS,
+      mode: 'BLOCK_HARD_STOP',
+      displayAssigneeInfo: true,
+    });
+
+    const error = await kit.service
+      .create(enquiry as never)
+      .catch((caught: ConflictException) => caught);
+    const body = (error as ConflictException).getResponse() as {
+      matches: { assignees?: string[] }[];
+    };
+    expect(body.matches[0].assignees).toEqual(['Aisha Khan']);
+  });
+
+  it('creates the lead normally when nothing matches, in either mode', async () => {
+    const kit = makeService();
+    kit.leadFindMany.mockResolvedValue([]);
+    kit.getSalesCrmDuplicate.mockResolvedValue({
+      ...SALES_CRM_DUPLICATE_DEFAULTS,
+      mode: 'BLOCK_HARD_STOP',
+    });
+
+    await kit.service.create(enquiry);
+
+    expect(kit.create).toHaveBeenCalledTimes(1);
+    expect(kit.blockedCreate).not.toHaveBeenCalled();
+  });
+
+  it('asks the database to include archived leads only when that setting is on', async () => {
+    const kit = makeService();
+    kit.getSalesCrmDuplicate.mockResolvedValue({
+      ...SALES_CRM_DUPLICATE_DEFAULTS,
+      checkArchivedLeads: true,
+    });
+
+    await kit.service.create(enquiry);
+
+    const [call] = kit.leadFindMany.mock.calls[0] as [
+      { where: Record<string, unknown> },
+    ];
+    expect(call.where).not.toHaveProperty('deletedAt');
   });
 });

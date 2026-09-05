@@ -311,6 +311,8 @@ export interface UserResponse {
   /** The named organisational role; falls back to null on pre-roles accounts. */
   roleId: string | null;
   roleName: string | null;
+  /** Who this member reports to — the roster's org tree, null at the top of a branch. */
+  reportingToId: string | null;
   jobTitle: string | null;
   phone: string | null;
   team: string | null;
@@ -325,7 +327,6 @@ export interface UserResponse {
 
 /** The full wizard configuration, for the edit drawer (GET /api/users/:id). */
 export interface UserDetailResponse extends UserResponse {
-  reportingToId: string | null;
   reportingToName: string | null;
   leadFormId: string | null;
   pipelines: string[];

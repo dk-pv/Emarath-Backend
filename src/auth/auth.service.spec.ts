@@ -15,7 +15,7 @@ const USER_ROW = {
   id: '11111111-1111-1111-1111-111111111111',
   name: 'Emarath Admin',
   email: 'admin@emarath.local',
-  role: UserRole.SUPERADMIN,
+  role: UserRole.SUPERADMIN as UserRole,
   team: null as string | null,
   isActive: true,
   passwordHash: HASH,

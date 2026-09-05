@@ -62,7 +62,7 @@ platforms can rely purely on injected environment variables:
 | Variable                | Default                 | Purpose                                                    |
 | ----------------------- | ----------------------- | ---------------------------------------------------------- |
 | `NODE_ENV`              | `development`           | Selects the environment                                    |
-| `PORT`                  | `5000`                  | HTTP port (Render injects this in production)              |
+| `PORT`                  | `5001`                  | HTTP port (Render injects this in production)              |
 | `APP_NAME`              | `Emarath Backend`       | Service name shown in the health response                  |
 | `API_PREFIX`            | `api`                   | Global route prefix (`/api/...`)                           |
 | `CORS_ORIGIN`           | `http://localhost:3000` | Allowed frontend origin                                    |
@@ -77,7 +77,7 @@ See [`.env.example`](./.env.example). **Never commit real secrets** — only
 ## Running locally
 
 ```bash
-# development (watch mode) — http://localhost:5000
+# development (watch mode) — http://localhost:5001
 npm run start:dev
 
 # development (no watch)
@@ -97,7 +97,7 @@ NODE_ENV=staging npm run start:prod
 $env:NODE_ENV="staging"; npm run start:prod
 ```
 
-The backend listens on **http://localhost:5000** with all routes under the
+The backend listens on **http://localhost:5001** with all routes under the
 `/api` prefix.
 
 ---
@@ -123,7 +123,7 @@ Returns a lightweight liveness payload (no database dependency yet):
 Quick check:
 
 ```bash
-curl http://localhost:5000/api/health
+curl http://localhost:5001/api/health
 ```
 
 The health endpoint is intentionally **database-independent** (liveness only), so

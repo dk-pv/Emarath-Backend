@@ -2,14 +2,62 @@ import { Transform } from 'class-transformer';
 import {
   ArrayNotEmpty,
   IsArray,
+  IsBoolean,
   IsIn,
+  IsInt,
   IsNotEmpty,
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   MaxLength,
+  Min,
 } from 'class-validator';
-import { DEFAULT_PIPELINE, STAGE_COLORS } from '../stage.constants';
+import { Type } from 'class-transformer';
+import {
+  DEFAULT_PIPELINE,
+  MAX_STAGE_PROBABILITY,
+  MIN_STAGE_PROBABILITY,
+  STAGE_COLORS,
+  STAGE_INCLUSIONS,
+  STAGE_OUTCOMES,
+} from '../stage.constants';
+import type { StageInclusion, StageOutcome } from '../stage.constants';
+
+/**
+ * The Sales Pipeline wizard's stage fields, shared by create and update (ADR-0060).
+ *
+ * Every one is optional: the Kanban board's add/rename/recolour calls send none of them
+ * and must keep working exactly as before, so an omitted field leaves the column at its
+ * default (create) or untouched (update).
+ */
+export class StageWizardFieldsDto {
+  @IsOptional()
+  @IsBoolean()
+  isClosed?: boolean;
+
+  /** Null clears it — an open stage has no outcome. */
+  @IsOptional()
+  @IsIn([...STAGE_OUTCOMES], {
+    message: 'outcome must be WON, LOST or IGNORE',
+  })
+  outcome?: StageOutcome | null;
+
+  @IsOptional()
+  @IsIn([...STAGE_INCLUSIONS])
+  inclusion?: StageInclusion;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(MIN_STAGE_PROBABILITY)
+  @Max(MAX_STAGE_PROBABILITY)
+  probability?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  requireFollowUp?: boolean;
+}
 
 const trim = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' ? value.trim() : value;
@@ -27,7 +75,7 @@ export class StageListQueryDto {
 }
 
 /** Add a stage to a pipeline (KAN-05.1 AC1). Appended after the last stage. */
-export class CreateStageDto {
+export class CreateStageDto extends StageWizardFieldsDto {
   @Transform(trimOrDefaultPipeline)
   @IsString()
   @MaxLength(64)
@@ -49,7 +97,7 @@ export class CreateStageDto {
  * Rename and/or recolour a stage (KAN-05.1 AC2). Both optional — a caller may change
  * either. A blank name is rejected (AC5); a rename cascades to the leads in the stage.
  */
-export class UpdateStageDto {
+export class UpdateStageDto extends StageWizardFieldsDto {
   @Transform(trim)
   @IsString()
   @IsNotEmpty({ message: 'name must not be blank' })
@@ -84,4 +132,9 @@ export interface StageResponse {
   name: string;
   color: string;
   position: number;
+  isClosed: boolean;
+  outcome: string | null;
+  inclusion: string;
+  probability: number;
+  requireFollowUp: boolean;
 }

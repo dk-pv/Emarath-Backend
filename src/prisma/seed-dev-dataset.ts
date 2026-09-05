@@ -251,10 +251,17 @@ async function main(): Promise<void> {
       orderBy: { name: 'asc' },
     });
 
+    // Categories are a database catalogue now (Settings → Category), like stages and tags.
+    const categoryRows = await prisma.category.findMany({
+      where: { isActive: true },
+      select: { name: true },
+      orderBy: { position: 'asc' },
+    });
+    const categories = categoryRows.map((row) => row.name);
+
     const sources = values(LOOKUP_DATA.sources);
     const languages = values(LOOKUP_DATA.languages);
     const callStatuses = values(LOOKUP_DATA.callStatus);
-    const categories = values(LOOKUP_DATA.categories);
     const payments = values(LOOKUP_DATA.paymentMethods);
     const products = values(LOOKUP_DATA.products);
 

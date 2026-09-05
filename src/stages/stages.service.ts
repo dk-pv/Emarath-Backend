@@ -19,7 +19,38 @@ const STAGE_SELECT = {
   name: true,
   color: true,
   position: true,
+  isClosed: true,
+  outcome: true,
+  inclusion: true,
+  probability: true,
+  requireFollowUp: true,
 } satisfies Prisma.StageSelect;
+
+/**
+ * The Sales Pipeline wizard's fields, taken off a DTO only where the caller sent them
+ * (ADR-0060). The Kanban board sends none, so its create/update calls behave exactly as
+ * before: omitted keys never reach the write, leaving the column at its default or
+ * untouched. `outcome` is the exception — null is meaningful there, so it is forwarded.
+ */
+type StageWizardData = {
+  isClosed?: boolean;
+  outcome?: string | null;
+  inclusion?: string;
+  probability?: number;
+  requireFollowUp?: boolean;
+};
+
+function wizardFields(dto: StageWizardData): StageWizardData {
+  const data: StageWizardData = {};
+  if (dto.isClosed !== undefined) data.isClosed = dto.isClosed;
+  if (dto.outcome !== undefined) data.outcome = dto.outcome;
+  if (dto.inclusion !== undefined) data.inclusion = dto.inclusion;
+  if (dto.probability !== undefined) data.probability = dto.probability;
+  if (dto.requireFollowUp !== undefined) {
+    data.requireFollowUp = dto.requireFollowUp;
+  }
+  return data;
+}
 
 /**
  * The pipeline stage catalogue (KAN-05.1) — the one place stages are added, renamed,
@@ -76,7 +107,13 @@ export class StagesService {
     });
 
     return this.prisma.stage.create({
-      data: { pipeline, name, color, position: last ? last.position + 1 : 0 },
+      data: {
+        pipeline,
+        name,
+        color,
+        position: last ? last.position + 1 : 0,
+        ...wizardFields(dto),
+      },
       select: STAGE_SELECT,
     });
   }
@@ -89,7 +126,7 @@ export class StagesService {
     });
     if (!stage) throw new NotFoundException('Stage not found.');
 
-    const data: Prisma.StageUpdateInput = {};
+    const data: Prisma.StageUpdateInput = { ...wizardFields(dto) };
     if (dto.color !== undefined) data.color = dto.color;
 
     const newName = dto.name;

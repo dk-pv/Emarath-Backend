@@ -46,54 +46,54 @@ enum UserRole {
 /// never plaintext. Login, sessions and the JWT identity are AUTH-01.2/01.3, which
 /// consume this model without reshaping it.
 model User {
-  id           String    @id @default(uuid()) @db.Uuid
-  name         String    @db.VarChar(120)
-  email        String    @unique @db.VarChar(180)
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String   @db.VarChar(120)
+  email        String   @unique @db.VarChar(180)
   /// Second credential AC5 dedupes alongside email.
-  username     String    @unique @db.VarChar(120)
+  username     String   @unique @db.VarChar(120)
   /// bcrypt hash (AC4). Never the plaintext password.
-  passwordHash String    @map("password_hash") @db.VarChar(255)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
   role         UserRole
   /// Whether the account may log in (AUTH-01.2 AC4). Disabled accounts are rejected
   /// at login with the same generic error as bad credentials.
-  isActive     Boolean   @default(true) @map("is_active")
+  isActive     Boolean  @default(true) @map("is_active")
   /// Team association, used later for role scoping (AUTH-01.1 AC1/AC3).
-  team         String?   @db.VarChar(120)
+  team         String?  @db.VarChar(120)
 
   /// Profile fields the Team Members roster displays (Settings > Users & Access).
   /// Optional: every existing account predates them, and neither is a credential —
   /// `phone` is display/contact only and is NOT a login identity (see STATUS R-3).
-  jobTitle     String?   @map("job_title") @db.VarChar(120)
-  phone        String?   @db.VarChar(32)
+  jobTitle String? @map("job_title") @db.VarChar(120)
+  phone    String? @db.VarChar(32)
 
   /// Roster activity columns. `lastLoginAt` is stamped by a successful login;
   /// `lastSeenAt` also advances on token refresh, so it approximates presence without
   /// a write on every authenticated request. Null until the account first signs in.
-  lastLoginAt  DateTime? @map("last_login_at")
-  lastSeenAt   DateTime? @map("last_seen_at")
+  lastLoginAt DateTime? @map("last_login_at")
+  lastSeenAt  DateTime? @map("last_seen_at")
 
   /// Wizard name split (the reference asks First/Last separately). `name` stays the
   /// canonical display value the whole product reads; these two exist so an edit can
   /// prefill real halves instead of guessing at a split of "ADWAITHA T M".
-  firstName    String?   @map("first_name") @db.VarChar(80)
-  lastName     String?   @map("last_name") @db.VarChar(80)
+  firstName String? @map("first_name") @db.VarChar(80)
+  lastName  String? @map("last_name") @db.VarChar(80)
 
   /// The organisational role the wizard picked (ADR-0055). Authorization does NOT read
   /// this: `role` (the enum) stays the JWT claim and the guard/scoping input, and the
   /// service sets it from Role.baseRole whenever roleId changes. Null on accounts that
   /// predate the roles table — display falls back to the enum label.
-  roleId       String?   @map("role_id") @db.Uuid
+  roleId String? @map("role_id") @db.Uuid
 
   /// Who this member reports to (the wizard's "Reporting To"). Organisational only —
   /// no scoping reads it yet (the R-2 agent-tree question is still open).
-  reportingToId String?  @map("reporting_to_id") @db.Uuid
+  reportingToId String? @map("reporting_to_id") @db.Uuid
 
   /// The lead form assigned in the wizard's Permission step.
-  leadFormId   String?   @map("lead_form_id") @db.Uuid
+  leadFormId String? @map("lead_form_id") @db.Uuid
 
   /// Pipelines this member works (wizard's multi-select). Values come from the
   /// `pipelines` lookup — strings, because pipelines are lookup data, not a table.
-  pipelines    String[]  @default([])
+  pipelines String[] @default([])
 
   /// Permissions & Tracking toggles (wizard step 3). All default off, matching the
   /// reference's fresh-member state; none is read by any guard yet — they are stored
@@ -109,18 +109,18 @@ model User {
 
   /// The member's picked button colour — user data (like a pin colour), not a design
   /// token, so it is stored as the hex the picker produced.
-  colorCode    String?   @map("color_code") @db.VarChar(9)
+  colorCode String? @map("color_code") @db.VarChar(9)
 
   /// Target Settings: monthly goal in AED. Decimal, never float (money rule).
   monthlyGoalAmount Decimal? @map("monthly_goal_amount") @db.Decimal(12, 2)
 
   /// Profile picture's storage key (FND-05.2 store); responses carry a signed URL,
   /// never the key's raw location.
-  avatarKey    String?   @map("avatar_key") @db.VarChar(300)
+  avatarKey String? @map("avatar_key") @db.VarChar(300)
 
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
-  deletedAt    DateTime? @map("deleted_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
 
   assignments         LeadAssignment[]
   /// ADR-0031: this user's personal lead pins (their own float-to-top list).
@@ -149,11 +149,22 @@ model User {
 
   /// Settings > Users & Access: organisational role, reporting line, assigned lead
   /// form and the per-module permission matrix.
-  orgRole           Role?                  @relation(fields: [roleId], references: [id], onDelete: Restrict)
-  reportingTo       User?                  @relation("UserReportingTo", fields: [reportingToId], references: [id], onDelete: SetNull)
-  reports           User[]                 @relation("UserReportingTo")
-  leadForm          LeadForm?              @relation(fields: [leadFormId], references: [id], onDelete: Restrict)
-  modulePermissions UserModulePermission[]
+  orgRole               Role?                  @relation("UserOrgRole", fields: [roleId], references: [id], onDelete: Restrict)
+  reportingTo           User?                  @relation("UserReportingTo", fields: [reportingToId], references: [id], onDelete: SetNull)
+  reports               User[]                 @relation("UserReportingTo")
+  /// Roles this user authored — surfaced by the Roles & Permissions info popover.
+  rolesCreated          Role[]                 @relation("RoleCreatedBy")
+  categoriesCreated     Category[]             @relation("CategoryCreatedBy")
+  /// Duplicate enquiries this user attempted that Block mode refused.
+  blockedEnquiries      BlockedEnquiry[]       @relation("BlockedEnquiryBlockedBy")
+  /// Lead sources this user added (Settings → Sales & CRM Configuration → Lead Source).
+  leadSourcesCreated    LeadSource[]           @relation("LeadSourceCreatedBy")
+  pipelinesCreated      Pipeline[]             @relation("PipelineCreatedBy")
+  /// Pipelines that reassign their expired leads to this user (wizard step 3).
+  pipelineReassignments Pipeline[]             @relation("PipelineReassignExpiredTo")
+  pipelineGrants        PipelinePermission[]   @relation("PipelinePermissionUser")
+  leadForm              LeadForm?              @relation(fields: [leadFormId], references: [id], onDelete: Restrict)
+  modulePermissions     UserModulePermission[]
 
   @@map("users")
 }
@@ -171,12 +182,31 @@ model Role {
   name     String   @unique @db.VarChar(120)
   baseRole UserRole @map("base_role")
 
+  /// Hierarchy parent (ADR-0056). Null is a root role. `Restrict` rather than cascade:
+  /// deleting a parent must never silently take its subtree — the service refuses while
+  /// children remain, so a delete is always an explicit, one-role decision.
+  parentId String? @map("parent_id") @db.Uuid
+  parent   Role?   @relation("RoleHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children Role[]  @relation("RoleHierarchy")
+
+  /// Order among siblings sharing a parent; the tree reads `[parentId, position]`.
+  position Int @default(0)
+
+  /// Author, for the info popover. Nullable because the seeded roles predate this
+  /// column, and `SetNull` so removing a team member never deletes the roles they made.
+  createdById String? @map("created_by_id") @db.Uuid
+  createdBy   User?   @relation("RoleCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   deletedAt DateTime? @map("deleted_at")
 
-  users User[]
+  users          User[]               @relation("UserOrgRole")
+  pipelineGrants PipelinePermission[] @relation("PipelinePermissionRole")
 
+  /// The tree is read whole, ordered by depth then sibling position; soft delete has no
+  /// automatic filter (CLAUDE.md §11) so every query names deletedAt explicitly.
+  @@index([deletedAt, parentId, position])
   @@map("roles")
 }
 
@@ -378,9 +408,9 @@ model Lead {
   callAttempts     Int @default(0) @map("call_attempts")
   whatsappAttempts Int @default(0) @map("whatsapp_attempts")
 
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt @map("updated_at")
-  deletedAt       DateTime? @map("deleted_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  deletedAt  DateTime? @map("deleted_at")
   /// When `status` last changed — kept by the `leads_status_changed_at` trigger
   /// (migration 20260830120000), never by app code, so every write path stays covered.
   /// Backfilled to `created_at`. Drives the Leads By Status report's "Status Changed
@@ -389,12 +419,14 @@ model Lead {
   /// leaves LOST; null on historical losses ("No reason recorded"). Values come from the
   /// lostReasons lookup — a string, not an enum, so the business can edit the catalogue
   /// without a migration (the same rule as `status`).
-  lostReason String? @map("lost_reason") @db.VarChar(120)
+  lostReason String?   @map("lost_reason") @db.VarChar(120)
 
   statusChangedAt DateTime @default(now()) @map("status_changed_at")
 
   assignments       LeadAssignment[]
   tags              LeadTag[]
+  /// Duplicate enquiries refused because they matched this lead.
+  blockedEnquiries  BlockedEnquiry[]       @relation("BlockedEnquiryMatchedLead")
   complaints        Complaint[]
   /// ACT-01.1: follow-ups on this lead. Independent of the lead's stage — an
   /// activity links to the lead, not to a status/pipeline (ADR-0027 dec 7).
@@ -476,10 +508,19 @@ model LeadPin {
 /// which wants an indexed join, and renaming a tag should not mean rewriting
 /// every lead that carries it.
 model Tag {
-  id        String    @id @default(uuid()) @db.Uuid
-  name      String    @unique @db.VarChar(80)
+  id   String @id @default(uuid()) @db.Uuid
+  name String @unique @db.VarChar(80)
+
+  /// The reference row's green Active badge (Settings → Sales & CRM → Tags). Retiring a
+  /// tag stops it being offered for new leads without touching the leads already carrying
+  /// it — the same rule the Category and Lead Source catalogues follow.
+  isActive Boolean @default(true) @map("is_active")
+
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
+  /// Delete is a soft delete here, unlike the other catalogues: `LeadTag.tag` cascades,
+  /// so removing the row would strip the tag off every lead carrying it. Stamping this
+  /// leaves those join rows untouched (ADR-0063).
   deletedAt DateTime? @map("deleted_at")
 
   leads LeadTag[]
@@ -666,6 +707,64 @@ model SavedFilter {
   @@map("saved_filters")
 }
 
+/// The lead source catalogue behind Settings → Sales & CRM Configuration → Lead Source.
+///
+/// Flat, unlike `Category`: the reference lists sources in one alphabetical table with no
+/// hierarchy. A source's `name` IS the value a lead stores in `Lead.source` — the same
+/// name-as-value contract `Category`, `Stage` and `Pipeline` hold — so a rename cascades
+/// to the leads carrying it and a delete is refused while any lead still does.
+model LeadSource {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// `VarChar(64)` to match `Lead.source`, which stores this value verbatim.
+  name String @unique @db.VarChar(64)
+
+  /// The reference row's green Active badge. An inactive source stays on the leads that
+  /// already carry it and simply stops being offered for new ones.
+  isActive Boolean @default(true) @map("is_active")
+
+  /// The list's "Created By" column; null once that user is removed, and for the rows
+  /// back-filled from existing lead data by the catalogue's own migration.
+  createdById String? @map("created_by_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  createdBy User? @relation("LeadSourceCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@map("lead_sources")
+}
+
+/// An enquiry that Block-hard-stop refused (Settings → Sales & CRM → Duplicate Settings).
+///
+/// No `Lead` row is created in that mode, so the attempt would otherwise vanish — the
+/// reference says the enquiry "is logged to the Duplicate report instead", and this is
+/// where it is logged. Deliberately not a Lead: it never became one, and putting it in
+/// `leads` would corrupt every count, list and report in the product.
+model BlockedEnquiry {
+  id             String  @id @default(uuid()) @db.Uuid
+  name           String  @db.VarChar(180)
+  primaryPhone   String  @map("primary_phone") @db.VarChar(32)
+  secondaryPhone String? @map("secondary_phone") @db.VarChar(32)
+  email          String? @db.VarChar(180)
+
+  /// The lead it duplicated, and which field matched. Null once that lead is removed.
+  matchedLeadId String? @map("matched_lead_id") @db.Uuid
+  matchedOn     String  @map("matched_on") @db.VarChar(24)
+
+  /// Who attempted it; null once that user is removed.
+  blockedById String? @map("blocked_by_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  matchedLead Lead? @relation("BlockedEnquiryMatchedLead", fields: [matchedLeadId], references: [id], onDelete: SetNull)
+  blockedBy   User? @relation("BlockedEnquiryBlockedBy", fields: [blockedById], references: [id], onDelete: SetNull)
+
+  /// The only read path: newest blocked enquiries first.
+  @@index([createdAt])
+  @@map("blocked_enquiries")
+}
+
 /// Pipeline stage catalogue (KAN-05.1) — the single, user-editable source of the
 /// stage set, colours and order.
 ///
@@ -691,8 +790,37 @@ model Stage {
   color    String @db.VarChar(32)
   position Int
 
+  /// Which panel of the Sales Pipeline wizard the stage belongs to (ADR-0060). Defaults
+  /// to open, so every stage that predates the wizard keeps behaving exactly as the
+  /// Kanban board has always shown it.
+  isClosed Boolean @default(false) @map("is_closed")
+
+  /// A closed stage's outcome — `WON` or `LOST`, the two the reference shows. Null on an
+  /// open stage, where the control does not exist.
+  outcome String? @db.VarChar(16)
+
+  /// The reference's "Include In Sales Pipeline" select. Stored as the chosen option key;
+  /// only the one option the screenshots show is offered so far.
+  inclusion String @default("INCLUDE_IN_SALES_PIPELINE") @map("inclusion") @db.VarChar(48)
+
+  /// The reference's Probability field. Percent, so 0-100 — the range is an assumption
+  /// (ADR-0060): the screenshot shows the value 0 and never the control's bounds.
+  probability Int @default(0)
+
+  /// The reference's "Require Follow..." switch, off in every captured stage card.
+  requireFollowUp Boolean @default(false) @map("require_follow_up")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// Back-references for the pipeline settings that point at this stage (step 3). Each
+  /// is `SetNull` on the owning side, so deleting a stage clears the setting rather
+  /// than blocking the delete or orphaning the reference.
+  defaultForPipelines        Pipeline[] @relation("PipelineDefaultStage")
+  mandatoryValueForPipelines Pipeline[] @relation("PipelineMandatoryValueStage")
+  qualifiedForPipelines      Pipeline[] @relation("PipelineQualifiedStage")
+  expiredForPipelines        Pipeline[] @relation("PipelineExpiredStage")
+  reassignedForPipelines     Pipeline[] @relation("PipelineReassignedStage")
 
   /// AC5: a stage name is unique within its pipeline.
   @@unique([pipeline, name])
@@ -1087,4 +1215,176 @@ model Integration {
   /// (CLAUDE.md §11), so every query names deletedAt explicitly.
   @@index([deletedAt, position])
   @@map("integrations")
+}
+
+/// App-global configuration for one Settings screen (single-tenant, ADR-0054 — the
+/// deployment *is* the organization, so there is no tenant key here either).
+///
+/// One row per screen, keyed by its slug, holding that screen's payload as JSON. This is
+/// deliberately the same key + JSON + upsert shape as `UserViewPreference`, minus the user
+/// scope: these are company policy (how leads display for everyone, whether mobile numbers
+/// are masked), not a personal preference, so scoping them to a user would be wrong.
+///
+/// A column per setting was rejected: the Settings area has five more screens behind this
+/// one, and each would otherwise cost a migration. The JSON is not a free-for-all — every
+/// field is validated by a DTO on write and re-read defensively on read, so a row that
+/// predates a shape change degrades to defaults rather than reaching the client malformed.
+///
+/// No `deletedAt`: a settings row is configuration, not domain data — the same reading as
+/// `Stage` and `UserViewPreference`, which also omit it.
+model AppSetting {
+  id  String @id @default(uuid()) @db.Uuid
+  key String @unique @db.VarChar(64)
+
+  value Json
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("app_settings")
+}
+
+/// The enquiry Category catalogue — Settings → Sales & CRM Configuration → Category.
+///
+/// Replaces the hard-coded `categories` lookup exactly as `Stage` replaced the config-backed
+/// stage list: a category's `name` IS the value a lead stores in `Lead.category` (a plain
+/// string under the ADR-0005 lookup convention), so a rename cascades to the leads carrying
+/// the old name and a delete is refused while any lead still references it. The catalogue can
+/// never orphan a lead's category.
+///
+/// `name` is unique across the whole table rather than per parent: a lead identifies its
+/// category by name alone, so two categories sharing a name would be indistinguishable to
+/// every lead, filter, export and report.
+///
+/// `parentId` carries the hierarchy the reference screen draws (connector lines and the
+/// per-row "+ Add Category"). Cycles are refused in the service; no depth cap is imposed,
+/// because unlike the role tree this screen has no level legend to define one.
+///
+/// No soft delete — a category is a catalogue entry, not domain data, and the delete is
+/// guarded, the same reading `Stage` records.
+model Category {
+  id       String  @id @default(uuid()) @db.Uuid
+  name     String  @unique @db.VarChar(120)
+  parentId String? @map("parent_id") @db.Uuid
+  position Int     @default(0)
+
+  /// The reference row's green Active / grey Inactive badge.
+  isActive Boolean @default(true) @map("is_active")
+
+  /// The info popover's "Created by"; null once that user is removed.
+  createdById String? @map("created_by_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// Restrict, not Cascade: deleting a parent must never silently take its children with it.
+  parent    Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children  Category[] @relation("CategoryTree")
+  createdBy User?      @relation("CategoryCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  /// The only read path: the whole tree in sibling order.
+  @@index([parentId, position])
+  @@map("categories")
+}
+
+/// The sales pipeline catalogue — Settings → Sales & CRM Configuration → Sales Pipeline.
+///
+/// Replaces the hard-coded `pipelines` lookup the same way `Stage` and `Category` replaced
+/// theirs. A pipeline's `name` IS the value stored in `Lead.pipeline`, `Stage.pipeline` and
+/// `User.pipelines[]`, so this table names the pipelines rather than re-keying them: a
+/// rename cascades to all three, and a delete is refused while any lead is still on it.
+/// Converting those columns to foreign keys would rewrite every pipeline reference in the
+/// product for no user-visible gain (ADR-0059).
+///
+/// `shortCode` is nullable because the four pipelines that predate this table have no code
+/// in the reference screenshots and inventing one would be inventing data; the create form
+/// requires it, so every pipeline made from here on carries one.
+///
+/// Exactly one row may hold `isDefault` — enforced in the service, which clears the
+/// previous default in the same transaction.
+model Pipeline {
+  id        String  @id @default(uuid()) @db.Uuid
+  name      String  @unique @db.VarChar(64)
+  shortCode String? @unique @map("short_code") @db.VarChar(16)
+
+  /// The reference list's green "Default" badge. Exactly one pipeline carries it.
+  isDefault Boolean @default(false) @map("is_default")
+
+  /// The wizard's "Choose who can access the pipeline": `ALL_USERS` or `SPECIFIC`.
+  /// Stored, not yet enforced by any guard — see ADR-0060.
+  accessMode String @default("ALL_USERS") @map("access_mode") @db.VarChar(16)
+
+  /// The template this pipeline was cloned from, when the wizard's clone toggle was on.
+  /// Recorded so the choice is not lost; what each template contributes is not yet known
+  /// from the reference (ADR-0060).
+  templateKey String? @map("template_key") @db.VarChar(48)
+
+  /// The list's "Created By" column; null once that user is removed.
+  createdById String? @map("created_by_id") @db.Uuid
+
+  /// Wizard step 3 — Pipeline Settings. These name stages by id rather than by name,
+  /// unlike `Lead.status`: nothing outside this row reads them, so a foreign key with
+  /// `SetNull` survives a stage rename for free and can never leave a dangling
+  /// reference behind a delete. Every one is nullable — a pipeline is usable before
+  /// its settings are configured, and the eight that predate step 3 have none.
+  defaultStageId        String? @map("default_stage_id") @db.Uuid
+  mandatoryValueStageId String? @map("mandatory_value_stage_id") @db.Uuid
+  qualifiedStageId      String? @map("qualified_stage_id") @db.Uuid
+  autoConvertAtWon      Boolean @default(false) @map("auto_convert_at_won")
+
+  /// Lead Expiry Settings. The dependent values outlive `expiryEnabled` going false, so
+  /// switching expiry back on restores the configuration instead of an empty form —
+  /// clearing them would discard work the user never asked to lose.
+  expiryEnabled       Boolean @default(false) @map("expiry_enabled")
+  /// `ALL_LEADS` or `INDIVIDUAL_LEADS`, the two the reference's "Set Expiry For" lists.
+  expiryScope         String? @map("expiry_scope") @db.VarChar(24)
+  /// The reference's "Expire After (Days)" — whole days, at least one.
+  expiryDays          Int?    @map("expiry_days")
+  expiredStageId      String? @map("expired_stage_id") @db.Uuid
+  reassignedStageId   String? @map("reassigned_stage_id") @db.Uuid
+  reassignExpiredToId String? @map("reassign_expired_to_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  createdBy   User?                @relation("PipelineCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  permissions PipelinePermission[]
+
+  defaultStage        Stage? @relation("PipelineDefaultStage", fields: [defaultStageId], references: [id], onDelete: SetNull)
+  mandatoryValueStage Stage? @relation("PipelineMandatoryValueStage", fields: [mandatoryValueStageId], references: [id], onDelete: SetNull)
+  qualifiedStage      Stage? @relation("PipelineQualifiedStage", fields: [qualifiedStageId], references: [id], onDelete: SetNull)
+  expiredStage        Stage? @relation("PipelineExpiredStage", fields: [expiredStageId], references: [id], onDelete: SetNull)
+  reassignedStage     Stage? @relation("PipelineReassignedStage", fields: [reassignedStageId], references: [id], onDelete: SetNull)
+  reassignExpiredTo   User?  @relation("PipelineReassignExpiredTo", fields: [reassignExpiredToId], references: [id], onDelete: SetNull)
+
+  /// The list reads every row; the default is looked up on its own.
+  @@index([isDefault])
+  @@map("pipelines")
+}
+
+/// One row of the wizard's Pipeline Permissions list — a role or a user granted access to
+/// a pipeline while its `accessMode` is `SPECIFIC` (ADR-0060).
+///
+/// A row points at exactly one target: `roleId` for a named role, `userId` for a member.
+/// Deleting the pipeline takes its permission rows with it; deleting the role or user the
+/// row names removes that grant rather than leaving it dangling.
+model PipelinePermission {
+  id         String @id @default(uuid()) @db.Uuid
+  pipelineId String @map("pipeline_id") @db.Uuid
+
+  /// `ROLE` or `USER` — the two the reference's Permission Type select offers.
+  permissionType String @map("permission_type") @db.VarChar(8)
+
+  roleId String? @map("role_id") @db.Uuid
+  userId String? @map("user_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  pipeline Pipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  role     Role?    @relation("PipelinePermissionRole", fields: [roleId], references: [id], onDelete: Cascade)
+  user     User?    @relation("PipelinePermissionUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  /// The only read path: one pipeline's grants.
+  @@index([pipelineId])
+  @@map("pipeline_permissions")
 }
