@@ -141,6 +141,22 @@ import {
   SaveFollowUpTypeDto,
   UpdateActivityGeneralDto,
 } from './dto/activity-reminders.dto';
+import {
+  APPLICATION_DASHBOARD_KEY,
+  APPLICATION_GENERAL_KEY,
+  ApplicationGeneralSettings,
+  DashboardCardConfig,
+  DashboardCardDto,
+  DashboardFieldCatalogue,
+  DashboardFieldOption,
+  DashboardSettings,
+  LoginPolicy,
+  normaliseCards,
+  toApplicationGeneral,
+  toDashboardSettings,
+  UpdateApplicationGeneralDto,
+  UpdateDashboardSettingsDto,
+} from './dto/application-controls.dto';
 import { CURRENCY_CODES } from '../lookups/lookups.data';
 
 /**
@@ -791,6 +807,133 @@ export class SettingsService {
     });
     return types;
   }
+
+  /** Application Controls → Application General Settings, or the defaults. */
+  async getApplicationGeneral(): Promise<ApplicationGeneralSettings> {
+    const row = await this.prisma.appSetting.findUnique({
+      where: { key: APPLICATION_GENERAL_KEY },
+      select: { value: true },
+    });
+    return toApplicationGeneral(row?.value);
+  }
+
+  /** Replaces the whole payload; one row per key, created on first save. */
+  async saveApplicationGeneral(
+    dto: UpdateApplicationGeneralDto,
+  ): Promise<ApplicationGeneralSettings> {
+    const settings: ApplicationGeneralSettings = {
+      autoSavePassword: dto.autoSavePassword,
+      disablePromptAfterCall: dto.disablePromptAfterCall,
+      selfieVerificationOnLogin: dto.selfieVerificationOnLogin,
+    };
+
+    await this.prisma.appSetting.upsert({
+      where: { key: APPLICATION_GENERAL_KEY },
+      update: { value: settings as unknown as Prisma.InputJsonValue },
+      create: {
+        key: APPLICATION_GENERAL_KEY,
+        value: settings as unknown as Prisma.InputJsonValue,
+      },
+      select: { id: true },
+    });
+    return settings;
+  }
+
+  /**
+   * The single switch the login screen needs before anyone has authenticated.
+   *
+   * Deliberately not the whole payload: the login form has to decide whether to offer
+   * the browser's password manager before a session exists, and that is one boolean.
+   * Nothing else about company policy is readable without a token.
+   */
+  async getLoginPolicy(): Promise<LoginPolicy> {
+    const settings = await this.getApplicationGeneral();
+    return { autoSavePassword: settings.autoSavePassword };
+  }
+
+  /** Application Controls → Dashboard Settings, or the first-time defaults. */
+  async getDashboardSettings(): Promise<DashboardSettings> {
+    const row = await this.prisma.appSetting.findUnique({
+      where: { key: APPLICATION_DASHBOARD_KEY },
+      select: { value: true },
+    });
+    return toDashboardSettings(row?.value);
+  }
+
+  /**
+   * The options each mode offers, from the live catalogues.
+   *
+   * Lead Stage reads the `Stage` catalogue because in this system a lead's status *is*
+   * its pipeline stage (KAN-05.1) — the same list the Kanban board columns and the Lead
+   * Status field come from. Lead Source reads the active sources. Nothing is invented
+   * and nothing is hard-coded: an empty catalogue produces an empty panel.
+   */
+  async getDashboardFields(): Promise<DashboardFieldCatalogue> {
+    const [stages, sources] = await Promise.all([
+      this.prisma.stage.findMany({
+        orderBy: [{ position: 'asc' }, { name: 'asc' }],
+        select: { name: true },
+      }),
+      this.prisma.leadSource.findMany({
+        where: { isActive: true },
+        orderBy: { name: 'asc' },
+        select: { name: true },
+      }),
+    ]);
+
+    // A stage name repeats across pipelines (every board has its own "New"); the
+    // dashboard groups leads by status, which is the name, so one card per name.
+    const stageNames = [...new Set(stages.map((stage) => stage.name))];
+
+    return {
+      leadStage: stageNames.map((name) => ({ fieldKey: name, label: name })),
+      leadSource: sources.map((source) => ({
+        fieldKey: source.name,
+        label: source.name,
+      })),
+    };
+  }
+
+  /**
+   * Replaces the whole configuration — both modes in one write, which is what makes
+   * "switching mode does not lose the other mode's selection" true rather than hoped
+   * for: the screen sends what it holds and the row is that payload.
+   *
+   * Every selected key must name a live stage or source. An unknown key is a 400, not a
+   * silently dropped card, because a card the dashboard cannot group by would otherwise
+   * disappear without ever telling anyone why.
+   */
+  async saveDashboardSettings(
+    dto: UpdateDashboardSettingsDto,
+  ): Promise<DashboardSettings> {
+    const catalogue = await this.getDashboardFields();
+
+    const settings: DashboardSettings = {
+      summaryMode: dto.summaryMode,
+      displayOnCards: dto.displayOnCards,
+      leadStage: assertKnownCards(
+        dto.leadStage,
+        catalogue.leadStage,
+        'Lead Stage',
+      ),
+      leadSource: assertKnownCards(
+        dto.leadSource,
+        catalogue.leadSource,
+        'Lead Source',
+      ),
+    };
+
+    await this.prisma.appSetting.upsert({
+      where: { key: APPLICATION_DASHBOARD_KEY },
+      update: { value: settings as unknown as Prisma.InputJsonValue },
+      create: {
+        key: APPLICATION_DASHBOARD_KEY,
+        value: settings as unknown as Prisma.InputJsonValue,
+      },
+      select: { id: true },
+    });
+    return settings;
+  }
 }
 
 /** A stored row back into settings, field by field, defaulting anything unreadable. */
@@ -1402,4 +1545,41 @@ function assertNameFree(
   if (taken) {
     throw new ConflictException(`${name} is already a follow up type.`);
   }
+}
+
+/**
+ * Every selected card must name an option the catalogue still offers, and the result is
+ * renumbered 1..n in the order given.
+ *
+ * Rejecting rather than filtering is deliberate: a stage deleted between the screen
+ * loading and Save landing would otherwise be dropped without a word, and the user would
+ * be left looking at a saved configuration that is not the one they built.
+ */
+function assertKnownCards(
+  cards: DashboardCardDto[],
+  options: DashboardFieldOption[],
+  modeLabel: string,
+): DashboardCardConfig[] {
+  const known = new Set(options.map((option) => option.fieldKey));
+  const unknown = cards
+    .map((card) => card.fieldKey)
+    .filter((key) => !known.has(key));
+
+  if (unknown.length > 0) {
+    throw new BadRequestException(
+      `${modeLabel}: ${[...new Set(unknown)].join(', ')} ${unknown.length === 1 ? 'is not a' : 'are not'} known option${unknown.length === 1 ? '' : 's'}.`,
+    );
+  }
+
+  const seen = new Set<string>();
+  for (const card of cards) {
+    if (seen.has(card.fieldKey)) {
+      throw new BadRequestException(
+        `${modeLabel}: ${card.fieldKey} is selected twice.`,
+      );
+    }
+    seen.add(card.fieldKey);
+  }
+
+  return normaliseCards(cards);
 }

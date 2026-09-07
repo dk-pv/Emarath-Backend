@@ -12,6 +12,7 @@
 import 'dotenv/config';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient, UserRole } from '../generated/prisma/client';
+import { LEAD_SYSTEM_FIELDS } from '../lead-forms/lead-system-fields';
 
 /**
  * The built-in role names, one per seeded UserRole (AUTH-01.1's five user types).
@@ -55,8 +56,42 @@ async function main(): Promise<void> {
     for (const name of LEAD_FORMS) {
       await prisma.leadForm.upsert({
         where: { name },
-        create: { name },
-        update: { deletedAt: null },
+        create: {
+          name,
+          module: 'LEAD',
+          isActive: true,
+          isDefault: true,
+          createdByName: 'ADMIN',
+        },
+        update: {
+          deletedAt: null,
+          isActive: true,
+          isDefault: true,
+          createdByName: 'ADMIN',
+        },
+      });
+    }
+
+    /*
+     * The built-in form's field list (ADR-0072): every Lead field, visible, in the order
+     * the shipped drawer renders them. Seeded rather than left empty so the default form
+     * *is* the form the application already shows — configuring it starts from parity,
+     * not from a blank slate. Re-running replaces the list, so an edited form is restored
+     * to the built-in arrangement, which is what re-seeding a built-in means here.
+     */
+    const builtIn = await prisma.leadForm.findUnique({
+      where: { name: LEAD_FORMS[0] },
+      select: { id: true },
+    });
+    if (builtIn) {
+      await prisma.leadFormField.deleteMany({ where: { formId: builtIn.id } });
+      await prisma.leadFormField.createMany({
+        data: LEAD_SYSTEM_FIELDS.map((field, index) => ({
+          formId: builtIn.id,
+          fieldKey: field.key,
+          position: index + 1,
+          isVisible: true,
+        })),
       });
     }
 

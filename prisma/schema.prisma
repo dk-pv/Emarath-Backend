@@ -214,20 +214,93 @@ model Role {
   @@map("roles")
 }
 
-/// Settings > Users & Access: a lead form the wizard's "Assign Lead Form" offers.
-/// The form *builder* (Data & Schema Management) is separate scope; this is the
-/// catalogue that assignment needs, seeded with the one built-in form.
+/// Settings > Data & Schema Management > Form Customization: a configured lead form —
+/// which fields it shows, in what order, and which are hidden (ADR-0072). Also the
+/// catalogue the Users & Access wizard's "Assign Lead Form" offers, which is what this
+/// model was seeded for before the builder existed.
 model LeadForm {
   id   String @id @default(uuid()) @db.Uuid
   name String @unique @db.VarChar(160)
+
+  /// The record the form builds. "LEAD" is the only module the reference shows, and
+  /// the only one validated — a string rather than an enum, like UserModulePermission,
+  /// so a second module costs no migration.
+  module        String  @default("LEAD") @db.VarChar(40)
+  isActive      Boolean @default(true) @map("is_active")
+  /// Exactly one form per module is the default. Enforced in the service, which clears
+  /// the previous default in the same transaction; the default cannot be deleted.
+  isDefault     Boolean @default(false) @map("is_default")
+  /// The creator's name, captured at creation — the "Created By" column prints a person,
+  /// and this is how the Duplicate Settings log and the Follow Up Types row capture theirs.
+  createdByName String? @map("created_by_name") @db.VarChar(120)
 
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   deletedAt DateTime? @map("deleted_at")
 
-  users User[]
+  users    User[]
+  fields   LeadFormField[]
+  sections LeadFormSection[]
 
+  /// The settings list pages live forms newest first.
+  @@index([deletedAt, module])
   @@map("lead_forms")
+}
+
+/// One field on one configured lead form (ADR-0072): which field, where it sits, and
+/// whether the form shows it.
+///
+/// `fieldKey` is a stable key, never a label — a system field's form-state key
+/// ("primaryPhone") or a custom field's own "cf_<slug>". Renaming a custom field's
+/// label therefore leaves every form that uses it untouched.
+/// A group of fields on a configured lead form (ADR-0073) — the "Create a Section"
+/// dialog's product. A section owns nothing but its name and its place in the form;
+/// which fields sit in it is the field row's own `sectionId`.
+model LeadFormSection {
+  id       String @id @default(uuid()) @db.Uuid
+  formId   String @map("form_id") @db.Uuid
+  name     String @db.VarChar(120)
+  position Int
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  form   LeadForm        @relation(fields: [formId], references: [id], onDelete: Cascade)
+  fields LeadFormField[]
+
+  /// One section name per form — the name is how a saved field addresses its section.
+  @@unique([formId, name])
+  /// The form's sections in render order.
+  @@index([formId, position])
+  @@map("lead_form_sections")
+}
+
+model LeadFormField {
+  id        String  @id @default(uuid()) @db.Uuid
+  formId    String  @map("form_id") @db.Uuid
+  /// The section this field sits in, or null for the form's ungrouped top block.
+  sectionId String? @map("section_id") @db.Uuid
+  fieldKey  String  @map("field_key") @db.VarChar(64)
+  position  Int
+  /// Visibility is the form's decision and is independent of the custom field's own
+  /// Active status: a field can be active everywhere and hidden on one form.
+  isVisible Boolean @default(true) @map("is_visible")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  form    LeadForm         @relation(fields: [formId], references: [id], onDelete: Cascade)
+  /// Removing a section returns its fields to the ungrouped block rather than deleting
+  /// them — a layout change must never drop a field off the form.
+  section LeadFormSection? @relation(fields: [sectionId], references: [id], onDelete: SetNull)
+
+  /// A field appears on a form once or not at all.
+  @@unique([formId, fieldKey])
+  /// The form's fields in render order.
+  @@index([formId, position])
+  /// A section's fields in render order.
+  @@index([sectionId, position])
+  @@map("lead_form_fields")
 }
 
 /// One row of the wizard's User Permissions matrix: what `userId` may do in `module`.
@@ -1121,6 +1194,8 @@ enum LeadCustomFieldType {
   NUMBER
   DATE
   DATETIME
+  /// Settings > Data & Schema Management: a value chosen from this field's own options.
+  DROP_DOWN
 }
 
 /// LEAD-05.1 (ADR-0051): a user-defined custom column created from "Add Column".
@@ -1139,14 +1214,46 @@ model LeadCustomField {
   type     LeadCustomFieldType
   /// Left-to-right position among custom columns; also the default layout order.
   position Int
+  /// Settings > Custom Field status. An inactive field is not offered on a form and
+  /// is not projected onto a lead row, but its stored values are retained — status is
+  /// a configuration change, never a data deletion (ADR-0072).
+  isActive Boolean             @default(true) @map("is_active")
 
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   deletedAt DateTime? @map("deleted_at")
 
-  values LeadCustomFieldValue[]
+  values  LeadCustomFieldValue[]
+  options LeadCustomFieldOption[]
 
+  /// The settings list pages active fields in display order.
+  @@index([deletedAt, position])
   @@map("lead_custom_fields")
+}
+
+/// One selectable value of a DROP_DOWN custom field (ADR-0072). Ordered, so the
+/// option list the form renders is the order the settings screen configured.
+///
+/// The label is the value: a lead stores the chosen label in its own
+/// LeadCustomFieldValue row, exactly as it stores a typed value, so renaming an
+/// option is a decision about history that this table deliberately does not make
+/// silently — the settings screen refuses to rename an option that is in use.
+model LeadCustomFieldOption {
+  id            String @id @default(uuid()) @db.Uuid
+  customFieldId String @map("custom_field_id") @db.Uuid
+  label         String @db.VarChar(180)
+  position      Int
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  customField LeadCustomField @relation(fields: [customFieldId], references: [id], onDelete: Cascade)
+
+  /// One label per field; the same label on two fields is fine.
+  @@unique([customFieldId, label])
+  /// The field's options in display order.
+  @@index([customFieldId, position])
+  @@map("lead_custom_field_options")
 }
 
 /// LEAD-05.1 (ADR-0051): one lead's value for one custom field. Stored as text and
@@ -1450,10 +1557,10 @@ enum MessageTemplateStatus {
 /// ordered, and each owns a list of configuration groups. A JSON blob would have to be
 /// read whole to answer "page 2 of the active ones".
 model AssignmentRule {
-  id          String              @id @default(uuid()) @db.Uuid
-  name        String              @db.VarChar(180)
-  description String              @db.VarChar(600)
-  algorithm   AssignmentAlgorithm @default(ROUND_ROBIN)
+  id          String               @id @default(uuid()) @db.Uuid
+  name        String               @db.VarChar(180)
+  description String               @db.VarChar(600)
+  algorithm   AssignmentAlgorithm  @default(ROUND_ROBIN)
   status      AssignmentRuleStatus @default(ACTIVE)
 
   createdById String? @map("created_by_id") @db.Uuid
@@ -1479,11 +1586,11 @@ model AssignmentRule {
 /// stored property, not a rendering accident: the reference numbers the cards, and the
 /// review step lists them by that number.
 model AssignmentRuleGroup {
-  id     String @id @default(uuid()) @db.Uuid
-  ruleId String @map("rule_id") @db.Uuid
+  id     String         @id @default(uuid()) @db.Uuid
+  ruleId String         @map("rule_id") @db.Uuid
   rule   AssignmentRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
 
-  name     String @db.VarChar(180)
+  name     String            @db.VarChar(180)
   position Int
   applyTo  AssignmentApplyTo @default(ALL_RECORDS) @map("apply_to")
   target   AssignmentTarget  @default(ALL_USERS)
