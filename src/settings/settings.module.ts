@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { SettingsController } from './settings.controller';
+import { LoginPolicyController } from './login-policy.controller';
 import { SettingsService } from './settings.service';
 
 /**
@@ -10,7 +11,7 @@ import { SettingsService } from './settings.service';
  */
 @Module({
   imports: [AuthModule],
-  controllers: [SettingsController],
+  controllers: [SettingsController, LoginPolicyController],
   providers: [SettingsService],
   // LeadsService reads the duplicate policy on every create.
   exports: [SettingsService],

@@ -54,6 +54,13 @@ import {
   SaveFollowUpTypeDto,
   UpdateActivityGeneralDto,
 } from './dto/activity-reminders.dto';
+import {
+  ApplicationGeneralSettings,
+  DashboardFieldCatalogue,
+  DashboardSettings,
+  UpdateApplicationGeneralDto,
+  UpdateDashboardSettingsDto,
+} from './dto/application-controls.dto';
 
 /**
  * App-global Settings, under `/api/settings`.
@@ -277,5 +284,47 @@ export class SettingsController {
     @Body() dto: UpdateSalesCrmGeneralDto,
   ): Promise<SalesCrmGeneralSettings> {
     return this.service.saveSalesCrmGeneral(dto);
+  }
+
+  /** GET /api/settings/application-controls/general — the saved switches, or their defaults. */
+  @Get('application-controls/general')
+  getApplicationGeneral(): Promise<ApplicationGeneralSettings> {
+    return this.service.getApplicationGeneral();
+  }
+
+  /** PUT /api/settings/application-controls/general — replaces them; returns what was stored. */
+  @Put('application-controls/general')
+  saveApplicationGeneral(
+    @Body() dto: UpdateApplicationGeneralDto,
+  ): Promise<ApplicationGeneralSettings> {
+    return this.service.saveApplicationGeneral(dto);
+  }
+
+  /** GET /api/settings/application-controls/dashboard — both modes' configuration. */
+  @Get('application-controls/dashboard')
+  getDashboardSettings(): Promise<DashboardSettings> {
+    return this.service.getDashboardSettings();
+  }
+
+  /**
+   * GET /api/settings/application-controls/dashboard/fields — the options each mode
+   * offers, from the live Stage and Lead Source catalogues.
+   */
+  @Get('application-controls/dashboard/fields')
+  getDashboardFields(): Promise<DashboardFieldCatalogue> {
+    return this.service.getDashboardFields();
+  }
+
+  /**
+   * PUT /api/settings/application-controls/dashboard — replaces the configuration.
+   *
+   * Both modes travel in one payload: that is what makes switching mode non-destructive
+   * a property of the write rather than a hope about the screen.
+   */
+  @Put('application-controls/dashboard')
+  saveDashboardSettings(
+    @Body() dto: UpdateDashboardSettingsDto,
+  ): Promise<DashboardSettings> {
+    return this.service.saveDashboardSettings(dto);
   }
 }
