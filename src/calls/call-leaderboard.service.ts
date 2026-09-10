@@ -7,6 +7,8 @@ import { callConnectPct } from './call-connect';
 import { resolvePeriod } from './call-period';
 import { CallSummaryQueryDto } from './dto/call-summary-query.dto';
 
+const round2 = (value: number): number => Math.round(value * 100) / 100;
+
 /** One agent's ranked call metrics for the period (CALL-04.1). */
 export type LeaderboardEntry = {
   /** The drill-through key (AC4) — the agent's detailed activity is the Call Log (CALL-05.x). */
@@ -17,6 +19,14 @@ export type LeaderboardEntry = {
   answeredCalls: number;
   missedCalls: number;
   callConnectPct: number;
+  /** Σ talk time in minutes, 2dp — the summary's `totalCallMinutes` rule, per agent. */
+  callMinutes: number;
+  /**
+   * Talk time per *connected* call, 2dp — the summary's `averageCallTime` rule.
+   * Divided from the UNROUNDED minutes, which is what makes 3343s over 11 answered
+   * calls read 5.07 and not 5.06, exactly as the Workpex board does.
+   */
+  averageCallTime: number;
 };
 
 /**
@@ -53,6 +63,10 @@ export class CallLeaderboardService {
         by: ['agentId'],
         where,
         _count: { _all: true },
+        // Talk time per agent, so the dashboard's Call Activity Board reads its
+        // Call Minutes / AVG Call Time from this one aggregation rather than a
+        // second copy of the rule (DASH-05.1 AC3/AC4).
+        _sum: { duration: true },
       }),
       this.prisma.call.groupBy({
         by: ['agentId'],
@@ -100,6 +114,7 @@ export class CallLeaderboardService {
         .map((row): LeaderboardEntry => {
           const totalCalls = row._count._all;
           const answeredCalls = answeredByAgent.get(row.agentId) ?? 0;
+          const minutes = (row._sum.duration ?? 0) / 60;
           return {
             agentId: row.agentId,
             agentName: nameByAgent.get(row.agentId) ?? 'Unknown',
@@ -109,6 +124,9 @@ export class CallLeaderboardService {
             missedCalls: missedByAgent.get(row.agentId) ?? 0,
             // The one shared Connect % computation (CALL-07.1); zero-safe.
             callConnectPct: callConnectPct(answeredCalls, totalCalls),
+            callMinutes: round2(minutes),
+            averageCallTime:
+              answeredCalls > 0 ? round2(minutes / answeredCalls) : 0,
           };
         })
         // Rank by volume, then quality, then name — a stable, clear order that
