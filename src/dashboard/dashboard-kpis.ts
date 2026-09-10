@@ -6,6 +6,7 @@ import { buildOverdueFollowUpsWhere } from '../reports/overdue-follow-ups-where'
 import { buildLeadWhere } from '../leads/lead-where';
 import { leadScopeWhere } from '../leads/lead-scope';
 import { callScopeWhere } from '../calls/call-scope';
+import { DashboardPeriod } from './dashboard-agents';
 
 /** The six top-of-dashboard counters (DASH-02.1 AC1). */
 export const KPI_KEYS = [
@@ -152,10 +153,14 @@ export function todaysLeadsWhere(
  * 2026-08-29). Composed through `buildLeadWhere`, so role scope, soft-delete and
  * the status predicate are the exact fragments the Leads list uses; the period
  * applies to `createdAt`, the convention every leads report follows.
+ *
+ * Takes the range alone, not a `KpiPeriod`: nothing here means anything by "overdue",
+ * so the Hot Leads widget (DASH-08.1) can reuse this fragment without inventing a
+ * `todayStart` it does not have. Every existing `KpiPeriod` caller still fits.
  */
 export function hotLeadsWhere(
   user: CurrentUser,
-  period: KpiPeriod,
+  period: DashboardPeriod,
 ): Prisma.LeadWhereInput {
   return buildLeadWhere(user, {
     status: HOT_LEAD_STATUSES,

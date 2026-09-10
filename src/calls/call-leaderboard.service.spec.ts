@@ -21,13 +21,19 @@ type Where = {
   lead?: Record<string, unknown>;
 };
 
-function count(agentId: string, n: number) {
-  return { agentId, _count: { _all: n } };
+function count(agentId: string, n: number, durationSeconds = 0) {
+  return { agentId, _count: { _all: n }, _sum: { duration: durationSeconds } };
 }
 
 function makeService(role: UserRole = UserRole.SUPERADMIN) {
   // totals: A and B tie at 16; C has 5. answered: B 12 > A 9 > C 0.
-  const totals = [count(AGENT_A, 16), count(AGENT_B, 16), count(AGENT_C, 5)];
+  // A's 3343s over 9 answered is the reference's own rounding trap: 55.72 min
+  // displayed, but the average must divide the UNROUNDED minutes.
+  const totals = [
+    count(AGENT_A, 16, 3343),
+    count(AGENT_B, 16, 600),
+    count(AGENT_C, 5, 0),
+  ];
   const answered = [count(AGENT_A, 9), count(AGENT_B, 12)];
   const missed = [count(AGENT_B, 2)];
   const contacts = [
@@ -113,6 +119,27 @@ describe('CallLeaderboardService.getLeaderboard', () => {
     const { service } = makeService();
     const rows = await service.getLeaderboard(query());
     expect(rows.find((r) => r.agentId === AGENT_C)!.callConnectPct).toBe(0);
+  });
+
+  it('reports Call Minutes and averages them from the UNROUNDED total', async () => {
+    const { service } = makeService();
+    const rows = await service.getLeaderboard(query());
+    const ansar = rows.find((r) => r.agentId === AGENT_A)!;
+    // 3343s = 55.7166… min → 55.72 shown; 55.7166…/9 = 6.1907… → 6.19.
+    // Averaging the ROUNDED 55.72 would give 6.19 here too, so the guard that
+    // matters is that minutes is not rounded before the division: at the
+    // reference's own 11-answered case it is what separates 5.07 from 5.06.
+    expect(ansar.callMinutes).toBe(55.72);
+    expect(ansar.averageCallTime).toBe(6.19);
+    expect(rows.find((r) => r.agentId === AGENT_B)!.callMinutes).toBe(10);
+  });
+
+  it('leaves an agent with no answered call at a 0 average, never NaN (AC5)', async () => {
+    const { service } = makeService();
+    const rows = await service.getLeaderboard(query());
+    const cara = rows.find((r) => r.agentId === AGENT_C)!;
+    expect(cara.callMinutes).toBe(0);
+    expect(cara.averageCallTime).toBe(0);
   });
 
   it('scopes the aggregation to the caller for a sales agent (AC3)', async () => {

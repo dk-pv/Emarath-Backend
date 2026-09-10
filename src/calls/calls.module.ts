@@ -28,6 +28,8 @@ import { CallAnalyticsService } from './call-analytics.service';
     CallLogService,
     CallAnalyticsService,
   ],
-  exports: [CallsService, CallLookupService],
+  // CallLeaderboardService is exported so the Dashboard's Call Activity Board
+  // and sales leaderboard read this one aggregation (DASH-05.1 AC3).
+  exports: [CallsService, CallLookupService, CallLeaderboardService],
 })
 export class CallsModule {}
