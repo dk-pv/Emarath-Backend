@@ -163,6 +163,108 @@ async function main(): Promise<void> {
       where: { deletedAt: null, dueAt: { lt: new Date('2000-01-01') } },
     });
     P('No invalid dueAt', invalidDates === 0, String(invalidDates));
+
+    // ── Dashboard windows ────────────────────────────────────────────────────
+    //
+    // Every Dashboard widget defaults to This Month, so a dataset that is
+    // internally consistent but sits entirely in the past renders an empty page.
+    // These assert the windows the widgets actually query, not just row counts.
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const todayStart = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+    );
+    const inMonth = { gte: monthStart, lt: monthEnd };
+
+    const assignedThisMonth = await prisma.leadAssignment.count({
+      where: { lead: { deletedAt: null }, createdAt: inMonth },
+    });
+    const assignedToday = await prisma.leadAssignment.count({
+      where: { lead: { deletedAt: null }, createdAt: { gte: todayStart } },
+    });
+    const assignedPrevMonth = await prisma.leadAssignment.count({
+      where: {
+        lead: { deletedAt: null },
+        createdAt: { gte: prevStart, lt: monthStart },
+      },
+    });
+    // The bug this guards: LeadAssignment.createdAt left to default put every
+    // assignment on the instant the fixture ran, so Todays Leads, Team Revenue
+    // and the leaderboard's conversion-rate denominator read the whole dataset on
+    // seed day and zero ever after.
+    P(
+      'Assignments dated across months, not one instant',
+      assignedThisMonth > 0 && assignedPrevMonth > 0,
+      `this=${assignedThisMonth} prev=${assignedPrevMonth} today=${assignedToday}`,
+    );
+
+    const hotThisMonth = await prisma.lead.count({
+      where: {
+        deletedAt: null,
+        status: { in: ['HOT', 'SUPER HOT'] },
+        createdAt: inMonth,
+      },
+    });
+    P(
+      'Hot leads inside the current month',
+      hotThisMonth >= 5,
+      String(hotThisMonth),
+    );
+
+    const wonThisMonth = await prisma.lead.count({
+      where: { deletedAt: null, status: 'WON', statusChangedAt: inMonth },
+    });
+    P(
+      'Conversions inside the current month',
+      wonThisMonth >= 5,
+      String(wonThisMonth),
+    );
+
+    const callsThisMonth = await prisma.call.count({
+      where: { startedAt: inMonth },
+    });
+    P(
+      'Calls inside the current month',
+      callsThisMonth >= 50,
+      String(callsThisMonth),
+    );
+
+    const targets = await prisma.user.count({
+      where: { deletedAt: null, monthlyGoalAmount: { not: null } },
+    });
+    P('Agents carrying a revenue target', targets >= 5, String(targets));
+
+    // Enough concentration that the board ranks somebody.
+    const byOwner = await prisma.leadAssignment.groupBy({
+      by: ['userId'],
+      where: { lead: { deletedAt: null }, createdAt: inMonth },
+      _count: { _all: true },
+    });
+    const top = byOwner.map((r) => r._count._all).sort((a, b) => b - a);
+    P(
+      'Leaderboard has ranked volume, not a flat row',
+      (top[0] ?? 0) >= 5,
+      `top owners: ${top.slice(0, 5).join(', ')}`,
+    );
+
+    const lostLeads = await prisma.lead.count({
+      where: { deletedAt: null, status: 'LOST' },
+    });
+    const noActivity = await prisma.lead.count({
+      where: {
+        deletedAt: null,
+        activities: { none: { deletedAt: null, completedAt: { not: null } } },
+      },
+    });
+    P(
+      'Leads - Need Attention has all three groups',
+      lostLeads > 0 && noActivity > 0,
+      `lost=${lostLeads} noActivity=${noActivity}`,
+    );
   } finally {
     await prisma.$disconnect();
   }

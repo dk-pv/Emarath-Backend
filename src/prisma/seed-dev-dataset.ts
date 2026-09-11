@@ -31,6 +31,12 @@ import { LOOKUP_DATA } from '../lookups/lookups.data';
 import { DEFAULT_PIPELINE } from '../stages/stage.constants';
 
 const LEAD_COUNT = 280;
+/**
+ * How many people the leaderboard ranks. Ten across 280 leads averages ~28 each,
+ * the order of magnitude the reference board shows (37, 157, 31), instead of the
+ * one-or-two a full-org round-robin produced.
+ */
+const CORE_TEAM_SIZE = 10;
 /** 180 leads carry 1–5 activities; the remaining 100 deliberately carry none. */
 const LEADS_WITH_ACTIVITIES = 180;
 
@@ -222,11 +228,12 @@ async function main(): Promise<void> {
     // ── Read the catalogues this dataset must stay inside ────────────────────
     const agents = await prisma.user.findMany({
       where: {
+        deletedAt: null,
         role: {
           in: ['SALES_AGENT', 'SALES_MANAGER', 'CUSTOMER_SERVICE_AGENT'],
         },
       },
-      select: { id: true, name: true },
+      select: { id: true, name: true, role: true },
       orderBy: { username: 'asc' },
     });
     if (agents.length === 0) {
@@ -234,6 +241,55 @@ async function main(): Promise<void> {
         'No assignable agents found — run `npm run seed:run` first.',
       );
     }
+
+    /**
+     * The desk that actually carries the book.
+     *
+     * Round-robining every assignable user gave 42 leaderboard rows of one to
+     * three leads each — a board that ranks nobody, and a sales agent whose own
+     * Dashboard showed two leads. Real desks are not flat: a core team owns the
+     * volume and the rest of the org appears occasionally. Capped and ordered by
+     * username so the same people are the core on every run.
+     */
+    const owners = agents
+      .filter(
+        (agent) =>
+          agent.role === 'SALES_AGENT' || agent.role === 'SALES_MANAGER',
+      )
+      .slice(0, CORE_TEAM_SIZE);
+    if (owners.length === 0) {
+      throw new Error(
+        'No sales agents or managers found — run `npm run seed:run` first.',
+      );
+    }
+
+    // ── Revenue targets for the core desk ────────────────────────────────────
+    //
+    // Without a monthly goal the leaderboard's "% Revenue Target Achieved" reads
+    // NA for everyone and the Team Revenue rail has no denominator, so the widget
+    // cannot be reviewed at all. A ladder rather than one figure, so the column
+    // ranks; deliberately low at the top of the ladder so the strongest sellers
+    // land ABOVE 100 % — the reference board runs to 4846 %, and the calculation
+    // is explicitly uncapped (DASH-04.1 AC3).
+    //
+    // This updates one column on users the fixture did not create, so it is
+    // written narrowly and idempotently: only the core desk, only the goal.
+    const TARGET_LADDER = [40000, 55000, 70000, 85000, 100000];
+    await Promise.all(
+      owners.map((owner, index) =>
+        prisma.user.update({
+          where: { id: owner.id },
+          data: {
+            monthlyGoalAmount: String(
+              TARGET_LADDER[index % TARGET_LADDER.length],
+            ),
+          },
+        }),
+      ),
+    );
+    console.log(
+      `[dev-dataset] monthly revenue targets set on ${owners.length} core agents.`,
+    );
 
     const stages = await prisma.stage.findMany({
       where: { pipeline: DEFAULT_PIPELINE },
@@ -244,6 +300,57 @@ async function main(): Promise<void> {
       throw new Error('No stages found — run `npm run seed:run` first.');
     }
     const statuses = stages.map((stage) => stage.name);
+
+    // ── Dashboard Settings: which stages the summary row counts ──────────────
+    //
+    // `GET /api/dashboard/summary` returns exactly the cards Settings → Application
+    // Controls → Dashboard Settings names, and correctly refuses to invent a
+    // fallback when nothing is selected — so on a fresh database that widget is
+    // empty however many leads exist. Seeding the *configuration* (not the
+    // figures) is what populates it: the counts still come from the leads.
+    //
+    // Written only when unset, so a choice made in the UI is never overwritten.
+    const SUMMARY_STAGES = [
+      'New',
+      'Initial Contact',
+      'HOT',
+      'SUPER HOT',
+      'WON',
+      'LOST',
+    ];
+    const dashboardKey = 'application.dashboard';
+    const existingDashboard = await prisma.appSetting.findUnique({
+      where: { key: dashboardKey },
+      select: { value: true },
+    });
+    const chosen = existingDashboard?.value as
+      { leadStage?: unknown[] } | undefined;
+    if (!chosen?.leadStage?.length) {
+      const available = new Set(
+        (
+          await prisma.stage.findMany({
+            where: { pipeline: DEFAULT_PIPELINE },
+            select: { name: true },
+          })
+        ).map((stage) => stage.name),
+      );
+      const value = {
+        summaryMode: 'LEAD_STAGE',
+        displayOnCards: 'BOTH',
+        leadStage: SUMMARY_STAGES.filter((name) => available.has(name)).map(
+          (fieldKey, position) => ({ fieldKey, position }),
+        ),
+        leadSource: [],
+      };
+      await prisma.appSetting.upsert({
+        where: { key: dashboardKey },
+        create: { key: dashboardKey, value },
+        update: { value },
+      });
+      console.log(
+        `[dev-dataset] dashboard summary configured with ${value.leadStage.length} stage cards.`,
+      );
+    }
 
     const tags = await prisma.tag.findMany({
       where: { deletedAt: null },
@@ -266,7 +373,7 @@ async function main(): Promise<void> {
     const products = values(LOOKUP_DATA.products);
 
     console.log(
-      `[dev-dataset] catalogues: ${agents.length} agents · ${statuses.length} stages · ` +
+      `[dev-dataset] catalogues: ${agents.length} agents (${owners.length} core) · ${statuses.length} stages · ` +
         `${tags.length} tags · ${sources.length} sources · ${products.length} products`,
     );
 
@@ -283,6 +390,21 @@ async function main(): Promise<void> {
       where: { id: { in: leadIds } },
     });
     if (previous > 0) {
+      // `Call.leadId` is onDelete: Restrict — a call is a business record and must
+      // never vanish because a lead row was tidied. The call fixture
+      // (prisma/seed-calls.mjs) attaches its calls to whatever leads exist, so on
+      // a re-run those point at the leads about to be replaced and block the
+      // delete. They are removed first, deliberately and narrowly: only calls on
+      // this fixture's own leads, which would be orphaned regardless. Calls on any
+      // other lead are untouched.
+      const strandedCalls = await prisma.call.deleteMany({
+        where: { leadId: { in: leadIds } },
+      });
+      if (strandedCalls.count > 0) {
+        console.log(
+          `[dev-dataset] removed ${strandedCalls.count} calls attached to the previous run's leads.`,
+        );
+      }
       // Cascades remove their activities, assignments and tag links.
       await prisma.lead.deleteMany({ where: { id: { in: leadIds } } });
       console.log(
@@ -342,6 +464,50 @@ async function main(): Promise<void> {
     startOfToday.setHours(0, 0, 0, 0);
     const dayMs = 86_400_000;
 
+    /**
+     * Leads are not spread evenly across the board: a real pipeline is fattest at
+     * the top and thins toward the outcome stages, and a flat distribution makes
+     * the Sales Pipeline Overview a row of identical bars that communicates
+     * nothing. Weights are relative, applied only to stages this database
+     * actually has; any stage not named here still appears, at weight 1, so
+     * adding a stage never silently drops it from the dataset.
+     */
+    const STATUS_WEIGHTS: Record<string, number> = {
+      New: 30,
+      'Initial Contact': 22,
+      'Follow-Up': 18,
+      Warm: 14,
+      HOT: 13,
+      'NOT ANSWER': 12,
+      'NOT REACHEBLE': 10,
+      Cold: 10,
+      'SUPER HOT': 8,
+      WON: 16,
+      Converted: 9,
+      'READY TO DISPATCH': 8,
+      'DATE SHIPMENT': 7,
+      LOST: 12,
+      Cancel: 6,
+      COMPLAINT: 5,
+      'CS NUMBER Received': 5,
+      'SALES REJECTED': 4,
+      'QC NOT APPROVED': 3,
+    };
+    const statusPool = statuses.flatMap((status) =>
+      Array.from({ length: STATUS_WEIGHTS[status] ?? 1 }, () => status),
+    );
+
+    /** The stages whose leads carry a deal-sized figure rather than a small one. */
+    const HIGH_VALUE = new Set([
+      'HOT',
+      'SUPER HOT',
+      'WON',
+      'Converted',
+      'READY TO DISPATCH',
+    ]);
+    /** Reached its outcome, so it has a status-change instant worth spreading. */
+    const TERMINAL = new Set(['WON', 'Converted', 'LOST', 'Cancel']);
+
     const leads = leadIds.map((id, index) => {
       const country = pick(COUNTRIES);
       const first = pick(FIRST_NAMES);
@@ -353,6 +519,43 @@ async function main(): Promise<void> {
       // Varying this needs stages seeded for those pipelines, which is KAN-05.1's
       // catalogue to own, not a fixture's.
       const pipeline = DEFAULT_PIPELINE;
+
+      // Computed before the record so the amount, the status-change instant and
+      // the assignment date below can all derive from it — a lead cannot be
+      // assigned or converted before it exists.
+      //
+      // Skewed toward recent days rather than spread flat over the 120. Flat put
+      // only ~2 of the 31 hot leads inside the current month, so every widget
+      // that defaults to This Month opened nearly empty while the data sat months
+      // back. Squaring the draw lands about half the dataset in the last four
+      // weeks and still leaves a long tail for the previous-month comparisons.
+      const ageDays = Math.floor(120 * random() ** 2.2);
+      const createdAt = new Date(
+        startOfToday.getTime() - ageDays * dayMs - between(0, 86_399) * 1000,
+      );
+      const status = pick(statusPool);
+      // A hot or won lead carries a deal-sized figure (AED 5k–45k); everything
+      // else stays small, so the Hot Leads total and Team Revenue are dominated
+      // by the leads that should dominate them rather than by background noise.
+      const actualAmount = HIGH_VALUE.has(status)
+        ? String(between(5, 45) * 1000 + between(0, 19) * 25)
+        : chance(0.35)
+          ? String(between(120, 4800))
+          : null;
+      // Terminal statuses get an instant somewhere between creation and now, so
+      // "converted in this period" differs from "converted in the last" — without
+      // it every conversion lands on the day the fixture ran and the month-over-
+      // month widgets flatten. Prisma sets this column on insert; the
+      // leads_status_changed_at trigger only maintains it on later updates.
+      const statusChangedAt = TERMINAL.has(status)
+        ? new Date(
+            createdAt.getTime() +
+              Math.floor(
+                random() * Math.max(dayMs, Date.now() - createdAt.getTime()),
+              ),
+          )
+        : createdAt;
+
       return {
         id,
         name: chance(0.12) ? phone : `${first} ${last}`,
@@ -370,7 +573,8 @@ async function main(): Promise<void> {
         country: country.name,
         city: pick(CITIES),
         source: chance(0.96) ? pick(sources) : null,
-        status: pick(statuses),
+        status,
+        statusChangedAt,
         pipeline,
         product: chance(0.7) ? pick(products) : null,
         productQty: chance(0.7) ? String(between(1, 4)) : null,
@@ -379,14 +583,10 @@ async function main(): Promise<void> {
         callStatus: chance(0.9) ? pick(callStatuses) : null,
         callAttempts: between(0, 4),
         whatsappAttempts: between(0, 4),
-        actualAmount: chance(0.4) ? String(between(120, 4800)) : null,
+        actualAmount,
         forecastedAmount: chance(0.5) ? String(between(150, 6000)) : null,
         // Spread over ~120 days so date-range filters have something to bite on.
-        createdAt: new Date(
-          startOfToday.getTime() -
-            between(0, 120) * dayMs -
-            between(0, 86_399) * 1000,
-        ),
+        createdAt,
       };
     });
 
@@ -394,17 +594,34 @@ async function main(): Promise<void> {
     console.log(`[dev-dataset] ${leads.length} leads created.`);
 
     // ── Lead assignments: every lead to 1–2 agents, spread across all of them ──
+    //
+    // `createdAt` is set explicitly and is NOT decorative. It doubles as Workpex's
+    // "Assigned Date", and it is what the Todays Leads / Leads This Month counters,
+    // the Team Revenue rail and the leaderboard's conversion-rate denominator all
+    // filter on. Leaving it to default put every assignment on the instant the
+    // fixture ran, so those widgets read the whole dataset on seed day and zero
+    // ever after — the period filters had nothing to distinguish. Deriving it from
+    // the lead's own creation (assigned 0–2 days later, never before it existed)
+    // spreads it across the same ~120 days the leads occupy.
     const leadAssignments = leads.flatMap((lead, index) => {
       const count = chance(0.3) ? 2 : 1;
       const chosen = new Set<string>();
-      // Round-robin the primary owner so no single agent holds the whole dataset,
-      // then add a random second so the assignee filter has overlaps to match.
-      chosen.add(agents[index % agents.length].id);
+      // Round-robin the primary owner across the core desk so the leaderboard has
+      // real volume to rank, then add the occasional second from the wider org so
+      // the assignee filter still has overlaps and shared leads to match.
+      chosen.add(owners[index % owners.length].id);
       while (chosen.size < count) chosen.add(pick(agents).id);
+      const assignedAt = new Date(
+        Math.min(
+          lead.createdAt.getTime() + between(0, 2) * dayMs,
+          startOfToday.getTime() + 86_399_000,
+        ),
+      );
       return [...chosen].map((userId) => ({
         id: randomUUID(),
         leadId: lead.id,
         userId,
+        createdAt: assignedAt,
       }));
     });
     await prisma.leadAssignment.createMany({ data: leadAssignments });
@@ -507,7 +724,9 @@ async function main(): Promise<void> {
     const activityAssignees = activities.flatMap((activity, index) => {
       const count = chance(0.35) ? between(2, 3) : 1;
       const chosen = new Set<string>();
-      chosen.add(agents[index % agents.length].id);
+      // Same core desk as the leads: an agent's own Activities widget has to be
+      // populated for the role-scoped view to be worth looking at.
+      chosen.add(owners[index % owners.length].id);
       while (chosen.size < count) chosen.add(pick(agents).id);
       return [...chosen].map((userId) => ({
         id: randomUUID(),
