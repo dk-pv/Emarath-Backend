@@ -7,6 +7,12 @@ import { CallsModule } from '../calls/calls.module';
 import { TeamRevenueService } from './team-revenue.service';
 import { SalesLeaderboardService } from './sales-leaderboard.service';
 import { CallActivityService } from './call-activity.service';
+import { HotLeadsService } from './hot-leads.service';
+import { LeadsAttentionService } from './leads-attention.service';
+import { ActivitiesTrackerService } from './activities-tracker.service';
+import { LeadSourceSummaryService } from './lead-source-summary.service';
+import { LeadsConversionService } from './leads-conversion.service';
+import { SalesPipelineService } from './sales-pipeline.service';
 
 /**
  * The Dashboard module (Sprint 5). DASH-02.1 the KPI counters, DASH-03.1 the team
@@ -30,6 +36,12 @@ import { CallActivityService } from './call-activity.service';
     TeamRevenueService,
     SalesLeaderboardService,
     CallActivityService,
+    HotLeadsService,
+    LeadsAttentionService,
+    ActivitiesTrackerService,
+    LeadSourceSummaryService,
+    LeadsConversionService,
+    SalesPipelineService,
   ],
 })
 export class DashboardModule {}
