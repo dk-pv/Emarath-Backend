@@ -8,6 +8,8 @@ import { Prisma } from '../../generated/prisma/client';
 import { CurrentUserService } from '../../auth/current-user';
 import { MailerService } from '../../auth/mailer.service';
 import { PrismaService } from '../../prisma/prisma.service';
+import { userActor } from '../../audit/audit-events';
+import { auditLeadChanges, recordLeadsCreated } from '../lead-audit';
 import { leadScopeWhere } from '../lead-scope';
 import {
   LeadListItem,
@@ -121,9 +123,14 @@ export class LeadRowActionsService {
         : undefined,
     };
 
-    const created = await this.prisma.lead.create({
-      data,
-      select: LEAD_LIST_SELECT,
+    const created = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.lead.create({ data, select: LEAD_LIST_SELECT });
+      await recordLeadsCreated(tx, [row.id], {
+        actor: userActor(user),
+        source: 'leads.duplicate',
+        metadata: { duplicatedFrom: id },
+      });
+      return row;
     });
     return toLeadListItem(created);
   }
@@ -135,10 +142,10 @@ export class LeadRowActionsService {
    * as a 404. The updated lead is returned so the row can reflect its new owner.
    */
   async reassign(id: string, dto: ReassignLeadDto): Promise<LeadListItem> {
-    const result = await this.bulk.reassign({
-      ids: [id],
-      agentId: dto.agentId,
-    });
+    const result = await this.bulk.reassign(
+      { ids: [id], agentId: dto.agentId },
+      'leads.reassign',
+    );
     if (result.results[0]?.status !== 'success') {
       throw new NotFoundException(OUT_OF_SCOPE_REASON);
     }
@@ -159,17 +166,23 @@ export class LeadRowActionsService {
     });
     if (!target) throw new NotFoundException(OUT_OF_SCOPE_REASON);
 
-    const updated = await this.prisma.lead.update({
-      where: { id },
-      // The capture rule: a move to LOST stores the reason (null when none was offered);
-      // any other status clears it — a reason belongs to the loss it described.
-      data: {
-        status: dto.status,
-        lostReason:
-          dto.status === LOST_STATUS ? (dto.lostReason ?? null) : null,
-      },
-      select: LEAD_LIST_SELECT,
-    });
+    const updated = await auditLeadChanges(
+      this.prisma,
+      [id],
+      { actor: userActor(user), source: 'leads.status' },
+      (tx) =>
+        tx.lead.update({
+          where: { id },
+          // The capture rule: a move to LOST stores the reason (null when none was offered);
+          // any other status clears it — a reason belongs to the loss it described.
+          data: {
+            status: dto.status,
+            lostReason:
+              dto.status === LOST_STATUS ? (dto.lostReason ?? null) : null,
+          },
+          select: LEAD_LIST_SELECT,
+        }),
+    );
     return toLeadListItem(updated);
   }
 
@@ -240,11 +253,12 @@ export class LeadRowActionsService {
 
   /**
    * Permanently removes one lead (AC5, hard delete — matching the approved bulk
-   * decision). Delegates to the bulk delete so the scope check and the cascading
-   * hard delete are not written twice; an out-of-scope id is a 404.
+   * decision). Delegates to the bulk delete so the scope check, the retention guard and
+   * the cascading hard delete are not written twice; an out-of-scope id is a 404 and a
+   * lead other records depend on is a 409 (ADR-0083).
    */
   async delete(id: string): Promise<RowDeleteResponse> {
-    const result = await this.bulk.delete({ ids: [id] });
+    const result = await this.bulk.delete({ ids: [id] }, 'leads.delete');
     if (result.results[0]?.status !== 'success') {
       throw new NotFoundException(OUT_OF_SCOPE_REASON);
     }
@@ -281,11 +295,17 @@ export class LeadRowActionsService {
       );
     }
 
-    const updated = await this.prisma.lead.update({
-      where: { id },
-      data: { pipeline: dto.pipeline, status: firstStage.name },
-      select: LEAD_LIST_SELECT,
-    });
+    const updated = await auditLeadChanges(
+      this.prisma,
+      [id],
+      { actor: userActor(user), source: 'leads.pipeline' },
+      (tx) =>
+        tx.lead.update({
+          where: { id },
+          data: { pipeline: dto.pipeline, status: firstStage.name },
+          select: LEAD_LIST_SELECT,
+        }),
+    );
     return toLeadListItem(updated);
   }
 
@@ -304,10 +324,13 @@ export class LeadRowActionsService {
     });
     if (!target) throw new NotFoundException(OUT_OF_SCOPE_REASON);
 
-    await this.prisma.lead.update({
-      where: { id },
-      data: { deletedAt: new Date() },
-    });
+    await auditLeadChanges(
+      this.prisma,
+      [id],
+      { actor: userActor(user), source: 'leads.archive' },
+      (tx) =>
+        tx.lead.update({ where: { id }, data: { deletedAt: new Date() } }),
+    );
     return { id };
   }
 
@@ -326,11 +349,17 @@ export class LeadRowActionsService {
     });
     if (!target) throw new NotFoundException(OUT_OF_SCOPE_REASON);
 
-    const updated = await this.prisma.lead.update({
-      where: { id },
-      data: { deletedAt: null },
-      select: LEAD_LIST_SELECT,
-    });
+    const updated = await auditLeadChanges(
+      this.prisma,
+      [id],
+      { actor: userActor(user), source: 'leads.unarchive' },
+      (tx) =>
+        tx.lead.update({
+          where: { id },
+          data: { deletedAt: null },
+          select: LEAD_LIST_SELECT,
+        }),
+    );
     return toLeadListItem(updated);
   }
 

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '../../generated/prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { LeadAuditContext, recordLeadsCreated } from '../lead-audit';
 
 /** One import-ready lead: the create-many row plus, for a sales-agent import, the
  * assignment that keeps the lead inside the importer's scope. */
@@ -45,9 +46,13 @@ export class LeadsImportRepository {
    * Inserts one batch of leads and their creator-assignments in a single
    * transaction, so a batch either lands whole or not at all. Ids are pre-generated
    * (see the descriptor), which is what lets both the leads and their assignments
-   * go in as `createMany` rather than row-by-row.
+   * go in as `createMany` rather than row-by-row. Each lead's creation is recorded in
+   * the same transaction (ADR-0083).
    */
-  async insertLeads(records: PreparedLead[]): Promise<void> {
+  async insertLeads(
+    records: PreparedLead[],
+    audit: LeadAuditContext,
+  ): Promise<void> {
     if (records.length === 0) return;
 
     const assignments = records
@@ -65,6 +70,11 @@ export class LeadsImportRepository {
           skipDuplicates: true,
         });
       }
+      await recordLeadsCreated(
+        tx,
+        records.map((record) => record.data.id),
+        audit,
+      );
     });
   }
 }

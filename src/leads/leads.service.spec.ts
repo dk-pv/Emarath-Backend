@@ -85,6 +85,7 @@ type UpdateArgs = {
   assigneeIds: string[];
   tagIds: string[];
   complaintReason: string | null;
+  customFieldValues?: { customFieldId: string; value: string }[];
 };
 
 function makeService(
@@ -135,9 +136,36 @@ function makeService(
   // assertions below stay focused on the payload rather than the duplicate policy.
   const leadFindMany = jest.fn().mockResolvedValue([]);
   const blockedCreate = jest.fn();
+  // The audit reads and write, inside the transaction the change runs in (ADR-0083).
+  const auditFindMany = jest.fn().mockResolvedValue([]);
+  const auditCreateMany = jest.fn().mockResolvedValue({ count: 0 });
+  const tx = {
+    $queryRaw: jest.fn().mockResolvedValue([]),
+    lead: { findMany: auditFindMany },
+    auditEvent: { createMany: auditCreateMany },
+    // The conversion hook (ADR-0085): `createManyAndReturn` echoes what it was asked to
+    // insert, so a lead that becomes WON gets an order id on its CONVERTED event.
+    logisticsOrder: {
+      findMany: jest.fn().mockResolvedValue([]),
+      createManyAndReturn: jest.fn((args: { data: { leadId: string }[] }) =>
+        Promise.resolve(
+          args.data.map((row, index) => ({
+            id: `order-${index + 1}`,
+            leadId: row.leadId,
+            orderNumber: 1000 + index,
+            status: 'INITIAL',
+          })),
+        ),
+      ),
+    },
+  };
+  const $transaction = jest.fn((run: (client: typeof tx) => Promise<unknown>) =>
+    run(tx),
+  );
   const prisma = {
     lead: { findMany: leadFindMany },
     blockedEnquiry: { create: blockedCreate },
+    $transaction,
   } as unknown as PrismaService;
   const getSalesCrmDuplicate = jest
     .fn()
@@ -183,7 +211,36 @@ function makeService(
     activitiesForLead,
     findPage,
     duplicatePhones,
+    pickAssignee,
+    prepareValues,
+    tx,
+    auditFindMany,
+    auditCreateMany,
   };
+}
+
+/** A row shaped like the audit select (ADR-0083) — only what the log compares. */
+function auditRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'lead-1',
+    status: 'New',
+    lostReason: null,
+    pipeline: 'Lead Pipeline',
+    city: null,
+    deletedAt: null,
+    assignments: [],
+    tags: [],
+    customFieldValues: [],
+    complaints: [],
+    ...overrides,
+  };
+}
+
+/** The audit rows written by the one createMany call a change makes. */
+function recorded(auditCreateMany: jest.Mock): Record<string, unknown>[] {
+  return (
+    auditCreateMany.mock.calls[0] as [{ data: Record<string, unknown>[] }]
+  )[0].data;
 }
 
 describe('LeadsService.list', () => {
@@ -576,6 +633,28 @@ describe('LeadsService.update', () => {
     expect(updateArgsOf().assigneeIds).toContain('agent-1');
   });
 
+  // Regression: the Lead Detail and Kanban edit forms opened without the custom-field
+  // definitions and sent `customFields: []`, which erased every value on save.
+  it('keeps custom values when the edit omits customFields', async () => {
+    const { service, findById, updateArgsOf, prepareValues } = makeService();
+    findById.mockResolvedValue(FAKE_ROW);
+
+    await service.update('lead-1', { ...BASE_DTO });
+
+    expect(prepareValues).not.toHaveBeenCalled();
+    expect(updateArgsOf().customFieldValues).toBeUndefined();
+  });
+
+  it('still clears custom values when the edit sends an empty set', async () => {
+    const { service, findById, updateArgsOf, prepareValues } = makeService();
+    findById.mockResolvedValue(FAKE_ROW);
+
+    await service.update('lead-1', { ...BASE_DTO, customFields: [] });
+
+    expect(prepareValues).toHaveBeenCalledWith([]);
+    expect(updateArgsOf().customFieldValues).toEqual([]);
+  });
+
   it('reports a bad agent/tag id (foreign key) as a 400, not a 500', async () => {
     const { service, findById, update } = makeService();
     findById.mockResolvedValue(FAKE_ROW);
@@ -589,6 +668,146 @@ describe('LeadsService.update', () => {
     await expect(
       service.update('lead-1', { ...BASE_DTO, tagIds: ['nope'] }),
     ).rejects.toMatchObject({ status: 400 });
+  });
+});
+
+describe('LeadsService — audit (ADR-0083)', () => {
+  it('records a new lead as CREATED, then ASSIGNED, through the create’s transaction', async () => {
+    const { service, create, tx, auditFindMany, auditCreateMany } =
+      makeService();
+    auditFindMany.mockResolvedValue([
+      auditRow({ assignments: [{ userId: 'u1' }] }),
+    ]);
+
+    await service.create({ ...BASE_DTO, assignedAgentIds: ['u1'] });
+
+    // The lead is written through the same transaction client the events use.
+    expect((create.mock.calls[0] as unknown[])[1]).toBe(tx);
+    expect(recorded(auditCreateMany)).toMatchObject([
+      {
+        action: 'CREATED',
+        entityId: 'lead-1',
+        actorId: 'me',
+        source: 'leads.create',
+        after: { status: 'New', pipeline: 'Lead Pipeline' },
+      },
+      { action: 'ASSIGNED', after: { assigneeIds: ['u1'] } },
+    ]);
+  });
+
+  it('marks an assignment the rule engine chose as automatic', async () => {
+    const { service, pickAssignee, auditFindMany, auditCreateMany } =
+      makeService();
+    pickAssignee.mockResolvedValue('auto-agent');
+    auditFindMany.mockResolvedValue([
+      auditRow({ assignments: [{ userId: 'auto-agent' }] }),
+    ]);
+
+    await service.create({ ...BASE_DTO });
+
+    expect(recorded(auditCreateMany)[1]).toMatchObject({
+      action: 'ASSIGNED',
+      metadata: { autoAssigned: true },
+    });
+  });
+
+  it('records no creation when the create fails', async () => {
+    const { service, create, auditCreateMany } = makeService();
+    create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('fk', {
+        code: 'P2003',
+        clientVersion: 'test',
+      }),
+    );
+
+    await expect(service.create({ ...BASE_DTO })).rejects.toMatchObject({
+      status: 400,
+    });
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  /*
+    A lead created straight into WON (form, Quick Add, or a duplicate/import batch) records
+    CREATED with that status and no CONVERTED — `leadCreatedEvents` has no conversion branch.
+    Pinned because ADR-0085 B8 has to cover the created-as-WON paths explicitly.
+  */
+  it('converts a lead created straight into WON', async () => {
+    const { service, dataOf, auditFindMany, auditCreateMany } = makeService();
+    auditFindMany.mockResolvedValue([auditRow({ status: 'WON' })]);
+
+    await service.create({ ...BASE_DTO, status: 'WON' });
+
+    expect(dataOf().status).toBe('WON');
+    const events = recorded(auditCreateMany);
+    // ADR-0085 A2 path 1: the create transaction makes the order and records the
+    // conversion, so a lead that never passes through the change core still converts.
+    expect(events).toMatchObject([
+      { action: 'CREATED', source: 'leads.create', after: { status: 'WON' } },
+      { action: 'CONVERTED', metadata: { orderId: 'order-1' } },
+      { entityType: 'LOGISTICS_ORDER', action: 'CREATED', leadId: 'lead-1' },
+    ]);
+  });
+
+  it('records an edit as one event per kind of change, each with old and new values', async () => {
+    const { service, findById, update, tx, auditFindMany, auditCreateMany } =
+      makeService();
+    findById.mockResolvedValue(FAKE_ROW);
+    auditFindMany
+      .mockResolvedValueOnce([
+        auditRow({ city: 'Dubai', assignments: [{ userId: 'u1' }] }),
+      ])
+      .mockResolvedValueOnce([
+        auditRow({
+          status: 'WON',
+          city: 'Sharjah',
+          assignments: [{ userId: 'u2' }],
+        }),
+      ]);
+
+    await service.update('lead-1', { ...BASE_DTO, status: 'WON' });
+
+    expect((update.mock.calls[0] as unknown[])[2]).toBe(tx);
+    expect(
+      recorded(auditCreateMany).map((e) => [e.action, e.before, e.after]),
+    ).toEqual([
+      ['CONVERTED', { status: 'New' }, { status: 'WON' }],
+      ['REASSIGNED', { assigneeIds: ['u1'] }, { assigneeIds: ['u2'] }],
+      ['UPDATED', { city: 'Dubai' }, { city: 'Sharjah' }],
+      [
+        'CREATED',
+        undefined,
+        expect.objectContaining({ orderNumber: 1000, status: 'INITIAL' }),
+      ],
+    ]);
+    // Only the conversion names the order; the other lead events keep their own metadata.
+    expect(recorded(auditCreateMany).map((e) => e.metadata)).toEqual([
+      { orderId: 'order-1' },
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(recorded(auditCreateMany)[0]).toMatchObject({
+      actorId: 'me',
+      source: 'leads.update',
+    });
+  });
+
+  it('leaves no event behind when the edit fails (bad agent id)', async () => {
+    const { service, findById, update, auditFindMany, auditCreateMany } =
+      makeService();
+    findById.mockResolvedValue(FAKE_ROW);
+    auditFindMany.mockResolvedValue([auditRow()]);
+    update.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('fk', {
+        code: 'P2003',
+        clientVersion: 'test',
+      }),
+    );
+
+    await expect(
+      service.update('lead-1', { ...BASE_DTO }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 });
 

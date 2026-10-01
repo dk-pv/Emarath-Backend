@@ -8,6 +8,7 @@ import gpsConfig from './config/gps.config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { ActivitiesModule } from './activities/activities.module';
+import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { CallsModule } from './calls/calls.module';
 import { DashboardModule } from './dashboard/dashboard.module';
@@ -25,6 +26,7 @@ import { LeadsExportModule } from './leads/export/leads-export.module';
 import { LeadsImportModule } from './leads/import/leads-import.module';
 import { LeadsRowActionsModule } from './leads/row-actions/leads-row-actions.module';
 import { LeadsTagsModule } from './leads/tags/leads-tags.module';
+import { LogisticsModule } from './logistics/logistics.module';
 import { LookupsModule } from './lookups/lookups.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { RolesModule } from './roles/roles.module';
@@ -65,6 +67,7 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     AssignmentRulesModule,
     MessageTemplatesModule,
     TagsModule,
+    AuditModule,
     AuthModule,
     CallsModule,
     DashboardModule,
@@ -83,6 +86,7 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     LeadsImportModule,
     LeadsRowActionsModule,
     LeadsTagsModule,
+    LogisticsModule,
     LeadsModule,
     // Top-level /api/lead-custom-fields — not under /leads/, so route order is moot.
     LeadCustomFieldsModule,

@@ -13,6 +13,8 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { Roles } from '../auth/roles.decorator';
+import { OPERATIONAL_ROLES, SALES_MODULE_ROLES } from '../auth/role-groups';
 import { DocumentsService } from './documents.service';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import { ListDocumentsQueryDto } from './dto/list-documents-query.dto';
@@ -26,8 +28,15 @@ import {
   BulkDeleteDocumentsDto,
 } from './dto/bulk-delete-documents.dto';
 
-/** Thin by design: validation is the DTO's job, storage and scoping the service's. */
+/**
+ * Thin by design: validation is the DTO's job, storage and scoping the service's.
+ *
+ * Open to the operational roles as well (ADR-0084): documents carry their own per-user
+ * access (owner or granted, DOC-01.1), not sales scoping, so a post-sale user sees only
+ * what they uploaded or were given.
+ */
 @Controller('documents')
+@Roles(...SALES_MODULE_ROLES, ...OPERATIONAL_ROLES)
 export class DocumentsController {
   constructor(private readonly documents: DocumentsService) {}
 

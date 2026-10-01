@@ -34,6 +34,7 @@ function makeService() {
   const userUpdate = jest.fn();
   const $transaction = jest.fn().mockResolvedValue([]);
   const stageCreateMany = jest.fn();
+  const auditCreateMany = jest.fn();
 
   const prisma = {
     pipeline: {
@@ -62,6 +63,7 @@ function makeService() {
       findFirst: userFindFirst,
       update: userUpdate,
     },
+    auditEvent: { createMany: auditCreateMany },
     $transaction,
   } as unknown as PrismaService;
 
@@ -90,6 +92,7 @@ function makeService() {
     stageFindMany,
     userFindMany,
     userFindFirst,
+    auditCreateMany,
     $transaction,
   };
 }
@@ -231,9 +234,39 @@ describe('PipelinesService.update', () => {
       where: { pipeline: 'LOGISTICS' },
       data: { pipeline: 'Logistics UAE' },
     });
-    // The member's other grant must survive the rewrite.
+    // The member's other grant must survive the rewrite, and the rename is recorded
+    // once, on the pipeline, in the same batch (ADR-0083).
     const [batch] = $transaction.mock.calls[0] as [unknown[]];
-    expect(batch).toHaveLength(4);
+    expect(batch).toHaveLength(5);
+  });
+
+  it('records the rename once, on the pipeline, in the rename’s transaction (ADR-0083)', async () => {
+    const { service, findUnique, findMany, auditCreateMany } = makeService();
+    findUnique.mockResolvedValue({
+      id: 'p1',
+      name: 'LOGISTICS',
+      shortCode: null,
+      isDefault: false,
+    });
+    findMany.mockResolvedValue([row({ id: 'p1', name: 'Logistics UAE' })]);
+
+    await service.update('p1', { name: 'Logistics UAE' });
+
+    expect(auditCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          entityType: 'PIPELINE',
+          entityId: 'p1',
+          leadId: null,
+          action: 'RENAMED',
+          actorType: 'USER',
+          actorId: 'admin-1',
+          source: 'pipelines.update',
+          before: { name: 'LOGISTICS' },
+          after: { name: 'Logistics UAE' },
+        }),
+      ],
+    });
   });
 
   it('leaves leads alone when only the short code changes', async () => {

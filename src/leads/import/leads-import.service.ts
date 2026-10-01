@@ -146,7 +146,11 @@ export class LeadsImportService {
     });
 
     // Background write — deliberately not awaited; the response returns the id now.
-    void this.processJob(job.id, rows, { pipeline: dto.pipeline, user });
+    void this.processJob(job.id, rows, {
+      pipeline: dto.pipeline,
+      user,
+      jobId: job.id,
+    });
 
     return { jobId: job.id };
   }

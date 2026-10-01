@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { UserRole } from '../generated/prisma/client';
 import { Roles } from '../auth/roles.decorator';
+import { SALES_MODULE_ROLES } from '../auth/role-groups';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { LeadFormsService } from './lead-forms.service';
@@ -49,10 +50,10 @@ export class LeadFormsController {
 
   /**
    * GET /api/lead-forms/default — the arrangement the New Lead drawer renders.
-   * Open to any signed-in user: a form cannot honour a configuration it may not read.
+   * Open to every sales role: a form cannot honour a configuration it may not read.
    */
   @Get('default')
-  @Roles(...Object.values(UserRole))
+  @Roles(...SALES_MODULE_ROLES)
   default(): Promise<LeadFormItem | null> {
     return this.service.defaultForm('LEAD');
   }

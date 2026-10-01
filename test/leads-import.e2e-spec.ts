@@ -1,8 +1,6 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
-import request from 'supertest';
+import { INestApplication } from '@nestjs/common';
 import { App } from 'supertest/types';
-import { AppModule } from '../src/app.module';
+import { createE2EApp, E2EAgent } from './e2e-app';
 
 /**
  * Routing/contract smoke test for the import endpoints.
@@ -15,22 +13,10 @@ import { AppModule } from '../src/app.module';
  */
 describe('Leads import (e2e)', () => {
   let app: INestApplication<App>;
+  let api: E2EAgent;
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-
-    app = moduleRef.createNestApplication();
-    app.setGlobalPrefix('api');
-    app.useGlobalPipes(
-      new ValidationPipe({
-        transform: true,
-        whitelist: true,
-        forbidNonWhitelisted: true,
-      }),
-    );
-    await app.init();
+    ({ app, api } = await createE2EApp());
   });
 
   afterAll(async () => {
@@ -38,9 +24,7 @@ describe('Leads import (e2e)', () => {
   });
 
   it('GET /api/leads/import/fields returns the catalog with required fields', async () => {
-    const res = await request(app.getHttpServer())
-      .get('/api/leads/import/fields')
-      .expect(200);
+    const res = await api.get('/api/leads/import/fields').expect(200);
 
     const body = res.body as { fields: { value: string; required: boolean }[] };
     const required = body.fields
@@ -55,7 +39,7 @@ describe('Leads import (e2e)', () => {
   });
 
   it('POST /api/leads/import/validate without a file is a 400', async () => {
-    await request(app.getHttpServer())
+    await api
       .post('/api/leads/import/validate')
       .field('mapping', '{}')
       .field('pipeline', 'Lead Pipeline')
@@ -63,8 +47,6 @@ describe('Leads import (e2e)', () => {
   });
 
   it('GET /api/leads/import/:jobId rejects a non-uuid id', async () => {
-    await request(app.getHttpServer())
-      .get('/api/leads/import/not-a-uuid')
-      .expect(400);
+    await api.get('/api/leads/import/not-a-uuid').expect(400);
   });
 });

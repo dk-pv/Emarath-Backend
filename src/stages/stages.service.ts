@@ -6,6 +6,10 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { CurrentUserService } from '../auth/current-user';
+import { recordAuditEvents, userActor } from '../audit/audit-events';
+import { CONVERTED_STATUS } from '../reports/converted-leads-where';
+import { QC_REJECTED_LEAD_STATUS } from '../logistics/logistics-status';
 import {
   CreateStageDto,
   ReorderStagesDto,
@@ -64,7 +68,10 @@ function wizardFields(dto: StageWizardData): StageWizardData {
  */
 @Injectable()
 export class StagesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly currentUser: CurrentUserService,
+  ) {}
 
   /** A pipeline's stages in display order (AC3/AC4). */
   list(pipeline: string): Promise<StageResponse[]> {
@@ -131,6 +138,7 @@ export class StagesService {
 
     const newName = dto.name;
     if (newName !== undefined && newName !== stage.name) {
+      guardReservedStageName(stage.name, newName);
       const nameClash = await this.prisma.stage.findUnique({
         where: { pipeline_name: { pipeline: stage.pipeline, name: newName } },
         select: { id: true },
@@ -141,7 +149,10 @@ export class StagesService {
         );
       }
       // The rename and the lead cascade succeed or fail together — a stage name and
-      // the statuses that point at it must never end up out of step.
+      // the statuses that point at it must never end up out of step. The rename is
+      // recorded once, on the stage, in the same transaction (ADR-0083): it relabels
+      // leads without moving any of them, so no lead gets a STATUS_CHANGED event.
+      const user = await this.currentUser.resolve();
       const [updated] = await this.prisma.$transaction([
         this.prisma.stage.update({
           where: { id },
@@ -152,6 +163,19 @@ export class StagesService {
           where: { status: stage.name, pipeline: stage.pipeline },
           data: { status: newName },
         }),
+        recordAuditEvents(this.prisma, [
+          {
+            entityType: 'STAGE',
+            entityId: stage.id,
+            leadId: null,
+            action: 'RENAMED',
+            actor: userActor(user),
+            source: 'stages.update',
+            before: { name: stage.name },
+            after: { name: newName },
+            metadata: { pipeline: stage.pipeline },
+          },
+        ]),
       ]);
       return updated;
     }
@@ -202,6 +226,7 @@ export class StagesService {
       select: { id: true, pipeline: true, name: true },
     });
     if (!stage) throw new NotFoundException('Stage not found.');
+    guardReservedStageName(stage.name);
 
     const inUse = await this.prisma.lead.count({
       where: { status: stage.name, pipeline: stage.pipeline, deletedAt: null },
@@ -214,5 +239,33 @@ export class StagesService {
 
     await this.prisma.stage.delete({ where: { id } });
     return { id };
+  }
+}
+
+/**
+ * The two stage names the Lead → Logistics workflow depends on by value (ADR-0085 B17):
+ * `WON` is what conversion is detected on, and `QC NOT APPROVED` is where a QC rejection puts
+ * the lead (CD-1, which also says the existing stage must not be renamed).
+ *
+ * A rename cascades to every lead in the stage through one `updateMany`, outside the per-lead
+ * audit and outside the conversion hook — so renaming `WON` away would unconvert a whole
+ * column of leads in silence, and renaming another stage *to* `WON` would mark leads converted
+ * with no order behind them. Neither is recoverable from the log, so both are refused here,
+ * along with deleting either stage. Recolouring, reordering and every other stage stay
+ * untouched, and no existing stage or lead is modified by this rule.
+ */
+export const RESERVED_STAGE_NAMES: readonly string[] = [
+  CONVERTED_STATUS,
+  QC_REJECTED_LEAD_STATUS,
+];
+
+function guardReservedStageName(current: string, next?: string): void {
+  const blocked = [current, ...(next === undefined ? [] : [next])].find(
+    (name) => RESERVED_STAGE_NAMES.includes(name),
+  );
+  if (blocked !== undefined) {
+    throw new ConflictException(
+      `“${blocked}” is used by the Logistics workflow, so it can’t be renamed or deleted.`,
+    );
   }
 }

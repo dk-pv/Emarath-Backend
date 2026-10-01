@@ -42,5 +42,11 @@ export function activityScopeWhere(
     case UserRole.CUSTOMER_SERVICE_AGENT:
     case UserRole.MARKETING_ANALYST:
       return visible;
+
+    // Operational roles hold no sales access (ADR-0084): no activity matches.
+    case UserRole.LOGISTICS_MANAGER:
+    case UserRole.LOGISTICS_EXECUTIVE:
+    case UserRole.ACCOUNTS_EXECUTIVE:
+      return { ...visible, id: { in: [] } };
   }
 }

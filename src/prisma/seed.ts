@@ -162,6 +162,31 @@ const USERS: ReadonlyArray<{
     team: 'Marketing',
     password: 'Marketing@123',
   },
+  // The post-sale roles (ADR-0084). No team: teams are sales structure.
+  {
+    name: 'Logistics Manager',
+    email: 'logistics.manager@emarath.com',
+    username: 'logistics.manager',
+    role: UserRole.LOGISTICS_MANAGER,
+    team: null,
+    password: 'Logistics@123',
+  },
+  {
+    name: 'Logistics Executive',
+    email: 'logistics.executive@emarath.com',
+    username: 'logistics.executive',
+    role: UserRole.LOGISTICS_EXECUTIVE,
+    team: null,
+    password: 'Logistics@123',
+  },
+  {
+    name: 'Accounts Executive',
+    email: 'accounts@emarath.com',
+    username: 'accounts',
+    role: UserRole.ACCOUNTS_EXECUTIVE,
+    team: null,
+    password: 'Accounts@123',
+  },
 ];
 
 /** bcrypt work factor — must match the app (auth.service.ts BCRYPT_ROUNDS) so seeded

@@ -1,8 +1,6 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
-import request from 'supertest';
+import { INestApplication } from '@nestjs/common';
 import { App } from 'supertest/types';
-import { AppModule } from '../src/app.module';
+import { createE2EApp, E2EAgent } from './e2e-app';
 
 /**
  * Contract smoke test for the export endpoint (LEAD-08.1).
@@ -14,22 +12,10 @@ import { AppModule } from '../src/app.module';
  */
 describe('Leads export (e2e)', () => {
   let app: INestApplication<App>;
+  let api: E2EAgent;
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-
-    app = moduleRef.createNestApplication();
-    app.setGlobalPrefix('api');
-    app.useGlobalPipes(
-      new ValidationPipe({
-        transform: true,
-        whitelist: true,
-        forbidNonWhitelisted: true,
-      }),
-    );
-    await app.init();
+    ({ app, api } = await createE2EApp());
   });
 
   afterAll(async () => {
@@ -37,23 +23,19 @@ describe('Leads export (e2e)', () => {
   });
 
   it('rejects a request with no format or scope', async () => {
-    await request(app.getHttpServer()).get('/api/leads/export').expect(400);
+    await api.get('/api/leads/export').expect(400);
   });
 
   it('rejects an unsupported format (pdf is deferred)', async () => {
-    await request(app.getHttpServer())
-      .get('/api/leads/export?format=pdf&scope=all')
-      .expect(400);
+    await api.get('/api/leads/export?format=pdf&scope=all').expect(400);
   });
 
   it('rejects an unknown scope', async () => {
-    await request(app.getHttpServer())
-      .get('/api/leads/export?format=csv&scope=everything')
-      .expect(400);
+    await api.get('/api/leads/export?format=csv&scope=everything').expect(400);
   });
 
   it('rejects a malformed columns list', async () => {
-    await request(app.getHttpServer())
+    await api
       .get('/api/leads/export?format=csv&scope=default&columns=has%20space')
       .expect(400);
   });

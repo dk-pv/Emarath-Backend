@@ -59,6 +59,21 @@ describe('gpsAgentWhere (AUTH-02.1 / ADR-0030 §6)', () => {
     }
   });
 
+  it.each([
+    UserRole.LOGISTICS_MANAGER,
+    UserRole.LOGISTICS_EXECUTIVE,
+    UserRole.ACCOUNTS_EXECUTIVE,
+  ])(
+    'gives %s no agent, and a userId filter cannot widen it (ADR-0084)',
+    (role) => {
+      // undefined would mean unrestricted — the fall-through this case exists to prevent.
+      expect(gpsAgentWhere({ id: 'x', role })).toEqual({ id: { in: [] } });
+      expect(gpsAgentWhere({ id: 'x', role }, 'a1')).toEqual({
+        id: { in: [] },
+      });
+    },
+  );
+
   it('returns a value (or explicit undefined) for every role', () => {
     for (const role of Object.values(UserRole)) {
       // undefined is a valid "no restriction" result; the switch must be exhaustive.

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { Prisma, UserRole } from '../../generated/prisma/client';
 import { CurrentUser } from '../../auth/current-user';
+import { userActor } from '../../audit/audit-events';
 import { ImportDescriptor } from '../../common/import/import-descriptor';
 import { LEADS_IMPORT_FIELDS } from './leads-import.fields';
 import { LeadsImportRepository, PreparedLead } from './leads-import.repository';
@@ -10,6 +11,8 @@ import { LeadsImportRepository, PreparedLead } from './leads-import.repository';
 export interface LeadsImportContext {
   pipeline: string;
   user: CurrentUser;
+  /** The run's ImportJob, named on each created lead's audit events (ADR-0083). */
+  jobId: string;
 }
 
 /**
@@ -80,9 +83,16 @@ export class LeadsImportDescriptor implements ImportDescriptor<
     return { data, assignToUserId };
   }
 
-  // The context is unused here — the pipeline/user were already baked into each
-  // record by buildRecord — so the method takes only what it needs.
-  persistBatch(records: PreparedLead[]): Promise<void> {
-    return this.repository.insertLeads(records);
+  // The pipeline was already baked into each record by buildRecord; the context here
+  // only says who ran the import and which run it was, for the audit events.
+  persistBatch(
+    records: PreparedLead[],
+    context: LeadsImportContext,
+  ): Promise<void> {
+    return this.repository.insertLeads(records, {
+      actor: userActor(context.user),
+      source: 'leads.import',
+      metadata: { importJobId: context.jobId },
+    });
   }
 }

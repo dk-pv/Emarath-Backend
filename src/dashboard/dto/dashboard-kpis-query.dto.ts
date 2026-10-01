@@ -1,5 +1,5 @@
 import { Transform } from 'class-transformer';
-import { IsDateString, IsEnum, IsOptional } from 'class-validator';
+import { IsDateString, IsEnum, IsOptional, IsUUID } from 'class-validator';
 import { KPI_KEYS, type KpiKey } from '../dashboard-kpis';
 
 const emptyToUndefined = ({ value }: { value: unknown }): unknown => {
@@ -28,7 +28,7 @@ const toKeyArray = ({ value }: { value: unknown }): unknown => {
  * Each Dashboard card carries its own period (DASH-01.2), so the caller asks for
  * one window at a time and names the counters it wants — a card requests only its
  * own, which is what keeps six independently-filtered cards from each computing
- * all six counters. Omitting `counters` returns all six (AC1).
+ * every counter. Omitting `counters` returns every counter (AC1).
  *
  * `from`/`to` are the resolved half-open window, absent for the "All" preset.
  * `todayStart` is the caller's local midnight and is always required, because
@@ -56,4 +56,13 @@ export class DashboardKpisQueryDto {
   })
   @IsOptional()
   counters?: KpiKey[];
+
+  /**
+   * The control row's Sales Agent selection (`?agent=a,b`), user ids. It narrows each counter
+   * inside the caller's own scope and can never widen it; absent means every visible agent.
+   */
+  @Transform(toKeyArray)
+  @IsUUID('all', { each: true, message: 'agent must be a list of user ids' })
+  @IsOptional()
+  agent?: string[];
 }

@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { UserRole } from '../generated/prisma/client';
 import { Roles } from '../auth/roles.decorator';
+import { SALES_MODULE_ROLES } from '../auth/role-groups';
 import { CurrentUserService } from '../auth/current-user';
 import { SettingsService } from './settings.service';
 import {
@@ -248,7 +249,7 @@ export class SettingsController {
    * stays administrator-only, so this widens a read, never a write (ADR-0071).
    */
   @Get('activity-reminders/workflow')
-  @Roles(...Object.values(UserRole))
+  @Roles(...SALES_MODULE_ROLES)
   getActivityWorkflow(): Promise<ActivityWorkflowSettings> {
     return this.service.getActivityWorkflow();
   }

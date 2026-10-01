@@ -1,5 +1,5 @@
 /**
- * Users & Access reference data (ADR-0055): the five built-in roles and the one
+ * Users & Access reference data (ADR-0055): the built-in roles and the one
  * built-in lead form the "Create A Team Member" wizard needs on a fresh database.
  *
  * Idempotent upserts by unique `name`; the update branch refreshes `baseRole` and
@@ -15,8 +15,9 @@ import { PrismaClient, UserRole } from '../generated/prisma/client';
 import { LEAD_SYSTEM_FIELDS } from '../lead-forms/lead-system-fields';
 
 /**
- * The built-in role names, one per seeded UserRole (AUTH-01.1's five user types).
- * Custom roles ("QC ROLE", "LOGISTICS MANAGER") are created through the Roles &
+ * The built-in role names, one per UserRole: AUTH-01.1's five user types and the three
+ * post-sale roles (ADR-0084).
+ * Custom roles ("QC ROLE") are created through the Roles &
  * Permissions screen when it lands — none is invented here.
  */
 const ROLES: { name: string; baseRole: UserRole }[] = [
@@ -25,6 +26,9 @@ const ROLES: { name: string; baseRole: UserRole }[] = [
   { name: 'Sales Agent', baseRole: UserRole.SALES_AGENT },
   { name: 'Customer Service', baseRole: UserRole.CUSTOMER_SERVICE_AGENT },
   { name: 'Marketing Analyst', baseRole: UserRole.MARKETING_ANALYST },
+  { name: 'Logistics Manager', baseRole: UserRole.LOGISTICS_MANAGER },
+  { name: 'Logistics Executive', baseRole: UserRole.LOGISTICS_EXECUTIVE },
+  { name: 'Accounts Executive', baseRole: UserRole.ACCOUNTS_EXECUTIVE },
 ];
 
 /** The one lead form the reference shows as a built-in option. */

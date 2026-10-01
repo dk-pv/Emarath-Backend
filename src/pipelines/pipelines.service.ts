@@ -7,6 +7,7 @@ import {
 import { Prisma } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import { recordAuditEvents, userActor } from '../audit/audit-events';
 import {
   CreatePipelineDto,
   PipelinePermissionDto,
@@ -149,7 +150,10 @@ export class PipelinesService {
         where: { pipelines: { has: pipeline.name } },
         select: { id: true, pipelines: true },
       });
+      const user = await this.currentUser.resolve();
 
+      // The rename relabels every lead on the board without moving any of them, so it is
+      // recorded once, on the pipeline, rather than as a PIPELINE_CHANGED per lead (ADR-0083).
       await this.prisma.$transaction([
         this.prisma.pipeline.update({
           where: { id },
@@ -181,6 +185,18 @@ export class PipelinesService {
             select: { id: true },
           }),
         ),
+        recordAuditEvents(this.prisma, [
+          {
+            entityType: 'PIPELINE',
+            entityId: id,
+            leadId: null,
+            action: 'RENAMED',
+            actor: userActor(user),
+            source: 'pipelines.update',
+            before: { name: pipeline.name },
+            after: { name: newName },
+          },
+        ]),
       ]);
 
       return this.requireNode(id);

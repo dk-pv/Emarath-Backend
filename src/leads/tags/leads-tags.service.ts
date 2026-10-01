@@ -5,8 +5,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '../../generated/prisma/client';
-import { CurrentUserService } from '../../auth/current-user';
+import { CurrentUser, CurrentUserService } from '../../auth/current-user';
 import { PrismaService } from '../../prisma/prisma.service';
+import { userActor } from '../../audit/audit-events';
+import { auditLeadChanges } from '../lead-audit';
 import { leadScopeWhere } from '../lead-scope';
 import {
   LeadListItem,
@@ -42,15 +44,21 @@ export class LeadTagsService {
    * same tag can never sit on a lead twice (AC5).
    */
   async add(leadId: string, dto: AddLeadTagDto): Promise<LeadListItem> {
-    await this.assertInScope(leadId);
+    const user = await this.assertInScope(leadId);
 
     try {
-      await this.prisma.leadTag.create({
-        data: {
-          lead: { connect: { id: leadId } },
-          tag: { connect: { id: dto.tagId } },
-        },
-      });
+      await auditLeadChanges(
+        this.prisma,
+        [leadId],
+        { actor: userActor(user), source: 'leads.tags' },
+        (tx) =>
+          tx.leadTag.create({
+            data: {
+              lead: { connect: { id: leadId } },
+              tag: { connect: { id: dto.tagId } },
+            },
+          }),
+      );
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError) {
         // The same tag is already on the lead — the unique index (AC5).
@@ -74,19 +82,25 @@ export class LeadTagsService {
    * lead simply comes back without the tag.
    */
   async remove(leadId: string, tagId: string): Promise<LeadListItem> {
-    await this.assertInScope(leadId);
-    await this.prisma.leadTag.deleteMany({ where: { leadId, tagId } });
+    const user = await this.assertInScope(leadId);
+    await auditLeadChanges(
+      this.prisma,
+      [leadId],
+      { actor: userActor(user), source: 'leads.tags' },
+      (tx) => tx.leadTag.deleteMany({ where: { leadId, tagId } }),
+    );
     return this.loadById(leadId);
   }
 
   /** 404s unless the caller may see this lead — the write's scope gate. */
-  private async assertInScope(leadId: string): Promise<void> {
+  private async assertInScope(leadId: string): Promise<CurrentUser> {
     const user = await this.currentUser.resolve();
     const lead = await this.prisma.lead.findFirst({
       where: { AND: [leadScopeWhere(user), { id: leadId }] },
       select: { id: true },
     });
     if (!lead) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+    return user;
   }
 
   /** The lead by id after a successful mutation, as a list item. */

@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
@@ -54,23 +55,68 @@ function listRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** A row shaped like the audit select (ADR-0083) — only what the log compares. */
+function auditRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: LEAD_ID,
+    status: 'New',
+    lostReason: null,
+    pipeline: 'Lead Pipeline',
+    deletedAt: null,
+    assignments: [],
+    tags: [],
+    customFieldValues: [],
+    complaints: [],
+    ...overrides,
+  };
+}
+
 function makeService(role: UserRole = UserRole.SUPERADMIN) {
   const leadFindFirst = jest.fn();
   const leadFindUnique = jest.fn();
   const leadCreate = jest.fn();
   const leadUpdate = jest.fn();
   const leadNoteCreate = jest.fn();
+  const stageFindFirst = jest.fn();
+  // The audit reads (before/after each change) and the audit write (ADR-0083).
+  const auditFindMany = jest.fn().mockResolvedValue([]);
+  const auditCreateMany = jest.fn().mockResolvedValue({ count: 0 });
 
+  /** Which leads already carry an order — what the converted-lead guards read. */
+  const orderFindMany = jest.fn().mockResolvedValue([]);
+  const tx = {
+    $queryRaw: jest.fn().mockResolvedValue([]),
+    lead: { create: leadCreate, update: leadUpdate, findMany: auditFindMany },
+    auditEvent: { createMany: auditCreateMany },
+    // The conversion hook (ADR-0085): `createManyAndReturn` echoes what it was asked to
+    // insert, so a lead that becomes WON gets an order id on its CONVERTED event.
+    logisticsOrder: {
+      findMany: orderFindMany,
+      createManyAndReturn: jest.fn((args: { data: { leadId: string }[] }) =>
+        Promise.resolve(
+          args.data.map((row, index) => ({
+            id: `order-${index + 1}`,
+            leadId: row.leadId,
+            orderNumber: 1000 + index,
+            status: 'INITIAL',
+          })),
+        ),
+      ),
+    },
+  };
+  // Writes exist only on the transaction: one that escaped it would throw.
   const prisma = {
     lead: {
       findFirst: leadFindFirst,
       findUnique: leadFindUnique,
-      create: leadCreate,
-      update: leadUpdate,
     },
     leadNote: {
       create: leadNoteCreate,
     },
+    stage: { findFirst: stageFindFirst },
+    $transaction: jest.fn((run: (client: typeof tx) => Promise<unknown>) =>
+      run(tx),
+    ),
   } as unknown as PrismaService;
 
   const currentUser = {
@@ -98,7 +144,18 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     bulkReassign,
     bulkDelete,
     sendMail,
+    stageFindFirst,
+    auditFindMany,
+    auditCreateMany,
+    orderFindMany,
   };
+}
+
+/** The audit rows written by the one createMany call a change makes. */
+function recorded(auditCreateMany: jest.Mock): Record<string, unknown>[] {
+  return (
+    auditCreateMany.mock.calls[0] as [{ data: Record<string, unknown>[] }]
+  )[0].data;
 }
 
 const oneResult = (status: 'success' | 'failed'): BulkActionResponse => ({
@@ -176,6 +233,72 @@ describe('LeadRowActionsService.duplicate', () => {
     );
     expect(leadCreate).not.toHaveBeenCalled();
   });
+
+  it('records the copy as created from its source, with its assignees (ADR-0083)', async () => {
+    const {
+      service,
+      leadFindFirst,
+      leadCreate,
+      auditFindMany,
+      auditCreateMany,
+    } = makeService();
+    leadFindFirst.mockResolvedValue({ assignments: [], tags: [] });
+    leadCreate.mockResolvedValue(listRow({ id: 'new-id' }));
+    auditFindMany.mockResolvedValue([
+      auditRow({ id: 'new-id', assignments: [{ userId: AGENT_ID }] }),
+    ]);
+
+    await service.duplicate(LEAD_ID);
+
+    expect(recorded(auditCreateMany)).toMatchObject([
+      {
+        action: 'CREATED',
+        entityId: 'new-id',
+        actorId: 'u1',
+        source: 'leads.duplicate',
+        metadata: { duplicatedFrom: LEAD_ID },
+      },
+      { action: 'ASSIGNED', after: { assigneeIds: [AGENT_ID] } },
+    ]);
+  });
+
+  /*
+    Current behaviour, pinned here because a Logistics order will hang off conversion
+    (ADR-0085 B8): the copy carries the source's status verbatim, so duplicating a WON lead
+    makes a second WON lead — recorded as CREATED, never as CONVERTED.
+  */
+  it('copies a WON status into the new lead and converts the copy', async () => {
+    const {
+      service,
+      leadFindFirst,
+      leadCreate,
+      auditFindMany,
+      auditCreateMany,
+    } = makeService();
+    leadFindFirst.mockResolvedValue({
+      status: 'WON',
+      assignments: [],
+      tags: [],
+    });
+    leadCreate.mockResolvedValue(listRow({ id: 'new-id', status: 'WON' }));
+    auditFindMany.mockResolvedValue([
+      auditRow({ id: 'new-id', status: 'WON' }),
+    ]);
+
+    await service.duplicate(LEAD_ID);
+
+    const created = (
+      leadCreate.mock.calls[0] as [{ data: { status?: string } }]
+    )[0];
+    expect(created.data.status).toBe('WON');
+    const events = recorded(auditCreateMany);
+    // The duplicate is its own lead, so it gets its own order (ADR-0085 A2 path 6).
+    expect(events).toMatchObject([
+      { action: 'CREATED', after: { status: 'WON' } },
+      { action: 'CONVERTED', metadata: { orderId: 'order-1' } },
+      { entityType: 'LOGISTICS_ORDER', action: 'CREATED', leadId: 'new-id' },
+    ]);
+  });
 });
 
 describe('LeadRowActionsService.setStatus', () => {
@@ -195,14 +318,200 @@ describe('LeadRowActionsService.setStatus', () => {
     expect(args.data.status).toBe('WON');
   });
 
+  /*
+    Client clarification of 2026-09-23: once an order exists the lead's status belongs to the
+    Logistics workflow. The guard lives in the shared change core, so this endpoint — and the
+    edit form, the board and bulk with it — is refused without each having to remember.
+  */
+  it('refuses a status change on a lead that already has a Logistics order', async () => {
+    const {
+      service,
+      leadFindFirst,
+      leadUpdate,
+      auditFindMany,
+      auditCreateMany,
+      orderFindMany,
+    } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    leadUpdate.mockResolvedValue(listRow({ status: 'HOT' }));
+    auditFindMany
+      .mockResolvedValueOnce([auditRow({ status: 'WON' })])
+      .mockResolvedValueOnce([auditRow({ status: 'HOT' })]);
+    orderFindMany.mockResolvedValue([{ leadId: LEAD_ID }]);
+
+    await expect(
+      service.setStatus(LEAD_ID, { status: 'HOT' }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
   it('404s (and never updates) an out-of-scope lead', async () => {
-    const { service, leadFindFirst, leadUpdate } = makeService();
+    const { service, leadFindFirst, leadUpdate, auditCreateMany } =
+      makeService();
     leadFindFirst.mockResolvedValue(null);
 
     await expect(
       service.setStatus(LEAD_ID, { status: 'WON' }),
     ).rejects.toBeInstanceOf(NotFoundException);
     expect(leadUpdate).not.toHaveBeenCalled();
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records Convert as CONVERTED with the status it left, by the caller (ADR-0083)', async () => {
+    const {
+      service,
+      leadFindFirst,
+      leadUpdate,
+      auditFindMany,
+      auditCreateMany,
+    } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    leadUpdate.mockResolvedValue(listRow({ status: 'WON' }));
+    auditFindMany
+      .mockResolvedValueOnce([auditRow({ status: 'HOT' })])
+      .mockResolvedValueOnce([auditRow({ status: 'WON' })]);
+
+    await service.setStatus(LEAD_ID, { status: 'WON' });
+
+    expect(recorded(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityType: 'LEAD',
+        entityId: LEAD_ID,
+        leadId: LEAD_ID,
+        action: 'CONVERTED',
+        actorType: 'USER',
+        actorId: 'u1',
+        source: 'leads.status',
+        before: { status: 'HOT' },
+        after: { status: 'WON' },
+        metadata: { orderId: 'order-1' },
+      }),
+      expect.objectContaining({
+        entityType: 'LOGISTICS_ORDER',
+        action: 'CREATED',
+        leadId: LEAD_ID,
+      }),
+    ]);
+  });
+
+  it('writes no event when the status update fails', async () => {
+    const {
+      service,
+      leadFindFirst,
+      leadUpdate,
+      auditFindMany,
+      auditCreateMany,
+    } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    auditFindMany.mockResolvedValue([auditRow()]);
+    leadUpdate.mockRejectedValue(new Error('connection lost'));
+
+    await expect(service.setStatus(LEAD_ID, { status: 'WON' })).rejects.toThrow(
+      'connection lost',
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('LeadRowActionsService.changePipeline', () => {
+  it('records the pipeline move and the first-stage reset it forces (ADR-0083)', async () => {
+    const {
+      service,
+      leadFindFirst,
+      leadUpdate,
+      stageFindFirst,
+      auditFindMany,
+      auditCreateMany,
+    } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    stageFindFirst.mockResolvedValue({ name: 'Complaint' });
+    leadUpdate.mockResolvedValue(listRow());
+    auditFindMany
+      .mockResolvedValueOnce([auditRow({ status: 'HOT' })])
+      .mockResolvedValueOnce([
+        auditRow({ status: 'Complaint', pipeline: 'Complaints' }),
+      ]);
+
+    await service.changePipeline(LEAD_ID, { pipeline: 'Complaints' });
+
+    expect(recorded(auditCreateMany)).toMatchObject([
+      {
+        action: 'STATUS_CHANGED',
+        source: 'leads.pipeline',
+        before: { status: 'HOT' },
+        after: { status: 'Complaint' },
+      },
+      {
+        action: 'PIPELINE_CHANGED',
+        source: 'leads.pipeline',
+        before: { pipeline: 'Lead Pipeline' },
+        after: { pipeline: 'Complaints' },
+      },
+    ]);
+  });
+
+  /*
+    Current behaviour: the move writes the target pipeline's first stage as the lead's status,
+    so a pipeline whose first stage is named WON converts the lead through this route too
+    (ADR-0085 A2 path 5). Pinned because a Logistics order would follow the CONVERTED event.
+  */
+  it('records CONVERTED when the target pipeline’s first stage is WON', async () => {
+    const {
+      service,
+      leadFindFirst,
+      leadUpdate,
+      stageFindFirst,
+      auditFindMany,
+      auditCreateMany,
+    } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    stageFindFirst.mockResolvedValue({ name: 'WON' });
+    leadUpdate.mockResolvedValue(listRow({ status: 'WON' }));
+    auditFindMany
+      .mockResolvedValueOnce([auditRow({ status: 'HOT' })])
+      .mockResolvedValueOnce([
+        auditRow({ status: 'WON', pipeline: 'Fulfilment' }),
+      ]);
+
+    await service.changePipeline(LEAD_ID, { pipeline: 'Fulfilment' });
+
+    expect(recorded(auditCreateMany)).toMatchObject([
+      { action: 'CONVERTED', after: { status: 'WON' } },
+      { action: 'PIPELINE_CHANGED', after: { pipeline: 'Fulfilment' } },
+      { entityType: 'LOGISTICS_ORDER', action: 'CREATED' },
+    ]);
+  });
+});
+
+describe('LeadRowActionsService.archive', () => {
+  it('records the archive and the restore (ADR-0083)', async () => {
+    const {
+      service,
+      leadFindFirst,
+      leadUpdate,
+      auditFindMany,
+      auditCreateMany,
+    } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    leadUpdate.mockResolvedValue(listRow());
+    auditFindMany
+      .mockResolvedValueOnce([auditRow()])
+      .mockResolvedValueOnce([auditRow({ deletedAt: new Date() })])
+      .mockResolvedValueOnce([auditRow({ deletedAt: new Date() })])
+      .mockResolvedValueOnce([auditRow()]);
+
+    await service.archive(LEAD_ID);
+    await service.unarchive(LEAD_ID);
+
+    const actions = (
+      auditCreateMany.mock.calls as [
+        { data: { action: string; source: string }[] },
+      ][]
+    ).map(([args]) => [args.data[0].action, args.data[0].source]);
+    expect(actions).toEqual([
+      ['ARCHIVED', 'leads.archive'],
+      ['UNARCHIVED', 'leads.unarchive'],
+    ]);
   });
 });
 
@@ -215,10 +524,10 @@ describe('LeadRowActionsService.reassign', () => {
     const item = await service.reassign(LEAD_ID, { agentId: AGENT_ID });
 
     expect(item.id).toBe(LEAD_ID);
-    expect(bulkReassign).toHaveBeenCalledWith({
-      ids: [LEAD_ID],
-      agentId: AGENT_ID,
-    });
+    expect(bulkReassign).toHaveBeenCalledWith(
+      { ids: [LEAD_ID], agentId: AGENT_ID },
+      'leads.reassign',
+    );
   });
 
   it('404s when the lead is not actionable', async () => {
@@ -339,7 +648,7 @@ describe('LeadRowActionsService.delete', () => {
     const res = await service.delete(LEAD_ID);
 
     expect(res).toEqual({ id: LEAD_ID });
-    expect(bulkDelete).toHaveBeenCalledWith({ ids: [LEAD_ID] });
+    expect(bulkDelete).toHaveBeenCalledWith({ ids: [LEAD_ID] }, 'leads.delete');
   });
 
   it('404s when the lead is not actionable', async () => {
@@ -348,6 +657,15 @@ describe('LeadRowActionsService.delete', () => {
 
     await expect(service.delete(LEAD_ID)).rejects.toBeInstanceOf(
       NotFoundException,
+    );
+  });
+
+  it('surfaces a retained lead as a 409, not a 404 (ADR-0083)', async () => {
+    const { service, bulkDelete } = makeService();
+    bulkDelete.mockRejectedValue(new ConflictException('linked records'));
+
+    await expect(service.delete(LEAD_ID)).rejects.toBeInstanceOf(
+      ConflictException,
     );
   });
 });

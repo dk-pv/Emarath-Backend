@@ -85,6 +85,17 @@ describe('activityScopeWhere', () => {
     ).toEqual({});
   });
 
+  it.each([
+    UserRole.LOGISTICS_MANAGER,
+    UserRole.LOGISTICS_EXECUTIVE,
+    UserRole.ACCOUNTS_EXECUTIVE,
+  ])('gives %s no activity at all (ADR-0084)', (role) => {
+    expect(activityScopeWhere({ id: 'u1', role })).toEqual({
+      deletedAt: null,
+      id: { in: [] },
+    });
+  });
+
   it('returns a scope for every role the enum defines', () => {
     for (const role of Object.values(UserRole)) {
       expect(activityScopeWhere({ id: 'u1', role })).toBeDefined();

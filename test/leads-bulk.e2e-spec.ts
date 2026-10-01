@@ -1,8 +1,6 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
-import request from 'supertest';
+import { INestApplication } from '@nestjs/common';
 import { App } from 'supertest/types';
-import { AppModule } from '../src/app.module';
+import { createE2EApp, E2EAgent } from './e2e-app';
 
 /**
  * Contract smoke test for the bulk actions endpoints (LEAD-09.1).
@@ -14,23 +12,11 @@ import { AppModule } from '../src/app.module';
  */
 describe('Leads bulk actions (e2e)', () => {
   let app: INestApplication<App>;
+  let api: E2EAgent;
   const uuid = '11111111-1111-1111-1111-111111111111';
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-
-    app = moduleRef.createNestApplication();
-    app.setGlobalPrefix('api');
-    app.useGlobalPipes(
-      new ValidationPipe({
-        transform: true,
-        whitelist: true,
-        forbidNonWhitelisted: true,
-      }),
-    );
-    await app.init();
+    ({ app, api } = await createE2EApp());
   });
 
   afterAll(async () => {
@@ -38,28 +24,25 @@ describe('Leads bulk actions (e2e)', () => {
   });
 
   it('rejects a delete with an empty id set', async () => {
-    await request(app.getHttpServer())
-      .post('/api/leads/bulk/delete')
-      .send({ ids: [] })
-      .expect(400);
+    await api.post('/api/leads/bulk/delete').send({ ids: [] }).expect(400);
   });
 
   it('rejects a delete with a non-uuid id', async () => {
-    await request(app.getHttpServer())
+    await api
       .post('/api/leads/bulk/delete')
       .send({ ids: ['not-a-uuid'] })
       .expect(400);
   });
 
   it('rejects a reassign with no target agent', async () => {
-    await request(app.getHttpServer())
+    await api
       .post('/api/leads/bulk/reassign')
       .send({ ids: [uuid] })
       .expect(400);
   });
 
   it('rejects a reassign with a non-uuid target agent', async () => {
-    await request(app.getHttpServer())
+    await api
       .post('/api/leads/bulk/reassign')
       .send({ ids: [uuid], agentId: 'nope' })
       .expect(400);

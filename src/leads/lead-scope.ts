@@ -51,5 +51,12 @@ export function leadScopeWhere(
     case UserRole.CUSTOMER_SERVICE_AGENT:
     case UserRole.MARKETING_ANALYST:
       return visible;
+
+    // The operational roles hold no sales access (ADR-0084): no lead matches. Their
+    // Logistics and Accounts records will carry their own scope.
+    case UserRole.LOGISTICS_MANAGER:
+    case UserRole.LOGISTICS_EXECUTIVE:
+    case UserRole.ACCOUNTS_EXECUTIVE:
+      return { ...visible, id: { in: [] } };
   }
 }
