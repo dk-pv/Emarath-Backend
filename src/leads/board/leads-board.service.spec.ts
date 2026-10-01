@@ -48,13 +48,56 @@ function listRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** A row shaped like the audit select (ADR-0083) — only what the log compares. */
+function auditRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: LEAD_ID,
+    status: 'HOT',
+    lostReason: null,
+    pipeline: 'Lead Pipeline',
+    deletedAt: null,
+    assignments: [],
+    tags: [],
+    customFieldValues: [],
+    complaints: [],
+    ...overrides,
+  };
+}
+
 function makeService(role: UserRole = UserRole.SUPERADMIN) {
   const groupBy = jest.fn();
   const aggregate = jest.fn();
   const findFirst = jest.fn();
   const update = jest.fn();
+  // The audit reads (before/after the move) and the audit write (ADR-0083).
+  const auditFindMany = jest.fn().mockResolvedValue([]);
+  const auditCreateMany = jest.fn().mockResolvedValue({ count: 0 });
+  const tx = {
+    $queryRaw: jest.fn().mockResolvedValue([]),
+    lead: { update, findMany: auditFindMany },
+    auditEvent: { createMany: auditCreateMany },
+    // The conversion hook (ADR-0085): `createManyAndReturn` echoes what it was asked to
+    // insert, so a lead that becomes WON gets an order id on its CONVERTED event.
+    logisticsOrder: {
+      findMany: jest.fn().mockResolvedValue([]),
+      createManyAndReturn: jest.fn((args: { data: { leadId: string }[] }) =>
+        Promise.resolve(
+          args.data.map((row, index) => ({
+            id: `order-${index + 1}`,
+            leadId: row.leadId,
+            orderNumber: 1000 + index,
+            status: 'INITIAL',
+          })),
+        ),
+      ),
+    },
+  };
+  // `update` exists only on `tx`: a move that escaped the audit transaction would throw.
   const prisma = {
-    lead: { groupBy, aggregate, findFirst, update },
+    lead: { groupBy, aggregate, findFirst },
+    $transaction: jest.fn((run: (client: typeof tx) => Promise<unknown>) =>
+      run(tx),
+    ),
   } as unknown as PrismaService;
   const currentUser = {
     resolve: jest.fn().mockResolvedValue({ id: 'u1', role }),
@@ -63,7 +106,16 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
   const exists = jest.fn().mockResolvedValue(true);
   const stages = { exists } as unknown as StagesService;
   const service = new LeadsBoardService(prisma, currentUser, stages);
-  return { service, groupBy, aggregate, findFirst, update, exists };
+  return {
+    service,
+    groupBy,
+    aggregate,
+    findFirst,
+    update,
+    exists,
+    auditFindMany,
+    auditCreateMany,
+  };
 }
 
 describe('LeadsBoardService.board', () => {
@@ -287,5 +339,99 @@ describe('LeadsBoardService.moveStage', () => {
       where: { AND: Record<string, unknown>[] };
     };
     expect(args.where.AND).toContainEqual({ status: { in: ['HOT'] } });
+  });
+
+  /*
+    A board drag writes the same `status` field as the row action (status and stage are
+    one field, LEAD-01.1 AC3), so it is one STATUS_CHANGED event, told apart by source.
+  */
+  it('records the drag as a status change with the stage it left (ADR-0083)', async () => {
+    const {
+      service,
+      findFirst,
+      update,
+      groupBy,
+      auditFindMany,
+      auditCreateMany,
+    } = makeService();
+    findFirst.mockResolvedValue({ status: 'HOT', pipeline: 'Lead Pipeline' });
+    update.mockResolvedValue(listRow({ status: 'LOST' }));
+    groupBy.mockResolvedValue([]);
+    auditFindMany
+      .mockResolvedValueOnce([auditRow()])
+      .mockResolvedValueOnce([
+        auditRow({ status: 'LOST', lostReason: 'Price' }),
+      ]);
+
+    await service.moveStage(LEAD_ID, { stage: 'LOST', lostReason: 'Price' });
+
+    const [data] = (
+      auditCreateMany.mock.calls[0] as [{ data: Record<string, unknown>[] }]
+    ).map((args) => args.data);
+    expect(data).toEqual([
+      expect.objectContaining({
+        entityId: LEAD_ID,
+        action: 'STATUS_CHANGED',
+        actorId: 'u1',
+        source: 'leads.stage',
+        before: { status: 'HOT', lostReason: null },
+        after: { status: 'LOST', lostReason: 'Price' },
+      }),
+    ]);
+  });
+
+  /*
+    A drag onto the WON column converts the lead, exactly as the row action does — the board
+    is the one path that checks the target against the stage catalogue first (ADR-0085 A2
+    path 4). Pinned because a Logistics order will follow this event.
+  */
+  it('records a drag onto WON as CONVERTED (ADR-0083)', async () => {
+    const {
+      service,
+      findFirst,
+      update,
+      groupBy,
+      auditFindMany,
+      auditCreateMany,
+    } = makeService();
+    findFirst.mockResolvedValue({ status: 'HOT', pipeline: 'Lead Pipeline' });
+    update.mockResolvedValue(listRow({ status: 'WON' }));
+    groupBy.mockResolvedValue([]);
+    auditFindMany
+      .mockResolvedValueOnce([auditRow({ status: 'HOT' })])
+      .mockResolvedValueOnce([auditRow({ status: 'WON' })]);
+
+    await service.moveStage(LEAD_ID, { stage: 'WON' });
+
+    const [data] = (
+      auditCreateMany.mock.calls[0] as [{ data: Record<string, unknown>[] }]
+    ).map((args) => args.data);
+    // The drag converts: the CONVERTED event names the order the same transaction created,
+    // and the order's own CREATED event follows it (ADR-0085 B14).
+    expect(data).toEqual([
+      expect.objectContaining({
+        action: 'CONVERTED',
+        source: 'leads.stage',
+        before: { status: 'HOT' },
+        after: { status: 'WON' },
+        metadata: { orderId: 'order-1' },
+      }),
+      expect.objectContaining({
+        entityType: 'LOGISTICS_ORDER',
+        action: 'CREATED',
+        leadId: LEAD_ID,
+      }),
+    ]);
+  });
+
+  it('writes no event when the move is refused before any write', async () => {
+    const { service, findFirst, exists, auditCreateMany } = makeService();
+    findFirst.mockResolvedValue({ status: 'HOT', pipeline: 'Lead Pipeline' });
+    exists.mockResolvedValue(false);
+
+    await expect(
+      service.moveStage(LEAD_ID, { stage: 'Nope' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 });

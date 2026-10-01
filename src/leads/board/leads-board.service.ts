@@ -6,7 +6,9 @@ import {
 import { Prisma } from '../../generated/prisma/client';
 import { CurrentUserService } from '../../auth/current-user';
 import { PrismaService } from '../../prisma/prisma.service';
+import { userActor } from '../../audit/audit-events';
 import { StagesService } from '../../stages/stages.service';
+import { auditLeadChanges } from '../lead-audit';
 import { OUT_OF_SCOPE_REASON } from '../bulk/dto/bulk-actions.dto';
 import { LEAD_LIST_SELECT, toLeadListItem } from '../dto/lead-response.dto';
 import { leadScopeWhere } from '../lead-scope';
@@ -107,15 +109,22 @@ export class LeadsBoardService {
       throw new BadRequestException('stage must be a known pipeline stage');
     }
 
-    const updated = await this.prisma.lead.update({
-      where: { id },
-      // Same capture rule as the row action: LOST stores the reason, anything else clears it.
-      data: {
-        status: dto.stage,
-        lostReason: dto.stage === LOST_STATUS ? (dto.lostReason ?? null) : null,
-      },
-      select: LEAD_LIST_SELECT,
-    });
+    const updated = await auditLeadChanges(
+      this.prisma,
+      [id],
+      { actor: userActor(user), source: 'leads.stage' },
+      (tx) =>
+        tx.lead.update({
+          where: { id },
+          // Same capture rule as the row action: LOST stores the reason, anything else clears it.
+          data: {
+            status: dto.stage,
+            lostReason:
+              dto.stage === LOST_STATUS ? (dto.lostReason ?? null) : null,
+          },
+          select: LEAD_LIST_SELECT,
+        }),
+    );
 
     // Recount only the affected columns (source + target) within the lead's
     // pipeline and the caller's scope. A move that empties its source column

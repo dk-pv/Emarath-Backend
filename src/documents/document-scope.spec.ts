@@ -16,6 +16,9 @@ describe('documentScopeWhere', () => {
     UserRole.SALES_MANAGER,
     UserRole.CUSTOMER_SERVICE_AGENT,
     UserRole.MARKETING_ANALYST,
+    UserRole.LOGISTICS_MANAGER,
+    UserRole.LOGISTICS_EXECUTIVE,
+    UserRole.ACCOUNTS_EXECUTIVE,
   ])('restricts %s to documents they own or were granted', (role) => {
     expect(documentScopeWhere(user(role, 'me'))).toEqual({
       deletedAt: null,

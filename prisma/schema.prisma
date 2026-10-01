@@ -28,15 +28,23 @@ datasource db {
 // The convention-check model was temporary scaffolding, never a domain entity,
 // and held no application data.
 
-/// The five user types the platform is built around (AUTH-01.1). Fixed by the
-/// backlog rather than configurable — role administration is explicitly out of
-/// scope — so an enum is the honest model.
+/// The user types the platform is built around: the five sales roles (AUTH-01.1) and
+/// the three post-sale roles of the client CRM workflow (ADR-0084). Fixed rather than
+/// configurable — named roles only alias these — so an enum is the honest model.
 enum UserRole {
   SUPERADMIN
   SALES_MANAGER
   SALES_AGENT
   CUSTOMER_SERVICE_AGENT
   MARKETING_ANALYST
+  /// Post-sale roles: no access to the sales modules. RolesGuard admits them only to a
+  /// route whose @Roles() names them, and every sales scope helper returns no rows.
+  LOGISTICS_MANAGER
+  LOGISTICS_EXECUTIVE
+  ACCOUNTS_EXECUTIVE
+  /// The QC team, a separate role under the Logistics Manager (client clarification Q1):
+  /// it verifies or rejects an order and takes no other Logistics action.
+  QC
 }
 
 /// The user account (AUTH-01.1). Stores credentials (email + username + a one-way
@@ -169,6 +177,10 @@ model User {
   pipelineGrants        PipelinePermission[]   @relation("PipelinePermissionUser")
   leadForm              LeadForm?              @relation(fields: [leadFormId], references: [id], onDelete: Restrict)
   modulePermissions     UserModulePermission[]
+  /// Changes this user made (ADR-0083).
+  auditEvents           AuditEvent[]           @relation("AuditEventActor")
+  /// Leads this user converted into Logistics orders (ADR-0085).
+  convertedOrders       LogisticsOrder[]       @relation("LogisticsOrderConvertedBy")
 
   @@map("users")
 }
@@ -517,6 +529,10 @@ model Lead {
   notes             LeadNote[]
   /// LEAD-05.1 (ADR-0051): per-lead values for user-defined custom columns.
   customFieldValues LeadCustomFieldValue[]
+  /// The operational record this lead became when it was won (ADR-0085, CD-2): at most
+  /// one, ever. The lead itself stays here in the Lead Pipeline — Logistics never moves,
+  /// archives or replaces it.
+  logisticsOrder    LogisticsOrder?
 
   /// AC2: the fields the list and board filter and group by are indexed.
   /// Each is paired with deletedAt because every query must exclude soft-deleted
@@ -1626,4 +1642,133 @@ enum AssignmentApplyTo {
 /// "All Users".
 enum AssignmentTarget {
   ALL_USERS
+}
+
+/// Append-only history of important changes to business records (ADR-0083). The client
+/// requires every status change and pipeline movement to stay traceable after a lead moves
+/// on to Logistics and Accounts, so each row is written in the same transaction as the change
+/// it describes: the record and its history can never disagree.
+///
+/// Never updated and never deleted, so there is no `deletedAt`.
+model AuditEvent {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// The record that changed. No foreign key: a lead's history must outlive a hard delete
+  /// of the lead itself, which is exactly the case it exists to explain.
+  entityType String @map("entity_type") @db.VarChar(32)
+  entityId   String @map("entity_id") @db.Uuid
+
+  /// The customer journey the change belongs to. Equal to `entityId` for a lead today; later
+  /// Logistics and Accounts events carry their lead here too, so one indexed read returns the
+  /// whole Lead → Logistics → Accounts history. Null for catalogue events (stage renames).
+  leadId String? @map("lead_id") @db.Uuid
+
+  action String @db.VarChar(48)
+
+  /// USER | SYSTEM | INTEGRATION. `actorId` is set only for USER.
+  actorType String  @map("actor_type") @db.VarChar(16)
+  actorId   String? @map("actor_id") @db.Uuid
+
+  /// The operation that produced the change, e.g. `leads.status`, `leads.import`.
+  source String @db.VarChar(48)
+
+  /// Only the fields that changed: `{ "status": "New" }` → `{ "status": "WON" }`.
+  before   Json?
+  after    Json?
+  metadata Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// Restrict: users are only ever soft-deleted, and history must keep naming who acted.
+  actor User? @relation("AuditEventActor", fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([entityType, entityId, createdAt])
+  @@index([leadId, createdAt])
+  @@index([actorId, createdAt])
+  @@map("audit_events")
+}
+
+/// The Logistics lifecycle of one won order (ADR-0085 B12, client clarification 2026-09-23).
+/// INITIAL is where conversion puts it; QC decides; a rejected order returns to INITIAL through
+/// the controlled resubmit action (CD-2) rather than a second order. DELIVERED, CANCELLED and
+/// RTO are terminal. Cancellation is allowed only after dispatch (CD-3).
+enum LogisticsStatus {
+  INITIAL
+  QC_VERIFIED
+  QC_REJECTED
+  DISPATCHED
+  DELIVERED
+  CANCELLED
+  RTO
+}
+
+/// The operational record a won lead becomes (ADR-0085).
+///
+/// One per lead, ever (`lead_id` UNIQUE, CD-2): a rejected order goes back to INITIAL and is
+/// checked again, so re-conversion never creates a second one. The lead row is never replaced or
+/// deleted — `onDelete: Restrict` makes the database refuse a hard delete of a converted lead,
+/// which `retainedLeads` also refuses first as a clean 409.
+///
+/// The customer/order columns are a snapshot taken from the lead's after-state at conversion, so
+/// a later edit to the lead cannot silently change what is being shipped or billed. Whether QC
+/// may revise them is the one open clarification (no mutation endpoint exists).
+model LogisticsOrder {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// The human-facing order number: a database sequence, so two concurrent conversions can
+  /// never take the same value. Gaps are expected (a rolled-back transaction consumes one).
+  orderNumber Int @unique @default(autoincrement()) @map("order_number")
+
+  leadId String @unique @map("lead_id") @db.Uuid
+  lead   Lead   @relation(fields: [leadId], references: [id], onDelete: Restrict)
+
+  status          LogisticsStatus @default(INITIAL)
+  statusChangedAt DateTime        @default(now()) @map("status_changed_at")
+
+  /// When the lead became WON, and who did it. Written once and never recomputed from the
+  /// lead's current status, so history survives a later status change.
+  convertedAt   DateTime @map("converted_at")
+  convertedById String?  @map("converted_by_id") @db.Uuid
+  convertedBy   User?    @relation("LogisticsOrderConvertedBy", fields: [convertedById], references: [id], onDelete: Restrict)
+
+  customerName   String   @map("customer_name") @db.VarChar(180)
+  primaryPhone   String   @map("primary_phone") @db.VarChar(32)
+  secondaryPhone String?  @map("secondary_phone") @db.VarChar(32)
+  email          String?  @db.VarChar(180)
+  country        String?  @db.VarChar(64)
+  state          String?  @db.VarChar(120)
+  city           String?  @db.VarChar(120)
+  street         String?  @db.VarChar(240)
+  nationalCode   String?  @map("national_code") @db.VarChar(240)
+  product        String?  @db.VarChar(180)
+  productQty     Decimal? @map("product_qty") @db.Decimal(12, 2)
+  product2       String?  @db.VarChar(180)
+  product2Qty    Decimal? @map("product2_qty") @db.Decimal(12, 2)
+  orderValue     Decimal? @map("order_value") @db.Decimal(12, 2)
+  paymentMethod  String?  @map("payment_method") @db.VarChar(64)
+
+  qcDecidedAt DateTime? @map("qc_decided_at")
+  qcRemarks   String?   @map("qc_remarks") @db.VarChar(2000)
+
+  /// The tracking number: mandatory before dispatch and unique across orders (client
+  /// clarification Q9). Matched exactly as stored, after trimming.
+  awbNumber    String?   @unique @map("awb_number") @db.VarChar(64)
+  courier      String?   @db.VarChar(64)
+  dispatchedAt DateTime? @map("dispatched_at")
+  deliveredAt  DateTime? @map("delivered_at")
+
+  cancelledAt  DateTime? @map("cancelled_at")
+  cancelReason String?   @map("cancel_reason") @db.VarChar(500)
+
+  rtoAt     DateTime? @map("rto_at")
+  rtoReason String?   @map("rto_reason") @db.VarChar(500)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([status, createdAt])
+  @@index([convertedAt])
+  @@index([convertedById, convertedAt])
+  @@map("logistics_orders")
 }

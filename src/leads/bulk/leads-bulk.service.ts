@@ -1,7 +1,21 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
-import { UserRole } from '../../generated/prisma/client';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+} from '@nestjs/common';
+import { Prisma, UserRole } from '../../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../../auth/current-user';
 import { PrismaService } from '../../prisma/prisma.service';
+import { recordAuditEvents, userActor } from '../../audit/audit-events';
+import {
+  LeadAuditContext,
+  auditLeadChanges,
+  leadDeleteBlockedEvent,
+  leadDeletedEvent,
+  lockLeads,
+  readLeadAuditStates,
+} from '../lead-audit';
+import { retainedLeads } from '../lead-retention';
 import { leadScopeWhere } from '../lead-scope';
 import {
   BulkActionResponse,
@@ -37,9 +51,13 @@ export class LeadsBulkService {
   /**
    * Reassigns each in-scope selected lead to `agentId`, replacing its current
    * assignment(s) so ownership — and therefore scoping — changes at once (AC4). The
-   * delete+create runs in one transaction, so a lead is never left unassigned.
+   * delete+create runs in one transaction, so a lead is never left unassigned; the
+   * previous and new assignees are recorded in that same transaction (ADR-0083).
    */
-  async reassign(dto: BulkReassignDto): Promise<BulkActionResponse> {
+  async reassign(
+    dto: BulkReassignDto,
+    source = 'leads.bulk-reassign',
+  ): Promise<BulkActionResponse> {
     const user = await this.currentUser.resolve();
 
     const agent = await this.prisma.user.findFirst({
@@ -61,14 +79,19 @@ export class LeadsBulkService {
 
     if (actionable.size > 0) {
       const leadIds = [...actionable];
-      await this.prisma.$transaction([
-        this.prisma.leadAssignment.deleteMany({
-          where: { leadId: { in: leadIds } },
-        }),
-        this.prisma.leadAssignment.createMany({
-          data: leadIds.map((leadId) => ({ leadId, userId: dto.agentId })),
-        }),
-      ]);
+      await auditLeadChanges(
+        this.prisma,
+        leadIds,
+        { actor: userActor(user), source },
+        async (tx) => {
+          await tx.leadAssignment.deleteMany({
+            where: { leadId: { in: leadIds } },
+          });
+          await tx.leadAssignment.createMany({
+            data: leadIds.map((leadId) => ({ leadId, userId: dto.agentId })),
+          });
+        },
+      );
     }
 
     return bulkResponse(ids, actionable);
@@ -78,20 +101,78 @@ export class LeadsBulkService {
    * Permanently removes each in-scope selected lead (LEAD-09.1 AC5, hard delete —
    * approved). Assignments, tags and complaints go with it through their cascading
    * foreign keys; `deleteMany` over the scoped id set is the single safe batch.
+   *
+   * A lead other records depend on is never deleted (ADR-0083): if any selected lead is
+   * retained, nothing is deleted and the request is a 409 — the same all-or-nothing
+   * outcome the RESTRICT key already forced, now with the attempt recorded. Each deleted
+   * lead leaves a DELETED event holding its last state, so the history outlives the row.
    */
-  async delete(dto: BulkDeleteDto): Promise<BulkActionResponse> {
+  async delete(
+    dto: BulkDeleteDto,
+    source = 'leads.bulk-delete',
+  ): Promise<BulkActionResponse> {
     const user = await this.currentUser.resolve();
 
     const ids = unique(dto.ids);
     const actionable = await this.actionableIds(user, ids);
 
     if (actionable.size > 0) {
-      await this.prisma.lead.deleteMany({
-        where: { id: { in: [...actionable] } },
+      const leadIds = [...actionable];
+      const retained = await this.deleteUnlessRetained(leadIds, {
+        actor: userActor(user),
+        source,
       });
+      if (retained > 0) {
+        throw new ConflictException(retainedMessage(retained, leadIds.length));
+      }
     }
 
     return bulkResponse(ids, actionable);
+  }
+
+  /**
+   * Deletes the leads unless any is retained, and returns how many were. The check runs
+   * under the row lock, so a call cannot be linked between the check and the delete; the
+   * foreign key is still caught in case a new RESTRICT record is ever missed by the rule.
+   */
+  private async deleteUnlessRetained(
+    leadIds: string[],
+    context: LeadAuditContext,
+  ): Promise<number> {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        await lockLeads(tx, leadIds);
+
+        const retained = await retainedLeads(tx, leadIds);
+        if (retained.size > 0) {
+          await recordAuditEvents(
+            tx,
+            [...retained].map(([id, linked]) =>
+              leadDeleteBlockedEvent(id, { ...linked }, context),
+            ),
+          );
+          return retained.size;
+        }
+
+        const states = await readLeadAuditStates(tx, leadIds);
+        await recordAuditEvents(
+          tx,
+          [...states].map(([id, state]) =>
+            leadDeletedEvent(id, state, context),
+          ),
+        );
+        await tx.lead.deleteMany({ where: { id: { in: leadIds } } });
+        return 0;
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2003'
+      ) {
+        throw new ConflictException(retainedMessage(null, leadIds.length));
+      }
+      throw error;
+    }
   }
 
   /**
@@ -114,4 +195,18 @@ export class LeadsBulkService {
 
 function unique(ids: string[]): string[] {
   return [...new Set(ids)];
+}
+
+/** `retained` is null when the database refused the delete and the count is unknown. */
+function retainedMessage(retained: number | null, requested: number): string {
+  if (requested === 1) {
+    return 'This lead has linked records, so it can’t be permanently deleted. Archive it instead.';
+  }
+  const leads =
+    retained === null
+      ? 'Some selected leads have'
+      : retained === 1
+        ? '1 selected lead has'
+        : `${retained} selected leads have`;
+  return `${leads} linked records, so nothing was deleted. Archive those leads instead.`;
 }

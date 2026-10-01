@@ -1,10 +1,16 @@
 import { CallDirection, UserRole } from '../generated/prisma/client';
 import { CurrentUser } from '../auth/current-user';
+import { buildConvertedLeadsWhere } from '../reports/converted-leads-where';
+import { buildLostLeadsWhere } from '../reports/lost-leads-where';
 import {
+  allCallsWhere,
   HOT_LEAD_STATUSES,
   hotLeadsWhere,
+  inboundCallsWhere,
   KPI_KEYS,
+  lostLeadsWhere,
   outboundCallsWhere,
+  wonLeadsWhere,
   overdueFollowUpsWhere,
   QUALIFIED_LEADS_PENDING,
   todaysFollowUpsWhere,
@@ -42,7 +48,10 @@ function flatten(where: unknown): Record<string, unknown>[] {
 const json = (value: unknown) => JSON.stringify(value);
 
 describe('DASH-02.1 counter definitions', () => {
-  it('defines exactly the six backlog counters (AC1)', () => {
+  // The six backlog counters (AC1), plus the four carousel cards whose definition already
+  // exists elsewhere and is reused verbatim (2026-09-24). Nothing else: a card with no
+  // established definition stays Unavailable rather than get an invented formula.
+  it('defines the six backlog counters and the four reused definitions, nothing more', () => {
     expect([...KPI_KEYS].sort()).toEqual(
       [
         'overdueFollowUps',
@@ -51,6 +60,10 @@ describe('DASH-02.1 counter definitions', () => {
         'todaysFollowUps',
         'qualifiedLeads',
         'outboundCalls',
+        'wonLeads',
+        'lostLeads',
+        'inboundCalls',
+        'callsToday',
       ].sort(),
     );
   });
@@ -256,5 +269,40 @@ describe('DASH-02.1 counter definitions', () => {
       const where = outboundCallsWhere(ADMIN, period({ to: undefined }));
       expect(where.startedAt).toEqual({ gte: new Date(FROM) });
     });
+  });
+});
+
+/*
+  The four carousel counters added 2026-09-24 invent nothing: each is the `where` of the screen
+  that already owns the definition, so the card and that screen can never disagree.
+*/
+describe('reused definitions', () => {
+  const p: KpiPeriod = { todayStart: TODAY_START, from: FROM, to: TO };
+
+  it('Won Leads is the Converted Leads report, scoped the same way', () => {
+    expect(wonLeadsWhere(AGENT, p)).toEqual(
+      buildConvertedLeadsWhere(AGENT, { from: FROM, to: TO }),
+    );
+  });
+
+  it('Lost Leads is the Lost Leads report, scoped the same way', () => {
+    expect(lostLeadsWhere(MANAGER, p)).toEqual(
+      buildLostLeadsWhere(MANAGER, { from: FROM, to: TO }),
+    );
+  });
+
+  it('Inbound and total calls are the Call Dashboard counts: same scope, same window', () => {
+    const outbound = outboundCallsWhere(AGENT, p);
+    const inbound = inboundCallsWhere(AGENT, p);
+    const all = allCallsWhere(AGENT, p);
+    expect(inbound.direction).toBe(CallDirection.INBOUND);
+    expect(all.direction).toBeUndefined();
+    const withoutDirection = (where: object) =>
+      Object.fromEntries(
+        Object.entries(where).filter(([key]) => key !== 'direction'),
+      );
+    const outboundRest = withoutDirection(outbound);
+    expect(withoutDirection(inbound)).toEqual(outboundRest);
+    expect(all).toEqual(outboundRest);
   });
 });

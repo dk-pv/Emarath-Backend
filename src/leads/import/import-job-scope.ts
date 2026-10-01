@@ -1,5 +1,6 @@
 import { Prisma, UserRole } from '../../generated/prisma/client';
 import { CurrentUser } from '../../auth/current-user';
+import { isOperationalRole } from '../../auth/role-groups';
 
 /**
  * The import jobs a user may see, as a query fragment (mirrors `leadScopeWhere`).
@@ -25,6 +26,11 @@ export function importJobScopeWhere(
     return user.team
       ? { ...visible, createdBy: { team: user.team } }
       : { ...visible, createdById: user.id };
+  }
+
+  // Operational roles hold no sales access (ADR-0084): no import matches.
+  if (isOperationalRole(user.role)) {
+    return { ...visible, id: { in: [] } };
   }
 
   // Admin, Customer Service and Marketing see all (ADR-0030 §2.2 default).

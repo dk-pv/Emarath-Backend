@@ -1,8 +1,6 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
-import request from 'supertest';
+import { INestApplication } from '@nestjs/common';
 import { App } from 'supertest/types';
-import { AppModule } from '../src/app.module';
+import { createE2EApp, E2EAgent } from './e2e-app';
 
 /**
  * Contract smoke test for the GPS check-in API (GPS-02.1).
@@ -14,22 +12,10 @@ import { AppModule } from '../src/app.module';
  */
 describe('GPS check-in (e2e)', () => {
   let app: INestApplication<App>;
+  let api: E2EAgent;
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-
-    app = moduleRef.createNestApplication();
-    app.setGlobalPrefix('api');
-    app.useGlobalPipes(
-      new ValidationPipe({
-        transform: true,
-        whitelist: true,
-        forbidNonWhitelisted: true,
-      }),
-    );
-    await app.init();
+    ({ app, api } = await createE2EApp());
   });
 
   afterAll(async () => {
@@ -37,21 +23,21 @@ describe('GPS check-in (e2e)', () => {
   });
 
   it('rejects a check-in with out-of-range coordinates (AC5)', async () => {
-    await request(app.getHttpServer())
+    await api
       .post('/api/gps/check-ins')
       .send({ latitude: 200, longitude: 55 })
       .expect(400);
   });
 
   it('rejects a check-out for a non-uuid check-in id', async () => {
-    await request(app.getHttpServer())
+    await api
       .patch('/api/gps/check-ins/not-a-uuid/check-out')
       .send({ latitude: 25, longitude: 55 })
       .expect(400);
   });
 
   it('rejects a location point with out-of-range coordinates (GPS-03.1)', async () => {
-    await request(app.getHttpServer())
+    await api
       .post('/api/gps/location-points')
       .send({ latitude: 25, longitude: 200 })
       .expect(400);
@@ -60,22 +46,10 @@ describe('GPS check-in (e2e)', () => {
 
 describe('GPS summary (e2e)', () => {
   let app: INestApplication<App>;
+  let api: E2EAgent;
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-
-    app = moduleRef.createNestApplication();
-    app.setGlobalPrefix('api');
-    app.useGlobalPipes(
-      new ValidationPipe({
-        transform: true,
-        whitelist: true,
-        forbidNonWhitelisted: true,
-      }),
-    );
-    await app.init();
+    ({ app, api } = await createE2EApp());
   });
 
   afterAll(async () => {
@@ -83,14 +57,10 @@ describe('GPS summary (e2e)', () => {
   });
 
   it('rejects a summary request with an invalid date string', async () => {
-    await request(app.getHttpServer())
-      .get('/api/gps/summary?dateFrom=not-a-date')
-      .expect(400);
+    await api.get('/api/gps/summary?dateFrom=not-a-date').expect(400);
   });
 
   it('rejects a summary request with an invalid user id', async () => {
-    await request(app.getHttpServer())
-      .get('/api/gps/summary?userId=not-a-uuid')
-      .expect(400);
+    await api.get('/api/gps/summary?userId=not-a-uuid').expect(400);
   });
 });

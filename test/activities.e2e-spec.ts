@@ -1,8 +1,6 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
-import request from 'supertest';
+import { INestApplication } from '@nestjs/common';
 import { App } from 'supertest/types';
-import { AppModule } from '../src/app.module';
+import { createE2EApp, E2EAgent } from './e2e-app';
 
 /**
  * Contract smoke test for POST /api/activities (ACT-03.1).
@@ -16,32 +14,20 @@ import { AppModule } from '../src/app.module';
  */
 describe('Create activity (e2e)', () => {
   let app: INestApplication<App>;
+  let api: E2EAgent;
   const uuid = '11111111-1111-1111-1111-111111111111';
   const dueAt = '2026-08-01T09:00:00.000Z';
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-
-    app = moduleRef.createNestApplication();
-    app.setGlobalPrefix('api');
-    app.useGlobalPipes(
-      new ValidationPipe({
-        transform: true,
-        whitelist: true,
-        forbidNonWhitelisted: true,
-      }),
-    );
-    await app.init();
+    ({ app, api } = await createE2EApp());
   });
 
   afterAll(async () => {
     await app.close();
   });
 
-  const post = () => request(app.getHttpServer()).post('/api/activities');
-  const get = () => request(app.getHttpServer()).get('/api/activities');
+  const post = () => api.post('/api/activities');
+  const get = () => api.get('/api/activities');
   const bounds = {
     todayStart: '2026-07-24T00:00:00.000Z',
     todayEnd: '2026-07-25T00:00:00.000Z',
@@ -175,26 +161,21 @@ describe('Create activity (e2e)', () => {
   // PATCH /api/activities/:id/complete — the UUID pipe guards the id before the
   // service runs; the scoped, idempotent completion is covered by unit tests.
   it('rejects complete for a non-uuid id', async () => {
-    await request(app.getHttpServer())
-      .patch('/api/activities/not-a-uuid/complete')
-      .expect(400);
+    await api.patch('/api/activities/not-a-uuid/complete').expect(400);
   });
 
   // POST /api/activities/:id/duplicate — the UUID pipe guards the id (ACT-08.1);
   // the scoped copy is covered by unit tests.
   it('rejects duplicate for a non-uuid id', async () => {
-    await request(app.getHttpServer())
-      .post('/api/activities/not-a-uuid/duplicate')
-      .expect(400);
+    await api.post('/api/activities/not-a-uuid/duplicate').expect(400);
   });
 
   // PATCH /api/activities/:id — edit guards (ACT-05.1). The scoped update is
   // covered by unit tests; a valid body would reach the DB.
-  const patch = () =>
-    request(app.getHttpServer()).patch(`/api/activities/${uuid}`);
+  const patch = () => api.patch(`/api/activities/${uuid}`);
 
   it('rejects an edit for a non-uuid id', async () => {
-    await request(app.getHttpServer())
+    await api
       .patch('/api/activities/not-a-uuid')
       .send({
         type: 'CALL',
@@ -224,8 +205,6 @@ describe('Create activity (e2e)', () => {
   // DELETE /api/activities/:id — the UUID pipe guards the id before the service
   // runs; the scoped, idempotent soft delete is covered by unit tests.
   it('rejects a delete for a non-uuid id', async () => {
-    await request(app.getHttpServer())
-      .delete('/api/activities/not-a-uuid')
-      .expect(400);
+    await api.delete('/api/activities/not-a-uuid').expect(400);
   });
 });

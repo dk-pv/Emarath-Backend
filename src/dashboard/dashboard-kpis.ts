@@ -6,9 +6,16 @@ import { buildOverdueFollowUpsWhere } from '../reports/overdue-follow-ups-where'
 import { buildLeadWhere } from '../leads/lead-where';
 import { leadScopeWhere } from '../leads/lead-scope';
 import { callScopeWhere } from '../calls/call-scope';
+import { buildConvertedLeadsWhere } from '../reports/converted-leads-where';
+import { buildLostLeadsWhere } from '../reports/lost-leads-where';
 import { DashboardPeriod } from './dashboard-agents';
 
-/** The six top-of-dashboard counters (DASH-02.1 AC1). */
+/**
+ * The top-of-dashboard counters: the six of DASH-02.1 AC1, plus the carousel cards whose
+ * definition already exists in another module and is reused verbatim — Won and Lost from their
+ * reports, Inbound and total calls from the Call Dashboard. A card whose definition does not
+ * exist yet is not listed here; it stays Unavailable rather than get an invented formula.
+ */
 export const KPI_KEYS = [
   'overdueFollowUps',
   'hotLeads',
@@ -16,6 +23,10 @@ export const KPI_KEYS = [
   'todaysFollowUps',
   'qualifiedLeads',
   'outboundCalls',
+  'wonLeads',
+  'lostLeads',
+  'inboundCalls',
+  'callsToday',
 ] as const;
 
 export type KpiKey = (typeof KPI_KEYS)[number];
@@ -170,14 +181,14 @@ export function hotLeadsWhere(
 }
 
 /**
- * Outbound Calls — calls placed in the period, scoped by role through
- * `callScopeWhere` (which delegates to `leadScopeWhere`). The same direction
- * predicate and the same scope the Call Dashboard's own summary uses, so the two
- * surfaces report the same figure for the same window.
+ * Calls in the period, scoped by role through `callScopeWhere` (which delegates to
+ * `leadScopeWhere`) — the Call Dashboard summary's own `where`, so the dashboard reports the
+ * same total / inbound / outbound figures that screen does for the same window.
  */
-export function outboundCallsWhere(
+function callsWhere(
   user: CurrentUser,
   period: KpiPeriod,
+  direction?: CallDirection,
 ): Prisma.CallWhereInput {
   const startedAt: Prisma.DateTimeFilter = {};
   if (period.from) startedAt.gte = new Date(period.from);
@@ -185,7 +196,69 @@ export function outboundCallsWhere(
 
   return {
     ...callScopeWhere(user),
-    direction: CallDirection.OUTBOUND,
+    ...(direction ? { direction } : {}),
     ...(period.from || period.to ? { startedAt } : {}),
   };
 }
+
+/** Outbound Calls — the Call Dashboard's outbound count for the period. */
+export function outboundCallsWhere(
+  user: CurrentUser,
+  period: KpiPeriod,
+): Prisma.CallWhereInput {
+  return callsWhere(user, period, CallDirection.OUTBOUND);
+}
+
+/** Inbound Calls — the Call Dashboard's inbound count for the period. */
+export function inboundCallsWhere(
+  user: CurrentUser,
+  period: KpiPeriod,
+): Prisma.CallWhereInput {
+  return callsWhere(user, period, CallDirection.INBOUND);
+}
+
+/** Calls — the Call Dashboard's total for the period, both directions. */
+export function allCallsWhere(
+  user: CurrentUser,
+  period: KpiPeriod,
+): Prisma.CallWhereInput {
+  return callsWhere(user, period);
+}
+
+/**
+ * Won Leads — the Converted Leads report's own `where` (RPT, `CONVERTED_STATUS`), with the
+ * period on `createdAt` as that report and every other lead counter here default to. The card's
+ * "by you or your team" is exactly the role scope the builder applies.
+ */
+export function wonLeadsWhere(
+  user: CurrentUser,
+  period: KpiPeriod,
+): Prisma.LeadWhereInput {
+  return buildConvertedLeadsWhere(user, { from: period.from, to: period.to });
+}
+
+/** Lost Leads — the Lost Leads report's own `where` (status LOST), period on `createdAt`. */
+export function lostLeadsWhere(
+  user: CurrentUser,
+  period: KpiPeriod,
+): Prisma.LeadWhereInput {
+  return buildLostLeadsWhere(user, { from: period.from, to: period.to });
+}
+
+/**
+ * The control row's Sales Agent selection, one term per record kind — the assignment join the
+ * Leads filter uses, the assignee join the Activities filter uses, and the call's own agent.
+ * Each is ANDed onto a counter's already-scoped `where`, so a selection can only narrow what the
+ * caller may see: an agent choosing someone else simply counts nothing.
+ */
+export const leadAgentWhere = (agents: string[]): Prisma.LeadWhereInput => ({
+  assignments: { some: { userId: { in: agents } } },
+});
+export const activityAgentWhere = (
+  agents: string[],
+): Prisma.ActivityWhereInput => ({
+  assignees: { some: { userId: { in: agents } } },
+});
+export const callAgentWhere = (agents: string[]): Prisma.CallWhereInput => ({
+  agentId: { in: agents },
+});

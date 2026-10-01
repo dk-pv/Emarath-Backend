@@ -37,9 +37,12 @@ export class LeadsRepository {
    * created between them makes the count disagree with the page, which shows up
    * as a phantom last page the user cannot open.
    */
-  /** Creates a lead and its nested assignments/tags/complaint in one statement. */
-  async create(data: Prisma.LeadCreateInput) {
-    return this.prisma.lead.create({ data, select: LEAD_LIST_SELECT });
+  /**
+   * Creates a lead and its nested assignments/tags/complaint in one statement, through
+   * the caller's transaction so its audit events commit with it (ADR-0083).
+   */
+  async create(data: Prisma.LeadCreateInput, tx: Prisma.TransactionClient) {
+    return tx.lead.create({ data, select: LEAD_LIST_SELECT });
   }
 
   /**
@@ -60,14 +63,15 @@ export class LeadsRepository {
   }
 
   /**
-   * Updates a lead's scalar fields and replaces its assignments/tags in one
-   * transaction (Edit Lead). Assignments and tags are full-replaced — deleteMany
-   * then create — so removing one in the form removes the row; the whole thing is
-   * atomic, so a bad id leaves the lead untouched. The single COMPLAINTS field
-   * reconciles the latest open complaint: its text is updated in place, or one is
-   * created if none exists; an empty value leaves existing complaints alone (their
-   * lifecycle is LEAD-13.1, not this form's to delete). Returns the list projection
-   * so the row can adopt the result. Scope is enforced by the caller before this.
+   * Updates a lead's scalar fields and replaces its assignments/tags inside the
+   * caller's transaction (Edit Lead), which also records the change (ADR-0083).
+   * Assignments and tags are full-replaced — deleteMany then create — so removing
+   * one in the form removes the row; the whole thing is atomic, so a bad id leaves
+   * the lead untouched. The single COMPLAINTS field reconciles the latest open
+   * complaint: its text is updated in place, or one is created if none exists; an
+   * empty value leaves existing complaints alone (their lifecycle is LEAD-13.1, not
+   * this form's to delete). Returns the list projection so the row can adopt the
+   * result. Scope is enforced by the caller before this.
    */
   async update(
     id: string,
@@ -82,28 +86,32 @@ export class LeadsRepository {
       assigneeIds: string[];
       tagIds: string[];
       complaintReason: string | null;
-      customFieldValues: { customFieldId: string; value: string }[];
+      /** Absent → the lead's custom values are left exactly as they are. */
+      customFieldValues?: { customFieldId: string; value: string }[];
     },
+    tx: Prisma.TransactionClient,
   ) {
-    return this.prisma.$transaction(async (tx) => {
-      const lead = await tx.lead.update({
-        where: { id },
-        data: {
-          ...data,
-          assignments: {
-            deleteMany: {},
-            create: assigneeIds.map((userId) => ({
-              user: { connect: { id: userId } },
-            })),
-          },
-          tags: {
-            deleteMany: {},
-            create: tagIds.map((tagId) => ({
-              tag: { connect: { id: tagId } },
-            })),
-          },
-          // Full-replace (like assignments/tags): a value the form emptied is dropped,
-          // a changed one rewritten, all atomic (LEAD-05.1, ADR-0051).
+    const lead = await tx.lead.update({
+      where: { id },
+      data: {
+        ...data,
+        assignments: {
+          deleteMany: {},
+          create: assigneeIds.map((userId) => ({
+            user: { connect: { id: userId } },
+          })),
+        },
+        tags: {
+          deleteMany: {},
+          create: tagIds.map((tagId) => ({
+            tag: { connect: { id: tagId } },
+          })),
+        },
+        // Full-replace (like assignments/tags): a value the form emptied is dropped,
+        // a changed one rewritten, all atomic (LEAD-05.1, ADR-0051). Only when the
+        // caller sent a set: a form that never loaded the definitions must not read
+        // as "clear them all".
+        ...(customFieldValues && {
           customFieldValues: {
             deleteMany: {},
             create: customFieldValues.map((v) => ({
@@ -111,34 +119,34 @@ export class LeadsRepository {
               value: v.value,
             })),
           },
-        },
-        select: LEAD_LIST_SELECT,
-      });
-
-      if (complaintReason) {
-        const existing = await tx.complaint.findFirst({
-          where: { leadId: id, deletedAt: null },
-          orderBy: { createdAt: 'desc' },
-          select: { id: true },
-        });
-        if (existing) {
-          await tx.complaint.update({
-            where: { id: existing.id },
-            data: { details: complaintReason },
-          });
-        } else {
-          await tx.complaint.create({
-            data: {
-              lead: { connect: { id } },
-              details: complaintReason,
-              status: 'Open',
-            },
-          });
-        }
-      }
-
-      return lead;
+        }),
+      },
+      select: LEAD_LIST_SELECT,
     });
+
+    if (complaintReason) {
+      const existing = await tx.complaint.findFirst({
+        where: { leadId: id, deletedAt: null },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true },
+      });
+      if (existing) {
+        await tx.complaint.update({
+          where: { id: existing.id },
+          data: { details: complaintReason },
+        });
+      } else {
+        await tx.complaint.create({
+          data: {
+            lead: { connect: { id } },
+            details: complaintReason,
+            status: 'Open',
+          },
+        });
+      }
+    }
+
+    return lead;
   }
 
   async findPage({

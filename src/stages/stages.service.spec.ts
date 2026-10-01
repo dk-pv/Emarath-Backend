@@ -3,8 +3,9 @@ import {
   ConflictException,
   NotFoundException,
 } from '@nestjs/common';
+import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
-import { StagesService } from './stages.service';
+import { RESERVED_STAGE_NAMES, StagesService } from './stages.service';
 
 const PIPELINE = 'Lead Pipeline';
 
@@ -28,15 +29,21 @@ function makeService() {
   const del = jest.fn();
   const leadUpdateMany = jest.fn();
   const leadCount = jest.fn();
+  const auditCreateMany = jest.fn().mockResolvedValue({ count: 1 });
   const $transaction = jest.fn((ops: Promise<unknown>[]) => Promise.all(ops));
 
   const prisma = {
     stage: { findMany, findUnique, findFirst, create, update, delete: del },
     lead: { updateMany: leadUpdateMany, count: leadCount },
+    auditEvent: { createMany: auditCreateMany },
     $transaction,
   } as unknown as PrismaService;
 
-  const service = new StagesService(prisma);
+  const currentUser = {
+    resolve: jest.fn().mockResolvedValue({ id: 'admin-1', role: 'SUPERADMIN' }),
+  } as unknown as CurrentUserService;
+
+  const service = new StagesService(prisma, currentUser);
   return {
     service,
     findMany,
@@ -47,6 +54,7 @@ function makeService() {
     del,
     leadUpdateMany,
     leadCount,
+    auditCreateMany,
     $transaction,
   };
 }
@@ -138,6 +146,92 @@ describe('StagesService.update', () => {
     };
     expect(cascadeArgs.where).toEqual({ status: 'HOT', pipeline: PIPELINE });
     expect(cascadeArgs.data).toEqual({ status: 'Very Hot' });
+  });
+
+  it('records the rename once, on the stage, inside the rename’s transaction (ADR-0083)', async () => {
+    const { service, findUnique, update, auditCreateMany, $transaction } =
+      makeService();
+    findUnique
+      .mockResolvedValueOnce({ id: 'id', pipeline: PIPELINE, name: 'HOT' })
+      .mockResolvedValueOnce(null);
+    update.mockResolvedValue(stageRow({ name: 'Very Hot' }));
+
+    await service.update('id', { name: 'Very Hot' });
+
+    const [batch] = $transaction.mock.calls[0] as [unknown[]];
+    expect(batch).toHaveLength(3);
+    expect(auditCreateMany).toHaveBeenCalledWith({
+      data: [
+        {
+          entityType: 'STAGE',
+          entityId: 'id',
+          leadId: null,
+          action: 'RENAMED',
+          actorType: 'USER',
+          actorId: 'admin-1',
+          source: 'stages.update',
+          before: { name: 'HOT' },
+          after: { name: 'Very Hot' },
+          metadata: { pipeline: PIPELINE },
+        },
+      ],
+    });
+  });
+
+  /*
+    The one status write no lead-level audit could see (ADR-0085 A2 path 8): a rename relabels
+    every lead in the stage through one `updateMany`, outside the per-lead audit and outside the
+    conversion hook. Renaming a stage *to* WON would therefore mark a whole column converted
+    with no order behind it, so the reserved-name guard refuses it before any lead is touched
+    (ADR-0085 B17). Every other rename still cascades exactly as before.
+  */
+  it('refuses to rename a stage to WON, leaving every lead untouched', async () => {
+    const { service, findUnique, update, leadUpdateMany, auditCreateMany } =
+      makeService();
+    findUnique.mockResolvedValueOnce({
+      id: 'id',
+      pipeline: PIPELINE,
+      name: 'Converted',
+    });
+
+    await expect(service.update('id', { name: 'WON' })).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(update).not.toHaveBeenCalled();
+    expect(leadUpdateMany).not.toHaveBeenCalled();
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses to rename WON or QC NOT APPROVED away', async () => {
+    for (const name of RESERVED_STAGE_NAMES) {
+      const { service, findUnique, leadUpdateMany } = makeService();
+      findUnique.mockResolvedValueOnce({ id: 'id', pipeline: PIPELINE, name });
+
+      await expect(
+        service.update('id', { name: 'Something else' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(leadUpdateMany).not.toHaveBeenCalled();
+    }
+  });
+
+  it('still recolours a reserved stage — only its name is protected', async () => {
+    const { service, findUnique, update } = makeService();
+    findUnique.mockResolvedValue({ id: 'id', pipeline: PIPELINE, name: 'WON' });
+    update.mockResolvedValue(stageRow({ name: 'WON', color: 'red' }));
+
+    await expect(service.update('id', { color: 'red' })).resolves.toMatchObject(
+      { color: 'red' },
+    );
+  });
+
+  it('records nothing for a recolour, which moves no lead', async () => {
+    const { service, findUnique, update, auditCreateMany } = makeService();
+    findUnique.mockResolvedValue({ id: 'id', pipeline: PIPELINE, name: 'HOT' });
+    update.mockResolvedValue(stageRow({ color: 'red' }));
+
+    await service.update('id', { color: 'red' });
+
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 
   it('rejects a rename onto an existing name (AC5)', async () => {
@@ -248,5 +342,23 @@ describe('StagesService.exists', () => {
 
     findUnique.mockResolvedValueOnce(null);
     await expect(service.exists(PIPELINE, 'Ghost')).resolves.toBe(false);
+  });
+});
+
+describe('StagesService.remove — reserved stages', () => {
+  it('refuses to delete a stage the Logistics workflow depends on', async () => {
+    const { service, findUnique, leadCount, del } = makeService();
+    findUnique.mockResolvedValue({
+      id: 'id',
+      pipeline: PIPELINE,
+      name: 'QC NOT APPROVED',
+    });
+
+    await expect(service.remove('id')).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    // Refused before the emptiness check, so an empty reserved stage is protected too.
+    expect(leadCount).not.toHaveBeenCalled();
+    expect(del).not.toHaveBeenCalled();
   });
 });

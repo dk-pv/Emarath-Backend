@@ -91,6 +91,21 @@ describe('leadScopeWhere', () => {
     });
   });
 
+  it.each([
+    UserRole.LOGISTICS_MANAGER,
+    UserRole.LOGISTICS_EXECUTIVE,
+    UserRole.ACCOUNTS_EXECUTIVE,
+  ])('gives %s no lead at all, even the archived view (ADR-0084)', (role) => {
+    expect(leadScopeWhere(user(role))).toEqual({
+      deletedAt: null,
+      id: { in: [] },
+    });
+    expect(leadScopeWhere(user(role), true)).toEqual({
+      deletedAt: { not: null },
+      id: { in: [] },
+    });
+  });
+
   it('returns a scope for every role the enum defines', () => {
     // A role added without a branch here would fall through and return
     // undefined, which Prisma reads as "no filter" — an unscoped table.

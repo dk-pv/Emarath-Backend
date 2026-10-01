@@ -1,21 +1,29 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { Prisma } from '../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  activityAgentWhere,
+  allCallsWhere,
+  callAgentWhere,
   hotLeadsWhere,
+  inboundCallsWhere,
   KPI_KEYS,
+  leadAgentWhere,
+  lostLeadsWhere,
   outboundCallsWhere,
   overdueFollowUpsWhere,
   QUALIFIED_LEADS_PENDING,
   todaysFollowUpsWhere,
   todaysLeadsWhere,
+  wonLeadsWhere,
   type KpiCounter,
   type KpiKey,
   type KpiPeriod,
 } from './dashboard-kpis';
 import { DashboardKpisQueryDto } from './dto/dashboard-kpis-query.dto';
 
-/** Only the counters that were asked for; all six when none were named (AC1). */
+/** Only the counters that were asked for; every counter when none were named (AC1). */
 export type DashboardKpis = Partial<Record<KpiKey, KpiCounter>>;
 
 const ok = (value: number): KpiCounter => ({ value, status: 'ok' });
@@ -48,7 +56,7 @@ export class DashboardKpisService {
     const entries = await Promise.all(
       wanted.map(async (key): Promise<[KpiKey, KpiCounter]> => [
         key,
-        await this.count(key, user, period),
+        await this.count(key, user, period, query.agent),
       ]),
     );
 
@@ -59,36 +67,47 @@ export class DashboardKpisService {
     key: KpiKey,
     user: CurrentUser,
     period: KpiPeriod,
+    agents: string[] | undefined,
   ): Promise<KpiCounter> {
+    // The Sales Agent selection, ANDed onto each already-scoped fragment: it narrows, never widens.
+    const leads = (where: Prisma.LeadWhereInput) =>
+      this.prisma.lead.count({
+        where: agents?.length
+          ? { AND: [where, leadAgentWhere(agents)] }
+          : where,
+      });
+    const activities = (where: Prisma.ActivityWhereInput) =>
+      this.prisma.activity.count({
+        where: agents?.length
+          ? { AND: [where, activityAgentWhere(agents)] }
+          : where,
+      });
+    const calls = (where: Prisma.CallWhereInput) =>
+      this.prisma.call.count({
+        where: agents?.length
+          ? { AND: [where, callAgentWhere(agents)] }
+          : where,
+      });
+
     switch (key) {
       case 'overdueFollowUps':
-        return ok(
-          await this.prisma.activity.count({
-            where: overdueFollowUpsWhere(user, period),
-          }),
-        );
+        return ok(await activities(overdueFollowUpsWhere(user, period)));
       case 'todaysFollowUps':
-        return ok(
-          await this.prisma.activity.count({
-            where: todaysFollowUpsWhere(user, period),
-          }),
-        );
+        return ok(await activities(todaysFollowUpsWhere(user, period)));
       case 'todaysLeads':
-        return ok(
-          await this.prisma.lead.count({
-            where: todaysLeadsWhere(user, period),
-          }),
-        );
+        return ok(await leads(todaysLeadsWhere(user, period)));
       case 'hotLeads':
-        return ok(
-          await this.prisma.lead.count({ where: hotLeadsWhere(user, period) }),
-        );
+        return ok(await leads(hotLeadsWhere(user, period)));
+      case 'wonLeads':
+        return ok(await leads(wonLeadsWhere(user, period)));
+      case 'lostLeads':
+        return ok(await leads(lostLeadsWhere(user, period)));
       case 'outboundCalls':
-        return ok(
-          await this.prisma.call.count({
-            where: outboundCallsWhere(user, period),
-          }),
-        );
+        return ok(await calls(outboundCallsWhere(user, period)));
+      case 'inboundCalls':
+        return ok(await calls(inboundCallsWhere(user, period)));
+      case 'callsToday':
+        return ok(await calls(allCallsWhere(user, period)));
       // Never counted, never guessed — see QUALIFIED_LEADS_PENDING.
       case 'qualifiedLeads':
         return QUALIFIED_LEADS_PENDING;

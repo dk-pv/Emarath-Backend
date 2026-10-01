@@ -1,7 +1,10 @@
 import { BadRequestException } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import { UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import { KPI_KEYS } from './dashboard-kpis';
 import { DashboardKpisService } from './dashboard-kpis.service';
 import { DashboardKpisQueryDto } from './dto/dashboard-kpis-query.dto';
 
@@ -47,19 +50,10 @@ const query = (
 });
 
 describe('DashboardKpisService.getKpis', () => {
-  it('returns all six counters when none are named (AC1)', async () => {
+  it('returns every counter when none are named (AC1)', async () => {
     const { service } = makeService();
     const kpis = await service.getKpis(query());
-    expect(Object.keys(kpis).sort()).toEqual(
-      [
-        'hotLeads',
-        'outboundCalls',
-        'overdueFollowUps',
-        'qualifiedLeads',
-        'todaysFollowUps',
-        'todaysLeads',
-      ].sort(),
-    );
+    expect(Object.keys(kpis).sort()).toEqual([...KPI_KEYS].sort());
   });
 
   it('computes only the counters a card asked for (AC2 — per-widget periods)', async () => {
@@ -117,7 +111,8 @@ describe('DashboardKpisService.getKpis', () => {
       ...whereOf(leadCount),
       ...whereOf(callCount),
     ];
-    expect(everyWhere).toHaveLength(5);
+    // Every counted query — all but Qualified Leads, which is never counted.
+    expect(everyWhere).toHaveLength(KPI_KEYS.length - 1);
     for (const where of everyWhere) expect(where).toContain(USER_ID);
   });
 
@@ -177,5 +172,84 @@ describe('DashboardKpisService.getKpis', () => {
       service.getKpis(query({ from: TO, to: FROM })),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(leadCount).not.toHaveBeenCalled();
+  });
+});
+
+/*
+  The control row's Sales Agent selection. It is one more AND term on each counter's already
+  scoped query, so it can narrow what the caller sees and never widen it.
+*/
+describe('DashboardKpisService — Sales Agent selection', () => {
+  const OTHER = '33333333-3333-3333-3333-333333333333';
+  const wheres = (mock: jest.Mock): unknown[] =>
+    (mock.mock.calls as unknown[][]).map(
+      (call) => (call[0] as { where: unknown }).where,
+    );
+
+  it('narrows every counted query to the selected agents, on the right join', async () => {
+    const { service, activityCount, leadCount, callCount } = makeService();
+    await service.getKpis(query({ agent: [OTHER] }));
+
+    for (const where of wheres(leadCount)) {
+      expect(where).toMatchObject({
+        AND: [{}, { assignments: { some: { userId: { in: [OTHER] } } } }],
+      });
+    }
+    for (const where of wheres(activityCount)) {
+      expect(where).toMatchObject({
+        AND: [{}, { assignees: { some: { userId: { in: [OTHER] } } } }],
+      });
+    }
+    for (const where of wheres(callCount)) {
+      expect(where).toMatchObject({ AND: [{}, { agentId: { in: [OTHER] } }] });
+    }
+  });
+
+  it('keeps the caller’s own scope under the selection — it can only narrow', async () => {
+    const { service, activityCount, leadCount, callCount } = makeService(
+      {},
+      UserRole.SALES_AGENT,
+    );
+    await service.getKpis(query({ agent: [OTHER] }));
+    const every = [
+      ...wheres(activityCount),
+      ...wheres(leadCount),
+      ...wheres(callCount),
+    ].map((where) => JSON.stringify(where));
+    expect(every).toHaveLength(KPI_KEYS.length - 1);
+    for (const where of every) {
+      expect(where).toContain(USER_ID);
+      expect(where).toContain(OTHER);
+    }
+  });
+
+  it('adds nothing when no agent is selected', async () => {
+    const { service, leadCount } = makeService();
+    await service.getKpis(query({ counters: ['hotLeads'] }));
+    expect(JSON.stringify(wheres(leadCount)[0])).not.toContain(
+      '"userId":{"in"',
+    );
+  });
+});
+
+describe('DashboardKpisQueryDto — agent', () => {
+  const parse = async (agent: unknown) => {
+    const dto = plainToInstance(DashboardKpisQueryDto, {
+      todayStart: TODAY_START,
+      agent,
+    });
+    return { dto, errors: (await validate(dto)).map((e) => e.property) };
+  };
+
+  it('reads the control row’s comma list, as the URL carries it', async () => {
+    const A = '11111111-1111-4111-8111-111111111111';
+    const B = '44444444-4444-4444-8444-444444444444';
+    const { dto, errors } = await parse(`${A}, ${B}`);
+    expect(errors).toEqual([]);
+    expect(dto.agent).toEqual([A, B]);
+  });
+
+  it('refuses anything that is not a user id', async () => {
+    expect((await parse('not-an-id')).errors).toEqual(['agent']);
   });
 });

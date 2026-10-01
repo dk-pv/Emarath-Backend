@@ -15,6 +15,8 @@ import type {
   DuplicateMatchDto,
 } from '../settings/dto/sales-crm-duplicate.dto';
 import { duplicateWhere, matchedField } from './lead-duplicates';
+import { userActor } from '../audit/audit-events';
+import { auditLeadChanges, recordLeadsCreated } from './lead-audit';
 
 import { LeadsRepository } from './leads.repository';
 import { leadScopeWhere } from './lead-scope';
@@ -225,9 +227,13 @@ export class LeadsService {
       null whenever the feature is off, no active rule applies, or no agent is eligible,
       and it never throws — an unassigned lead is the state this create had before.
     */
+    let autoAssigned = false;
     if (assigneeIds.size === 0) {
       const auto = await this.assignment.pickAssignee();
-      if (auto) assigneeIds.add(auto);
+      if (auto) {
+        assigneeIds.add(auto);
+        autoAssigned = true;
+      }
     }
 
     const customFieldValues = await this.customFields.prepareValues(
@@ -289,7 +295,15 @@ export class LeadsService {
     };
 
     try {
-      const lead = await this.repository.create(data);
+      const lead = await this.prisma.$transaction(async (tx) => {
+        const created = await this.repository.create(data, tx);
+        await recordLeadsCreated(tx, [created.id], {
+          actor: userActor(user),
+          source: 'leads.create',
+          metadata: autoAssigned ? { autoAssigned: true } : undefined,
+        });
+        return created;
+      });
       return toLeadListItem(lead);
     } catch (error) {
       // A bad agent or tag id fails the foreign key; report it as a 400, not 500.
@@ -402,9 +416,11 @@ export class LeadsService {
     const assigneeIds = new Set(dto.assignedAgentIds ?? []);
     if (user.role === UserRole.SALES_AGENT) assigneeIds.add(user.id);
 
-    const customFieldValues = await this.customFields.prepareValues(
-      dto.customFields,
-    );
+    // Omitted ≠ empty: `[]` clears every value, no `customFields` key keeps them.
+    const customFieldValues =
+      dto.customFields === undefined
+        ? undefined
+        : await this.customFields.prepareValues(dto.customFields);
 
     const data: Prisma.LeadUpdateInput = {
       name: dto.name,
@@ -436,13 +452,23 @@ export class LeadsService {
     };
 
     try {
-      const lead = await this.repository.update(id, {
-        data,
-        assigneeIds: [...assigneeIds],
-        tagIds: dto.tagIds ?? [],
-        complaintReason: dto.complaintReason ?? null,
-        customFieldValues,
-      });
+      const lead = await auditLeadChanges(
+        this.prisma,
+        [id],
+        { actor: userActor(user), source: 'leads.update' },
+        (tx) =>
+          this.repository.update(
+            id,
+            {
+              data,
+              assigneeIds: [...assigneeIds],
+              tagIds: dto.tagIds ?? [],
+              complaintReason: dto.complaintReason ?? null,
+              customFieldValues,
+            },
+            tx,
+          ),
+      );
       return toLeadListItem(lead);
     } catch (error) {
       if (

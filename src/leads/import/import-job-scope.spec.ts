@@ -46,6 +46,17 @@ describe('importJobScopeWhere (AUTH-02.1)', () => {
     });
   });
 
+  it.each([
+    UserRole.LOGISTICS_MANAGER,
+    UserRole.LOGISTICS_EXECUTIVE,
+    UserRole.ACCOUNTS_EXECUTIVE,
+  ])('gives %s no import job (ADR-0084)', (role) => {
+    expect(importJobScopeWhere({ id: 'u1', role })).toEqual({
+      deletedAt: null,
+      id: { in: [] },
+    });
+  });
+
   it('returns a scope for every role the enum defines', () => {
     for (const role of Object.values(UserRole)) {
       expect(importJobScopeWhere({ id: 'u1', role })).toBeDefined();

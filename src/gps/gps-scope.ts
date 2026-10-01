@@ -33,5 +33,12 @@ export function gpsAgentWhere(
     case UserRole.CUSTOMER_SERVICE_AGENT:
     case UserRole.MARKETING_ANALYST:
       return filterUserId ? { id: filterUserId } : undefined;
+
+    // Operational roles hold no sales access (ADR-0084): no agent matches. Explicit,
+    // because falling through here would return `undefined` — unrestricted.
+    case UserRole.LOGISTICS_MANAGER:
+    case UserRole.LOGISTICS_EXECUTIVE:
+    case UserRole.ACCOUNTS_EXECUTIVE:
+      return { id: { in: [] } };
   }
 }

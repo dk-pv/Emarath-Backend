@@ -1,8 +1,6 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
-import request from 'supertest';
+import { INestApplication } from '@nestjs/common';
 import { App } from 'supertest/types';
-import { AppModule } from '../src/app.module';
+import { createE2EApp, E2EAgent } from './e2e-app';
 
 /**
  * Contract smoke test for GET /api/calls/summary (CALL-03.1).
@@ -14,22 +12,10 @@ import { AppModule } from '../src/app.module';
  */
 describe('Call summary (e2e)', () => {
   let app: INestApplication<App>;
+  let api: E2EAgent;
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-
-    app = moduleRef.createNestApplication();
-    app.setGlobalPrefix('api');
-    app.useGlobalPipes(
-      new ValidationPipe({
-        transform: true,
-        whitelist: true,
-        forbidNonWhitelisted: true,
-      }),
-    );
-    await app.init();
+    ({ app, api } = await createE2EApp());
   });
 
   afterAll(async () => {
@@ -37,18 +23,14 @@ describe('Call summary (e2e)', () => {
   });
 
   it('rejects a summary read with an invalid from date', async () => {
-    await request(app.getHttpServer())
-      .get('/api/calls/summary?from=not-a-date')
-      .expect(400);
+    await api.get('/api/calls/summary?from=not-a-date').expect(400);
   });
 
   it('rejects a leaderboard read with an invalid from date', async () => {
-    await request(app.getHttpServer())
-      .get('/api/calls/leaderboard?from=not-a-date')
-      .expect(400);
+    await api.get('/api/calls/leaderboard?from=not-a-date').expect(400);
   });
 
   it('rejects a call log read with an out-of-range page size', async () => {
-    await request(app.getHttpServer()).get('/api/calls/log?size=0').expect(400);
+    await api.get('/api/calls/log?size=0').expect(400);
   });
 });

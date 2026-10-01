@@ -64,3 +64,50 @@ describe('RolesGuard (AUTH-02.2)', () => {
     );
   });
 });
+
+describe('RolesGuard — operational roles (ADR-0084)', () => {
+  const OPERATIONAL = [
+    UserRole.LOGISTICS_MANAGER,
+    UserRole.LOGISTICS_EXECUTIVE,
+    UserRole.ACCOUNTS_EXECUTIVE,
+  ];
+  const as = (role: UserRole): CurrentUser => ({ id: 'o', role, team: null });
+
+  it.each(OPERATIONAL)(
+    '403s %s on a route with no @Roles() — default-open is for sales roles only',
+    (role) => {
+      expect(() => makeGuard(undefined).canActivate(ctx(as(role)))).toThrow(
+        ForbiddenException,
+      );
+      expect(() => makeGuard([]).canActivate(ctx(as(role)))).toThrow(
+        ForbiddenException,
+      );
+    },
+  );
+
+  it.each(OPERATIONAL)('403s %s on a route that does not list it', (role) => {
+    expect(() => makeGuard(REASSIGN_ROLES).canActivate(ctx(as(role)))).toThrow(
+      ForbiddenException,
+    );
+  });
+
+  it.each(OPERATIONAL)('admits %s to a route that names it', (role) => {
+    expect(makeGuard([role]).canActivate(ctx(as(role)))).toBe(true);
+  });
+
+  it('keeps an undecorated route open to every sales role', () => {
+    for (const role of [
+      UserRole.SUPERADMIN,
+      UserRole.SALES_MANAGER,
+      UserRole.SALES_AGENT,
+      UserRole.CUSTOMER_SERVICE_AGENT,
+      UserRole.MARKETING_ANALYST,
+    ]) {
+      expect(makeGuard(undefined).canActivate(ctx(as(role)))).toBe(true);
+    }
+  });
+
+  it('keeps an undecorated public route open when there is no user', () => {
+    expect(makeGuard(undefined).canActivate(ctx(undefined))).toBe(true);
+  });
+});

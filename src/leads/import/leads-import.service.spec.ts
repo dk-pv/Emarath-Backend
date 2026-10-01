@@ -177,6 +177,24 @@ describe('LeadsImportService.startImport', () => {
     expect(completed).toMatchObject({ status: 'COMPLETED' });
   });
 
+  it('hands the job id to the batch writer, so each created lead names its import (ADR-0083)', async () => {
+    const { service, evaluate, persistValid } = makeService();
+    evaluate.mockResolvedValue(
+      evalResult([
+        { status: 'valid', mapped: { name: 'A', primaryPhone: '1' } },
+      ]),
+    );
+
+    await service.startImport(
+      csv(`${HEADER}\nA,1,2,COD`),
+      body(VALID_MAPPING, 'Complaints'),
+    );
+    await Promise.resolve();
+
+    const context = (persistValid.mock.calls[0] as unknown[])[2];
+    expect(context).toMatchObject({ jobId: 'job-1', pipeline: 'Complaints' });
+  });
+
   it('rejects a file with no data rows', async () => {
     const { service } = makeService();
     await expect(
