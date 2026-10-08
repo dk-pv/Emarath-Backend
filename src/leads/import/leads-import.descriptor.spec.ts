@@ -12,6 +12,7 @@ describe('LeadsImportDescriptor.persistBatch — audit (ADR-0083)', () => {
 
     await descriptor.persistBatch(records, {
       pipeline: 'Lead Pipeline',
+      defaultStatus: 'New',
       user: { id: 'agent-1', role: UserRole.SALES_AGENT },
       jobId: 'job-1',
     });

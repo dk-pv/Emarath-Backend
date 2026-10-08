@@ -187,6 +187,15 @@ const USERS: ReadonlyArray<{
     team: null,
     password: 'Accounts@123',
   },
+  // QC, a separate role under the Logistics Manager (client clarification 2026-10-01, Q1).
+  {
+    name: 'QC',
+    email: 'qc@emarath.com',
+    username: 'qc',
+    role: UserRole.QC,
+    team: null,
+    password: 'QcTeam@123',
+  },
 ];
 
 /** bcrypt work factor — must match the app (auth.service.ts BCRYPT_ROUNDS) so seeded

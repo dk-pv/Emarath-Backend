@@ -70,6 +70,13 @@ export const DEFAULT_PAGE_SIZE = 100;
 /** Guards the database against a caller asking for the whole 15,000-row table. */
 export const MAX_PAGE_SIZE = 200;
 
+/**
+ * The highest page a list accepts. Far past any real result set, and low enough that
+ * (page - 1) * size always fits the 64-bit offset the database takes, so an absurd page
+ * is a clear 400 (LEAD-02.1 AC5) rather than a 500 from inside the query.
+ */
+export const MAX_PAGE = 1_000_000;
+
 /** A search longer than this is never a real query; reject it before the DB. */
 export const MAX_SEARCH_LENGTH = 200;
 
@@ -88,6 +95,7 @@ export class ListLeadsQueryDto {
   @Type(() => Number)
   @IsInt({ message: 'page must be an integer' })
   @Min(1, { message: 'page must be 1 or greater' })
+  @Max(MAX_PAGE, { message: `page must be at most ${MAX_PAGE}` })
   @IsOptional()
   page: number = 1;
 

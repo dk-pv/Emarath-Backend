@@ -39,6 +39,7 @@ export function gpsAgentWhere(
     case UserRole.LOGISTICS_MANAGER:
     case UserRole.LOGISTICS_EXECUTIVE:
     case UserRole.ACCOUNTS_EXECUTIVE:
+    case UserRole.QC:
       return { id: { in: [] } };
   }
 }

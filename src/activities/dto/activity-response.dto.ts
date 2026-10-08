@@ -104,6 +104,11 @@ export interface ActivityListResponse {
   rows: ActivityListItem[];
   total: number;
   counts: ActivityBucketCounts;
+  /**
+   * ISO instant before which an open item is overdue under Settings' overdue rule —
+   * what the Overdue tab used — so the client styles rows against the same cutoff.
+   */
+  overdueBefore: string;
 }
 
 /**

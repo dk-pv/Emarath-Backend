@@ -26,10 +26,12 @@ export class ExportLeadsQueryDto extends ListLeadsQueryDto {
   /**
    * The visible column ids in order, comma-separated (scope=default). The client
    * sends what it shows; unknown ids are dropped server-side. Ignored for scope=all.
+   * The alphabet is the column-layout store's (custom columns are `cf_<slug>`), so any
+   * layout a user can save is one they can export.
    */
   @IsString()
   @MaxLength(4000)
-  @Matches(/^[A-Za-z0-9,]*$/, {
+  @Matches(/^[A-Za-z0-9_,-]*$/, {
     message: 'columns must be a comma-separated list of column ids',
   })
   @IsOptional()

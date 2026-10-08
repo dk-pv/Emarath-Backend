@@ -98,6 +98,15 @@ export class StagesService {
   async create(dto: CreateStageDto): Promise<StageResponse> {
     const { pipeline, name, color } = dto;
 
+    // A second WON / QC NOT APPROVED would convert or QC-reject leads by name in
+    // whichever pipeline holds it, and could then never be renamed or deleted
+    // (ADR-0085 B17), so the reserved names are refused on create too.
+    if (RESERVED_STAGE_NAMES.includes(name)) {
+      throw new ConflictException(
+        `“${name}” is reserved for the Logistics workflow.`,
+      );
+    }
+
     const clash = await this.prisma.stage.findUnique({
       where: { pipeline_name: { pipeline, name } },
       select: { id: true },
@@ -228,18 +237,47 @@ export class StagesService {
     if (!stage) throw new NotFoundException('Stage not found.');
     guardReservedStageName(stage.name);
 
-    const inUse = await this.prisma.lead.count({
-      where: { status: stage.name, pipeline: stage.pipeline, deletedAt: null },
-    });
+    // Archived leads count too: they keep their status, so unarchiving one into a
+    // deleted stage would leave it on no board column at all (KAN-05.3 AC5).
+    const [inUse, archived] = await Promise.all([
+      this.prisma.lead.count({
+        where: { status: stage.name, pipeline: stage.pipeline },
+      }),
+      this.prisma.lead.count({
+        where: {
+          status: stage.name,
+          pipeline: stage.pipeline,
+          deletedAt: { not: null },
+        },
+      }),
+    ]);
     if (inUse > 0) {
+      const note = archived > 0 ? `, ${archived} of them archived` : '';
       throw new ConflictException(
-        `This stage holds ${inUse} lead(s); move them before deleting it.`,
+        `This stage holds ${inUse} lead(s)${note}; move them before deleting it.`,
       );
     }
 
     await this.prisma.stage.delete({ where: { id } });
     return { id };
   }
+}
+
+/**
+ * A pipeline's first stage by position — where a lead lands when it arrives with no
+ * status (create, import) or is moved to the pipeline (Change Pipeline). Null when the
+ * pipeline has no stages.
+ */
+export async function firstStageName(
+  prisma: PrismaService,
+  pipeline: string,
+): Promise<string | null> {
+  const first = await prisma.stage.findFirst({
+    where: { pipeline },
+    orderBy: { position: 'asc' },
+    select: { name: true },
+  });
+  return first?.name ?? null;
 }
 
 /**

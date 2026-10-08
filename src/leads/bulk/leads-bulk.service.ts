@@ -53,6 +53,8 @@ export class LeadsBulkService {
    * assignment(s) so ownership — and therefore scoping — changes at once (AC4). The
    * delete+create runs in one transaction, so a lead is never left unassigned; the
    * previous and new assignees are recorded in that same transaction (ADR-0083).
+   * The leads' open follow-ups move to the new owner in the same transaction
+   * (ADR-0086), so none is left on a worklist that can no longer see its lead.
    */
   async reassign(
     dto: BulkReassignDto,
@@ -84,6 +86,7 @@ export class LeadsBulkService {
         leadIds,
         { actor: userActor(user), source },
         async (tx) => {
+          await handOverOpenFollowUps(tx, leadIds, dto.agentId);
           await tx.leadAssignment.deleteMany({
             where: { leadId: { in: leadIds } },
           });
@@ -195,6 +198,51 @@ export class LeadsBulkService {
 
 function unique(ids: string[]): string[] {
   return [...new Set(ids)];
+}
+
+/**
+ * Hands the leads' open follow-ups from their departing owners to `agentId`
+ * (ADR-0086). Only a lead's own outgoing assignees are swapped: anyone else on a
+ * follow-up (a manager, a teammate the lead is visible to) stays on it, and
+ * completed follow-ups keep their history. Reads the current assignments, so it
+ * runs before they are replaced.
+ */
+async function handOverOpenFollowUps(
+  tx: Prisma.TransactionClient,
+  leadIds: string[],
+  agentId: string,
+): Promise<void> {
+  const departing = await tx.leadAssignment.findMany({
+    where: { leadId: { in: leadIds }, userId: { not: agentId } },
+    select: { leadId: true, userId: true },
+  });
+  if (departing.length === 0) return;
+
+  const byLead = new Map<string, string[]>();
+  for (const { leadId, userId } of departing) {
+    byLead.set(leadId, [...(byLead.get(leadId) ?? []), userId]);
+  }
+  const moving = await tx.activityAssignee.findMany({
+    where: {
+      OR: [...byLead].map(([leadId, userIds]) => ({
+        userId: { in: userIds },
+        activity: { leadId, completedAt: null, deletedAt: null },
+      })),
+    },
+    select: { id: true, activityId: true },
+  });
+  if (moving.length === 0) return;
+
+  await tx.activityAssignee.deleteMany({
+    where: { id: { in: moving.map((row) => row.id) } },
+  });
+  await tx.activityAssignee.createMany({
+    data: unique(moving.map((row) => row.activityId)).map((activityId) => ({
+      activityId,
+      userId: agentId,
+    })),
+    skipDuplicates: true,
+  });
 }
 
 /** `retained` is null when the database refused the delete and the count is unknown. */

@@ -15,10 +15,10 @@ import { PrismaClient, UserRole } from '../generated/prisma/client';
 import { LEAD_SYSTEM_FIELDS } from '../lead-forms/lead-system-fields';
 
 /**
- * The built-in role names, one per UserRole: AUTH-01.1's five user types and the three
- * post-sale roles (ADR-0084).
- * Custom roles ("QC ROLE") are created through the Roles &
- * Permissions screen when it lands — none is invented here.
+ * The built-in role names, one per UserRole: AUTH-01.1's five user types and the four
+ * post-sale roles (ADR-0084; QC since the 2026-10-01 clarification, seeded under Logistics
+ * Manager). Further custom roles are created through the Roles & Permissions screen — none is
+ * invented here.
  */
 const ROLES: { name: string; baseRole: UserRole }[] = [
   { name: 'Account Holder', baseRole: UserRole.SUPERADMIN },
@@ -29,6 +29,7 @@ const ROLES: { name: string; baseRole: UserRole }[] = [
   { name: 'Logistics Manager', baseRole: UserRole.LOGISTICS_MANAGER },
   { name: 'Logistics Executive', baseRole: UserRole.LOGISTICS_EXECUTIVE },
   { name: 'Accounts Executive', baseRole: UserRole.ACCOUNTS_EXECUTIVE },
+  { name: 'QC', baseRole: UserRole.QC },
 ];
 
 /** The one lead form the reference shows as a built-in option. */
@@ -54,6 +55,20 @@ async function main(): Promise<void> {
         where: { name: role.name },
         create: role,
         update: { baseRole: role.baseRole, deletedAt: null },
+      });
+    }
+
+    // Q1 (2026-10-01): QC is a separate role under the Logistics Manager. The hierarchy is the
+    // Roles & Permissions org chart only — what QC may do comes from its base role — and an
+    // admin's later re-parenting is left alone.
+    const logisticsManager = await prisma.role.findUnique({
+      where: { name: 'Logistics Manager' },
+      select: { id: true },
+    });
+    if (logisticsManager) {
+      await prisma.role.updateMany({
+        where: { name: 'QC', parentId: null },
+        data: { parentId: logisticsManager.id },
       });
     }
 

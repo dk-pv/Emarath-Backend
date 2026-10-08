@@ -57,6 +57,7 @@ export function leadScopeWhere(
     case UserRole.LOGISTICS_MANAGER:
     case UserRole.LOGISTICS_EXECUTIVE:
     case UserRole.ACCOUNTS_EXECUTIVE:
+    case UserRole.QC:
       return { ...visible, id: { in: [] } };
   }
 }

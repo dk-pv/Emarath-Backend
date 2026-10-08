@@ -80,7 +80,7 @@ describe('leadConditionWhere', () => {
     );
     expect(
       build({ field: 'source', operator: 'isNotEmpty', values: [] }),
-    ).toEqual({ AND: [{ source: { not: null } }, { source: { not: '' } }] });
+    ).toEqual({ NOT: { OR: [{ source: null }, { source: '' }] } });
   });
 
   it('maps date operators to half-open ranges', () => {
@@ -222,5 +222,221 @@ describe('leadConditionWhere', () => {
     ]);
     expect(none.activities?.none).toBeDefined();
     expect(none.calls?.none).toBeDefined();
+  });
+});
+
+const where = (c: LeadCondition) => leadConditionWhere([c])[0];
+const parse = (c: object) => () => parseLeadConditions(JSON.stringify([c]));
+
+describe('empty-value operators on NOT NULL columns', () => {
+  // Prisma rejects a null filter on a required column; these used to be HTTP 500s.
+  it('treats a required text/enum column as empty only when it is the empty string', () => {
+    expect(where({ field: 'name', operator: 'isEmpty', values: [] })).toEqual({
+      name: '',
+    });
+    expect(
+      where({ field: 'primaryPhone', operator: 'isNotEmpty', values: [] }),
+    ).toEqual({ NOT: { primaryPhone: '' } });
+    expect(where({ field: 'status', operator: 'isEmpty', values: [] })).toEqual(
+      { status: '' },
+    );
+    expect(
+      where({ field: 'pipeline', operator: 'isNotEmpty', values: [] }),
+    ).toEqual({ NOT: { pipeline: '' } });
+  });
+
+  it('matches nothing / everything for a required number or date column', () => {
+    for (const field of [
+      'callAttempts',
+      'whatsappAttempts',
+      'createdAt',
+      'statusChangedAt',
+    ]) {
+      expect(where({ field, operator: 'isEmpty', values: [] })).toEqual({
+        id: { in: [] },
+      });
+      expect(where({ field, operator: 'isNotEmpty', values: [] })).toEqual({});
+    }
+  });
+
+  it('never emits a null filter for a required column, whatever the operator', () => {
+    for (const field of ['name', 'primaryPhone']) {
+      for (const operator of [
+        'isnt',
+        'doesntContain',
+        'isEmpty',
+        'isNotEmpty',
+      ]) {
+        const built = JSON.stringify(
+          where({ field, operator, values: ['x'] } as LeadCondition),
+        );
+        expect(built).not.toContain('null');
+      }
+    }
+  });
+});
+
+describe('negative operators keep the leads with no value', () => {
+  it("text isn't / doesn't contain on a nullable column", () => {
+    expect(
+      where({ field: 'country', operator: 'isnt', values: ['Qatar'] }),
+    ).toEqual({
+      OR: [
+        { NOT: { country: { equals: 'Qatar', mode: 'insensitive' } } },
+        { country: null },
+      ],
+    });
+    expect(
+      where({ field: 'city', operator: 'doesntContain', values: ['Doha'] }),
+    ).toEqual({
+      OR: [
+        { NOT: { city: { contains: 'Doha', mode: 'insensitive' } } },
+        { city: null },
+      ],
+    });
+  });
+
+  it("enum isn't, number not-equals / not-between and date not-between", () => {
+    expect(
+      where({ field: 'category', operator: 'isnt', values: ['Logistics'] }),
+    ).toEqual({
+      OR: [{ NOT: { category: { in: ['Logistics'] } } }, { category: null }],
+    });
+    expect(
+      where({ field: 'actualAmount', operator: 'notEquals', values: ['747'] }),
+    ).toEqual({ OR: [{ actualAmount: { not: 747 } }, { actualAmount: null }] });
+    expect(
+      where({
+        field: 'actualAmount',
+        operator: 'notBetween',
+        values: ['100', '1000'],
+      }),
+    ).toEqual({
+      OR: [
+        { OR: [{ actualAmount: { lt: 100 } }, { actualAmount: { gt: 1000 } }] },
+        { actualAmount: null },
+      ],
+    });
+    const a = '2026-10-04';
+    const b = '2026-10-06';
+    expect(
+      where({ field: 'bookingDate', operator: 'notBetween', values: [a, b] }),
+    ).toEqual({
+      OR: [
+        {
+          OR: [
+            { bookingDate: { lt: new Date(a) } },
+            { bookingDate: { gte: new Date(b) } },
+          ],
+        },
+        { bookingDate: null },
+      ],
+    });
+  });
+
+  it('keeps a required column’s negative free of a null branch', () => {
+    expect(
+      where({ field: 'status', operator: 'isnt', values: ['WON'] }),
+    ).toEqual({ NOT: { status: { in: ['WON'] } } });
+  });
+
+  it('relation-date not-between means no row inside the range', () => {
+    const a = '2026-10-01T00:00:00.000Z';
+    const b = '2026-10-08T00:00:00.000Z';
+    expect(
+      where({ field: 'followUpDate', operator: 'notBetween', values: [a, b] }),
+    ).toEqual({
+      NOT: {
+        activities: {
+          some: {
+            deletedAt: null,
+            dueAt: { gte: new Date(a), lt: new Date(b) },
+          },
+        },
+      },
+    });
+  });
+});
+
+describe('text values are matched literally', () => {
+  it('escapes % and _ in every text operator, as search does', () => {
+    expect(where({ field: 'name', operator: 'is', values: ['50%_x'] })).toEqual(
+      {
+        name: { equals: '50\\%\\_x', mode: 'insensitive' },
+      },
+    );
+    expect(
+      where({ field: 'name', operator: 'contains', values: ['_'] }),
+    ).toEqual({ name: { contains: '\\_', mode: 'insensitive' } });
+    expect(
+      where({ field: 'complaints', operator: 'contains', values: ['100%'] }),
+    ).toEqual({
+      complaints: {
+        some: {
+          deletedAt: null,
+          details: { contains: '100\\%', mode: 'insensitive' },
+        },
+      },
+    });
+  });
+});
+
+describe('malformed values are a 400, never a database error', () => {
+  it('rejects an unparseable date and an on with one boundary', () => {
+    expect(
+      parse({ field: 'createdAt', operator: 'after', values: ['yesterday'] }),
+    ).toThrow(BadRequestException);
+    expect(
+      parse({ field: 'followUpDate', operator: 'before', values: ['soon'] }),
+    ).toThrow(BadRequestException);
+    expect(
+      parse({
+        field: 'createdAt',
+        operator: 'on',
+        values: ['2026-10-07T00:00:00.000Z'],
+      }),
+    ).toThrow(BadRequestException);
+    expect(
+      parse({
+        field: 'bookingDate',
+        operator: 'on',
+        values: ['2026-10-05', '2026-10-06'],
+      })(),
+    ).toHaveLength(1);
+  });
+
+  it('rejects a non-uuid user or tag id', () => {
+    expect(
+      parse({ field: 'assignedAgent', operator: 'is', values: ['abc'] }),
+    ).toThrow(BadRequestException);
+    expect(parse({ field: 'tags', operator: 'isnt', values: ['abc'] })).toThrow(
+      BadRequestException,
+    );
+  });
+
+  it('rejects a fractional or out-of-range count', () => {
+    expect(
+      parse({ field: 'callAttempts', operator: 'equals', values: ['1.5'] }),
+    ).toThrow(BadRequestException);
+    expect(
+      parse({
+        field: 'whatsappAttempts',
+        operator: 'lessThan',
+        values: ['3000000000'],
+      }),
+    ).toThrow(BadRequestException);
+    // A decimal column still takes a fraction.
+    expect(
+      parse({ field: 'actualAmount', operator: 'equals', values: ['99.5'] })(),
+    ).toHaveLength(1);
+  });
+
+  it('rejects an unknown Activity value', () => {
+    expect(
+      parse({ field: 'activity', operator: 'is', values: ['foo'] }),
+    ).toThrow(BadRequestException);
+    expect(
+      parse({ field: 'activity', operator: 'is', values: ['No Activity'] })(),
+    ).toHaveLength(1);
   });
 });

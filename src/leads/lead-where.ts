@@ -1,5 +1,6 @@
 import { Prisma } from '../generated/prisma/client';
 import { CurrentUser } from '../auth/current-user';
+import type { PrismaService } from '../prisma/prisma.service';
 import { type DayBoundaries } from '../activities/activity-buckets';
 import { leadScopeWhere } from './lead-scope';
 import { leadSearchWhere } from './lead-search';
@@ -88,4 +89,41 @@ export function buildLeadWhere(
   );
 
   return conditions.length === 1 ? conditions[0] : { AND: conditions };
+}
+
+/**
+ * The primary phones held by more than one lead inside a scoped `where` — the
+ * "Duplicate Lead" search scope. Grouped in the database, so no lead set streams out
+ * to be compared in Node.
+ */
+export async function duplicatePhones(
+  prisma: PrismaService,
+  where: Prisma.LeadWhereInput,
+): Promise<string[]> {
+  const groups = await prisma.lead.groupBy({
+    by: ['primaryPhone'],
+    where,
+    having: { primaryPhone: { _count: { gt: 1 } } },
+  });
+  return groups.map((group) => group.primaryPhone);
+}
+
+/**
+ * `where` narrowed for the "Duplicate Lead" search scope to leads whose primary phone
+ * another lead also holds. Duplicates are judged across the caller's whole scoped set —
+ * not only the rows the search term matches — so a search inside the scope still finds a
+ * lead whose twin carries a different name. The list and the export both run this, so
+ * a downloaded file is exactly the rows the screen shows (LEAD-08.1 AC1).
+ */
+export async function withSearchScope(
+  user: CurrentUser,
+  query: { searchScope?: 'lead' | 'duplicate'; archived?: boolean },
+  where: Prisma.LeadWhereInput,
+  phonesIn: (scope: Prisma.LeadWhereInput) => Promise<string[]>,
+): Promise<Prisma.LeadWhereInput> {
+  if (query.searchScope !== 'duplicate') return where;
+  const phones = await phonesIn(
+    buildLeadWhere(user, { archived: query.archived }),
+  );
+  return { AND: [where, { primaryPhone: { in: phones } }] };
 }

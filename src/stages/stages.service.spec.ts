@@ -103,6 +103,18 @@ describe('StagesService.create', () => {
     ).rejects.toBeInstanceOf(ConflictException);
     expect(create).not.toHaveBeenCalled();
   });
+
+  it('refuses to create a second WON or QC NOT APPROVED (ADR-0085 B17)', async () => {
+    for (const name of ['WON', 'QC NOT APPROVED']) {
+      const { service, findUnique, create } = makeService();
+      findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.create({ pipeline: 'Complaints', name, color: 'lime' }),
+      ).rejects.toThrow('is reserved for the Logistics workflow');
+      expect(create).not.toHaveBeenCalled();
+    }
+  });
 });
 
 describe('StagesService.update', () => {
@@ -321,6 +333,25 @@ describe('StagesService.remove', () => {
     await expect(service.remove('id')).rejects.toBeInstanceOf(
       ConflictException,
     );
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it('counts archived leads too, so none is left on a deleted stage (KAN-05.3 AC5)', async () => {
+    const { service, findUnique, leadCount, del } = makeService();
+    findUnique.mockResolvedValue({
+      id: 'id',
+      pipeline: PIPELINE,
+      name: 'Cold',
+    });
+    // Every lead in the stage, then the archived ones among them.
+    leadCount.mockResolvedValueOnce(1).mockResolvedValueOnce(1);
+
+    await expect(service.remove('id')).rejects.toThrow(
+      'This stage holds 1 lead(s), 1 of them archived; move them before deleting it.',
+    );
+    expect(leadCount).toHaveBeenCalledWith({
+      where: { status: 'Cold', pipeline: PIPELINE },
+    });
     expect(del).not.toHaveBeenCalled();
   });
 

@@ -1,4 +1,6 @@
 import { UserRole } from '../generated/prisma/client';
+import { CurrentUser } from '../auth/current-user';
+import { leadScopeWhere } from '../leads/lead-scope';
 import { activityScopeWhere } from './activity-scope';
 import {
   ACTIVITY_BUCKETS,
@@ -13,7 +15,10 @@ const b: DayBoundaries = {
 };
 
 describe('activityScopeWhere', () => {
-  it('excludes soft-deleted for every role', () => {
+  // ADR-0086: every role's activity rule is ANDed with that caller's own lead scope.
+  const leadOf = (user: CurrentUser) => ({ lead: leadScopeWhere(user) });
+
+  it('excludes soft-deleted activities for every role', () => {
     for (const role of Object.values(UserRole)) {
       expect(activityScopeWhere({ id: 'u1', role })).toMatchObject({
         deletedAt: null,
@@ -21,34 +26,44 @@ describe('activityScopeWhere', () => {
     }
   });
 
-  it('restricts a sales agent to activities they are assigned to', () => {
-    expect(
-      activityScopeWhere({ id: 'u1', role: UserRole.SALES_AGENT }),
-    ).toEqual({ deletedAt: null, assignees: { some: { userId: 'u1' } } });
+  it("requires the linked lead to be inside the caller's lead scope, for every role", () => {
+    for (const role of Object.values(UserRole)) {
+      const user = { id: 'u1', role, team: 'Sales' };
+      expect(activityScopeWhere(user)).toMatchObject(leadOf(user));
+    }
+  });
+
+  it('hides an archived lead’s follow-ups (the lead scope keeps only live leads)', () => {
+    const where = activityScopeWhere({ id: 'u1', role: UserRole.SUPERADMIN });
+    expect(where.lead).toMatchObject({ deletedAt: null });
+  });
+
+  it('restricts a sales agent to activities they are assigned to, on leads they own', () => {
+    const user = { id: 'u1', role: UserRole.SALES_AGENT };
+    expect(activityScopeWhere(user)).toEqual({
+      deletedAt: null,
+      ...leadOf(user),
+      assignees: { some: { userId: 'u1' } },
+    });
   });
 
   // AUTH-02.1 / ADR-0030: a manager sees their team's activities.
   it('restricts a sales manager to activities assigned to a same-team user', () => {
-    expect(
-      activityScopeWhere({
-        id: 'mgr-1',
-        role: UserRole.SALES_MANAGER,
-        team: 'Sales',
-      }),
-    ).toEqual({
+    const user = { id: 'mgr-1', role: UserRole.SALES_MANAGER, team: 'Sales' };
+    expect(activityScopeWhere(user)).toEqual({
       deletedAt: null,
+      ...leadOf(user),
       assignees: { some: { user: { team: 'Sales' } } },
     });
   });
 
   it('falls a null-team manager back to own-only (ADR-0030 §7)', () => {
-    expect(
-      activityScopeWhere({
-        id: 'mgr-1',
-        role: UserRole.SALES_MANAGER,
-        team: null,
-      }),
-    ).toEqual({ deletedAt: null, assignees: { some: { userId: 'mgr-1' } } });
+    const user = { id: 'mgr-1', role: UserRole.SALES_MANAGER, team: null };
+    expect(activityScopeWhere(user)).toEqual({
+      deletedAt: null,
+      ...leadOf(user),
+      assignees: { some: { userId: 'mgr-1' } },
+    });
   });
 
   it('leaves admin / customer-service / marketing organization-wide', () => {
@@ -57,40 +72,43 @@ describe('activityScopeWhere', () => {
       UserRole.CUSTOMER_SERVICE_AGENT,
       UserRole.MARKETING_ANALYST,
     ]) {
-      expect(activityScopeWhere({ id: 'u1', role })).toEqual({
+      const user = { id: 'u1', role };
+      expect(activityScopeWhere(user)).toEqual({
         deletedAt: null,
+        ...leadOf(user),
       });
     }
   });
 
-  it('drops the not-deleted filter but keeps role scope when includeDeleted', () => {
-    expect(
-      activityScopeWhere(
-        { id: 'u1', role: UserRole.SALES_AGENT },
-        { includeDeleted: true },
-      ),
-    ).toEqual({ assignees: { some: { userId: 'u1' } } });
+  it('drops the not-deleted filter but keeps both scopes when includeDeleted', () => {
+    const agent = { id: 'u1', role: UserRole.SALES_AGENT };
+    expect(activityScopeWhere(agent, { includeDeleted: true })).toEqual({
+      ...leadOf(agent),
+      assignees: { some: { userId: 'u1' } },
+    });
     // A manager keeps the team predicate; only the delete filter drops.
-    expect(
-      activityScopeWhere(
-        { id: 'mgr-1', role: UserRole.SALES_MANAGER, team: 'Sales' },
-        { includeDeleted: true },
-      ),
-    ).toEqual({ assignees: { some: { user: { team: 'Sales' } } } });
-    expect(
-      activityScopeWhere(
-        { id: 'u1', role: UserRole.SUPERADMIN },
-        { includeDeleted: true },
-      ),
-    ).toEqual({});
+    const manager = {
+      id: 'mgr-1',
+      role: UserRole.SALES_MANAGER,
+      team: 'Sales',
+    };
+    expect(activityScopeWhere(manager, { includeDeleted: true })).toEqual({
+      ...leadOf(manager),
+      assignees: { some: { user: { team: 'Sales' } } },
+    });
+    const admin = { id: 'u1', role: UserRole.SUPERADMIN };
+    expect(activityScopeWhere(admin, { includeDeleted: true })).toEqual(
+      leadOf(admin),
+    );
   });
 
   it.each([
     UserRole.LOGISTICS_MANAGER,
     UserRole.LOGISTICS_EXECUTIVE,
     UserRole.ACCOUNTS_EXECUTIVE,
+    UserRole.QC,
   ])('gives %s no activity at all (ADR-0084)', (role) => {
-    expect(activityScopeWhere({ id: 'u1', role })).toEqual({
+    expect(activityScopeWhere({ id: 'u1', role })).toMatchObject({
       deletedAt: null,
       id: { in: [] },
     });

@@ -28,6 +28,12 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
   const leadFindMany = jest.fn();
   const assignmentDeleteMany = jest.fn();
   const assignmentCreateMany = jest.fn();
+  // The open follow-ups that move with a reassigned lead (ADR-0086): the lead's current
+  // assignments, then the assignee rows on those leads' open follow-ups.
+  const assignmentFindMany = jest.fn().mockResolvedValue([]);
+  const activityAssigneeFindMany = jest.fn().mockResolvedValue([]);
+  const activityAssigneeDeleteMany = jest.fn().mockResolvedValue({ count: 0 });
+  const activityAssigneeCreateMany = jest.fn().mockResolvedValue({ count: 0 });
 
   /*
     Inside the transaction, lead reads are either the retention check (it filters on
@@ -64,8 +70,14 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     $queryRaw,
     lead: { findMany: auditFindMany, deleteMany: leadDeleteMany },
     leadAssignment: {
+      findMany: assignmentFindMany,
       deleteMany: assignmentDeleteMany,
       createMany: assignmentCreateMany,
+    },
+    activityAssignee: {
+      findMany: activityAssigneeFindMany,
+      deleteMany: activityAssigneeDeleteMany,
+      createMany: activityAssigneeCreateMany,
     },
     auditEvent: { createMany: auditCreateMany },
     // The conversion hook (ADR-0085): `createManyAndReturn` echoes what it was asked to
@@ -106,6 +118,11 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     leadFindMany,
     leadDeleteMany,
     assignmentCreateMany,
+    assignmentFindMany,
+    assignmentDeleteMany,
+    activityAssigneeFindMany,
+    activityAssigneeDeleteMany,
+    activityAssigneeCreateMany,
     $transaction,
     $queryRaw,
     auditCreateMany,
@@ -169,6 +186,87 @@ describe('LeadsBulkService.reassign', () => {
       { leadId: 'a', userId: 'agent' },
       { leadId: 'b', userId: 'agent' },
     ]);
+  });
+
+  it("moves the departing owners' OPEN follow-ups to the new owner (ADR-0086)", async () => {
+    const {
+      service,
+      userFindFirst,
+      leadFindMany,
+      assignmentFindMany,
+      assignmentDeleteMany,
+      activityAssigneeFindMany,
+      activityAssigneeDeleteMany,
+      activityAssigneeCreateMany,
+    } = makeService();
+    userFindFirst.mockResolvedValue({ id: 'agent' });
+    leadFindMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }]);
+    assignmentFindMany.mockResolvedValue([
+      { leadId: 'a', userId: 'old-1' },
+      { leadId: 'a', userId: 'old-2' },
+      { leadId: 'b', userId: 'old-1' },
+    ]);
+    // Two assignee rows on act-1 (both departing owners), one on act-2.
+    activityAssigneeFindMany.mockResolvedValue([
+      { id: 'aa-1', activityId: 'act-1' },
+      { id: 'aa-2', activityId: 'act-1' },
+      { id: 'aa-3', activityId: 'act-2' },
+    ]);
+
+    await service.reassign({ ids: ['a', 'b'], agentId: 'agent' });
+
+    // The current owners are read before the assignments are replaced.
+    expect(assignmentFindMany).toHaveBeenCalledWith({
+      where: { leadId: { in: ['a', 'b'] }, userId: { not: 'agent' } },
+      select: { leadId: true, userId: true },
+    });
+    expect(assignmentFindMany.mock.invocationCallOrder[0]).toBeLessThan(
+      assignmentDeleteMany.mock.invocationCallOrder[0],
+    );
+    // Only each lead's own departing owners, only on OPEN follow-ups of that lead.
+    expect(activityAssigneeFindMany).toHaveBeenCalledWith({
+      where: {
+        OR: [
+          {
+            userId: { in: ['old-1', 'old-2'] },
+            activity: { leadId: 'a', completedAt: null, deletedAt: null },
+          },
+          {
+            userId: { in: ['old-1'] },
+            activity: { leadId: 'b', completedAt: null, deletedAt: null },
+          },
+        ],
+      },
+      select: { id: true, activityId: true },
+    });
+    expect(activityAssigneeDeleteMany).toHaveBeenCalledWith({
+      where: { id: { in: ['aa-1', 'aa-2', 'aa-3'] } },
+    });
+    // One new-owner row per moved follow-up; an existing one is kept, not doubled.
+    expect(activityAssigneeCreateMany).toHaveBeenCalledWith({
+      data: [
+        { activityId: 'act-1', userId: 'agent' },
+        { activityId: 'act-2', userId: 'agent' },
+      ],
+      skipDuplicates: true,
+    });
+  });
+
+  it('touches no follow-up when the leads had no other owner', async () => {
+    const {
+      service,
+      userFindFirst,
+      leadFindMany,
+      activityAssigneeFindMany,
+      activityAssigneeCreateMany,
+    } = makeService();
+    userFindFirst.mockResolvedValue({ id: 'agent' });
+    leadFindMany.mockResolvedValue([{ id: 'a' }]);
+
+    await service.reassign({ ids: ['a'], agentId: 'agent' });
+
+    expect(activityAssigneeFindMany).not.toHaveBeenCalled();
+    expect(activityAssigneeCreateMany).not.toHaveBeenCalled();
   });
 
   it('does nothing when no id is in scope', async () => {

@@ -4,6 +4,7 @@ import {
   Get,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Query,
 } from '@nestjs/common';
@@ -11,31 +12,30 @@ import { Roles } from '../auth/roles.decorator';
 import { LogisticsOrdersService } from './logistics-orders.service';
 import { ACTION_ROLES, LOGISTICS_READ_ROLES } from './logistics-roles';
 import {
+  CorrectAwbDto,
   DispatchOrderDto,
   ListLogisticsOrdersDto,
   LogisticsOrderListResponse,
   LogisticsOrderResponse,
   OrderReasonDto,
   QcDecisionDto,
+  QcRejectDto,
+  UpdateLogisticsOrderDto,
 } from './dto/logistics-order.dto';
 
 /**
- * The Logistics order API (ADR-0085).
- *
- * Permissions are enforced here rather than in the UI. The Logistics Manager dispatches,
- * delivers, cancels and records RTO (client-confirmed); Sales read their own converted leads'
- * orders and hold no mutation at all. The QC routes and the resubmit route are gated by
- * provisional mappings the client has not confirmed (QC → Logistics Executive, resubmit →
- * Logistics Manager), so all three are **withheld**: `allowedActions` never offers them and no
- * UI calls them. `@Roles()` is what admits an operational role to a route in the first place
- * (ADR-0084), so a route that forgets it is closed, not open.
- *
- * There is deliberately no endpoint that edits an order's customer or order data: whether QC may
- * revise a converted order is the one clarification still open with the client.
+ * The Logistics order API (ADR-0085), with the permissions of the client clarification of
+ * 2026-10-01 (`logistics-roles.ts`). They are enforced here rather than in the UI: QC verifies
+ * and rejects; both Logistics roles dispatch, deliver and cancel; the Logistics Manager also
+ * records RTO, edits a QC-verified order and corrects an AWB after dispatch; the Sales Manager
+ * resubmits a rejected order; every other sales role only reads. `@Roles()` is what admits an
+ * operational role to a route in the first place (ADR-0084), so a route that forgets it is
+ * closed, not open.
  *
  * Every order returned also carries `allowedActions`, computed from the same `ACTION_ROLES`
- * these routes read — advisory for the UI only. These routes and the transition table remain
- * the authority; a caller that ignores the list is refused exactly as before.
+ * these routes read — advisory for the UI only. These routes, the caller's scope and the
+ * transition table remain the authority; a caller that ignores the list is refused exactly as
+ * before.
  */
 @Controller('logistics/orders')
 export class LogisticsOrdersController {
@@ -68,7 +68,7 @@ export class LogisticsOrdersController {
   @Roles(...ACTION_ROLES.QC_REJECT)
   qcReject(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: QcDecisionDto,
+    @Body() dto: QcRejectDto,
   ): Promise<LogisticsOrderResponse> {
     return this.orders.qcReject(id, dto);
   }
@@ -115,5 +115,25 @@ export class LogisticsOrdersController {
     @Body() dto: OrderReasonDto,
   ): Promise<LogisticsOrderResponse> {
     return this.orders.rto(id, dto);
+  }
+
+  /** The Logistics Manager's correction of a QC-verified order's data (Q5). */
+  @Patch(':id')
+  @Roles(...ACTION_ROLES.EDIT)
+  edit(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateLogisticsOrderDto,
+  ): Promise<LogisticsOrderResponse> {
+    return this.orders.edit(id, dto);
+  }
+
+  /** The Logistics Manager's correction of the AWB after dispatch (Q9). */
+  @Patch(':id/awb')
+  @Roles(...ACTION_ROLES.CORRECT_AWB)
+  correctAwb(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CorrectAwbDto,
+  ): Promise<LogisticsOrderResponse> {
+    return this.orders.correctAwb(id, dto);
   }
 }

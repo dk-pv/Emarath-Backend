@@ -1,8 +1,9 @@
 import { UserRole } from '../generated/prisma/client';
 
 /**
- * The post-sale roles of the client CRM workflow (ADR-0084): they work the Logistics and
- * Accounts pipelines and hold no access to the sales modules. RolesGuard admits them only
+ * The post-sale roles of the client CRM workflow (ADR-0084, plus QC from the 2026-10-01
+ * clarification): they work the Logistics and Accounts pipelines and hold no access to the
+ * sales modules. RolesGuard admits them only
  * to a route whose @Roles() names them, and every sales scope helper returns no rows for
  * them — so a sales route can never be reached by forgetting a decorator.
  */
@@ -10,6 +11,7 @@ export const OPERATIONAL_ROLES: readonly UserRole[] = [
   UserRole.LOGISTICS_MANAGER,
   UserRole.LOGISTICS_EXECUTIVE,
   UserRole.ACCOUNTS_EXECUTIVE,
+  UserRole.QC,
 ];
 
 /**

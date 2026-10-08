@@ -238,8 +238,8 @@ describe('the Logistics migration', () => {
   });
 
   /*
-    Pinned as it stands: the AWB is looked up, not constrained. Whether two orders may carry
-    the same tracking number is still with the client.
+    This migration only indexed the AWB. Uniqueness (client Q9, 2026-10-01) came later, in its
+    own additive migration — pinned in the describe below — and this file is never edited.
   */
   it('indexes the AWB without making it unique', () => {
     expect(sql).toContain('CREATE INDEX "logistics_orders_awb_number_idx"');
@@ -249,5 +249,55 @@ describe('the Logistics migration', () => {
   it('gives an order at most one lead, and the lead’s row protection', () => {
     expect(sql).toContain('CREATE UNIQUE INDEX "logistics_orders_lead_id_key"');
     expect(sql).toContain('REFERENCES "leads"("id") ON DELETE RESTRICT');
+  });
+});
+
+/*
+  The 2026-10-01 clarification's migration, as applied to the dev database: the QC role (Q1) and
+  a unique AWB (Q9), purely additive. An early draft dropped the plain AWB index; that draft was
+  never applied, and CLAUDE.md §11 puts any schema drop behind explicit approval — so a DROP here
+  is a failure, and no later migration may remove either AWB index.
+*/
+describe('the QC role and unique AWB migration', () => {
+  const dir = join(__dirname, '..', '..', 'prisma', 'migrations');
+  // Migration folders only — the directory also holds migration_lock.toml.
+  const entries = readdirSync(dir)
+    .filter((entry) => /^\d{14}_/.test(entry))
+    .sort();
+  const name = entries.find((entry) =>
+    entry.endsWith('_qc_role_and_unique_awb'),
+  );
+  const sql = readFileSync(join(dir, name ?? '', 'migration.sql'), 'utf8');
+
+  it('adds the QC role and a unique AWB index', () => {
+    expect(sql).toContain(`ALTER TYPE "UserRole" ADD VALUE 'QC'`);
+    expect(sql).toContain(
+      'CREATE UNIQUE INDEX "logistics_orders_awb_number_key" ON "logistics_orders"("awb_number")',
+    );
+  });
+
+  it('drops, deletes and rewrites nothing — the plain AWB index stays', () => {
+    const statements = sql
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('--'))
+      .join('\n');
+    for (const forbidden of [
+      /\bDROP\b/,
+      /\bDELETE FROM\b/,
+      /\bUPDATE "/,
+      /\bINSERT INTO\b/,
+      /\bTRUNCATE\b/,
+      /\bALTER COLUMN\b/,
+    ]) {
+      expect(statements).not.toMatch(forbidden);
+    }
+  });
+
+  it('is not undone by any later migration', () => {
+    const later = entries.slice(entries.indexOf(name ?? '') + 1);
+    for (const entry of later) {
+      const next = readFileSync(join(dir, entry, 'migration.sql'), 'utf8');
+      expect(next).not.toMatch(/DROP INDEX[^\n]*logistics_orders_awb_number/);
+    }
   });
 });

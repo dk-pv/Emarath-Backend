@@ -22,6 +22,49 @@ describe('activitySearchWhere', () => {
     });
   });
 
+  it('matches a term inside the title prefix ("eting", "Call with")', () => {
+    expect(activitySearchWhere('eting')).toEqual({
+      OR: [
+        { lead: { name: { contains: 'eting', mode: 'insensitive' } } },
+        { type: ActivityType.MEETING },
+      ],
+    });
+    expect(activitySearchWhere('Call with')).toEqual({
+      OR: [
+        { lead: { name: { contains: 'Call with', mode: 'insensitive' } } },
+        { type: ActivityType.CALL },
+      ],
+    });
+  });
+
+  it('matches a term spanning the prefix and the customer name ("with Om")', () => {
+    const where = activitySearchWhere('with Om') as { OR: unknown[] };
+    // Every type's title has "with " before the name.
+    for (const type of [
+      ActivityType.CALL,
+      ActivityType.MEETING,
+      ActivityType.TASK,
+    ]) {
+      expect(where.OR).toContainEqual({
+        type,
+        lead: { name: { startsWith: 'Om', mode: 'insensitive' } },
+      });
+    }
+  });
+
+  it('matches the full title of one type ("Meeting with Omar Ali")', () => {
+    const where = activitySearchWhere('Meeting with Omar Ali') as {
+      OR: unknown[];
+    };
+    expect(where.OR).toContainEqual({
+      type: ActivityType.MEETING,
+      lead: { name: { startsWith: 'Omar Ali', mode: 'insensitive' } },
+    });
+    expect(where.OR).not.toContainEqual(
+      expect.objectContaining({ type: ActivityType.CALL }),
+    );
+  });
+
   it('escapes LIKE wildcards in the term', () => {
     const where = activitySearchWhere('50%') as {
       OR: [{ lead: { name: { contains: string } } }];

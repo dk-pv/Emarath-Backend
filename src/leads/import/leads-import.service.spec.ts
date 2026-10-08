@@ -62,6 +62,7 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     module: 'leads',
     fields: LEADS_IMPORT_FIELDS,
     dedupeField: 'primaryPhone',
+    defaultStatus: jest.fn().mockResolvedValue('New'),
   } as unknown as LeadsImportDescriptor;
 
   const jobs = {
@@ -192,7 +193,11 @@ describe('LeadsImportService.startImport', () => {
     await Promise.resolve();
 
     const context = (persistValid.mock.calls[0] as unknown[])[2];
-    expect(context).toMatchObject({ jobId: 'job-1', pipeline: 'Complaints' });
+    expect(context).toMatchObject({
+      jobId: 'job-1',
+      pipeline: 'Complaints',
+      defaultStatus: 'New',
+    });
   });
 
   it('rejects a file with no data rows', async () => {

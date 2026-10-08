@@ -29,7 +29,7 @@ datasource db {
 // and held no application data.
 
 /// The user types the platform is built around: the five sales roles (AUTH-01.1) and
-/// the three post-sale roles of the client CRM workflow (ADR-0084). Fixed rather than
+/// the four post-sale roles of the client CRM workflow (ADR-0084; QC since 2026-10-01). Fixed rather than
 /// configurable — named roles only alias these — so an enum is the honest model.
 enum UserRole {
   SUPERADMIN
@@ -1658,9 +1658,10 @@ model AuditEvent {
   entityType String @map("entity_type") @db.VarChar(32)
   entityId   String @map("entity_id") @db.Uuid
 
-  /// The customer journey the change belongs to. Equal to `entityId` for a lead today; later
-  /// Logistics and Accounts events carry their lead here too, so one indexed read returns the
-  /// whole Lead → Logistics → Accounts history. Null for catalogue events (stage renames).
+  /// The customer journey the change belongs to: `entityId` for a lead's own events, and the
+  /// order's lead for Logistics events (Accounts events will do the same), so one indexed read
+  /// returns the whole Lead → Logistics → Accounts history. Null for catalogue events (stage
+  /// renames).
   leadId String? @map("lead_id") @db.Uuid
 
   action String @db.VarChar(48)
@@ -1689,10 +1690,11 @@ model AuditEvent {
   @@map("audit_events")
 }
 
-/// The Logistics lifecycle of one won order (ADR-0085 B12, client clarification 2026-09-23).
-/// INITIAL is where conversion puts it; QC decides; a rejected order returns to INITIAL through
-/// the controlled resubmit action (CD-2) rather than a second order. DELIVERED, CANCELLED and
-/// RTO are terminal. Cancellation is allowed only after dispatch (CD-3).
+/// The Logistics lifecycle of one won order (ADR-0085 B12, client clarifications 2026-09-23 and
+/// 2026-10-01). INITIAL is where conversion puts it; QC decides; a rejected order returns to
+/// INITIAL through the controlled resubmit action (CD-2) rather than a second order.
+/// Cancellation is allowed only after dispatch (CD-3) and an RTO order later moves to CANCELLED
+/// (Q6). DELIVERED and CANCELLED are terminal (Q8).
 enum LogisticsStatus {
   INITIAL
   QC_VERIFIED
@@ -1711,8 +1713,10 @@ enum LogisticsStatus {
 /// which `retainedLeads` also refuses first as a clean 409.
 ///
 /// The customer/order columns are a snapshot taken from the lead's after-state at conversion, so
-/// a later edit to the lead cannot silently change what is being shipped or billed. Whether QC
-/// may revise them is the one open clarification (no mutation endpoint exists).
+/// a later edit to the lead cannot silently change what is being shipped or billed. QC does not
+/// revise them (Q3); the Logistics Manager may, while QC_VERIFIED (Q5, `PATCH
+/// /logistics/orders/:id`). Whether a lead correction should refresh them before QC re-reviews
+/// a resubmitted order is open client question Q10 — today nothing does.
 model LogisticsOrder {
   id String @id @default(uuid()) @db.Uuid
 
@@ -1752,7 +1756,8 @@ model LogisticsOrder {
   qcRemarks   String?   @map("qc_remarks") @db.VarChar(2000)
 
   /// The tracking number: mandatory before dispatch and unique across orders (client
-  /// clarification Q9). Matched exactly as stored, after trimming.
+  /// clarification Q9). Matched exactly as stored, after trimming — case-sensitive, provisional
+  /// pending client Q15. The plain index below is kept alongside this unique one.
   awbNumber    String?   @unique @map("awb_number") @db.VarChar(64)
   courier      String?   @db.VarChar(64)
   dispatchedAt DateTime? @map("dispatched_at")
@@ -1770,5 +1775,8 @@ model LogisticsOrder {
   @@index([status, createdAt])
   @@index([convertedAt])
   @@index([convertedById, convertedAt])
+  // Kept beside the unique index rather than dropped (CLAUDE.md §11: no schema drop
+  // without approval). Redundant now; dropping it is a separate, approved migration.
+  @@index([awbNumber])
   @@map("logistics_orders")
 }

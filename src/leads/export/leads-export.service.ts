@@ -4,7 +4,11 @@ import ExcelJS from 'exceljs';
 import { Prisma } from '../../generated/prisma/client';
 import { CurrentUserService } from '../../auth/current-user';
 import { PrismaService } from '../../prisma/prisma.service';
-import { buildLeadWhere } from '../lead-where';
+import {
+  buildLeadWhere,
+  duplicatePhones,
+  withSearchScope,
+} from '../lead-where';
 import { LeadSortColumn } from '../dto/list-leads-query.dto';
 import { ExportLeadsQueryDto } from './dto/export-leads-query.dto';
 import {
@@ -23,8 +27,9 @@ const MAX_EXPORT_ROWS = 100_000;
 /**
  * Streams the scoped, filtered, sorted leads to a CSV or XLSX download (LEAD-08.1).
  *
- * The `where` and sort come from `buildLeadWhere` — the exact query the list runs —
- * so the file matches the on-screen view and respects role scoping (AC1/AC2). Rows
+ * The `where` and sort are the exact query the list runs (`buildLeadWhere` plus the
+ * "Duplicate Lead" search scope), so the file matches the on-screen view and respects
+ * role scoping (AC1/AC2). Rows
  * are pulled in batches and written straight to the response, so memory stays flat
  * regardless of how many rows match (AC5). CSV and Excel need no new dependency:
  * ExcelJS (already used by import) writes both.
@@ -38,15 +43,36 @@ export class LeadsExportService {
 
   async export(query: ExportLeadsQueryDto, res: Response): Promise<void> {
     const user = await this.currentUser.resolve();
-    const where = buildLeadWhere(user, query);
+    const where = await withSearchScope(
+      user,
+      query,
+      buildLeadWhere(user, query),
+      (scope) => duplicatePhones(this.prisma, scope),
+    );
     const columns = resolveExportColumns(query.scope, query.columns);
     const filename = exportFilename(query.format);
 
-    if (query.format === 'xlsx') {
-      await this.streamXlsx(res, where, query, columns, filename);
-      return;
+    // The first page is read before any status or header goes out, so a query that
+    // fails up front is an ordinary error response — never a 200 file with no rows.
+    const pages = this.batches(where, query.sort, query.direction);
+    const first = await pages.next();
+    async function* rows(): AsyncGenerator<LeadExportRow[]> {
+      if (!first.done) yield first.value;
+      yield* pages;
     }
-    await this.streamCsv(res, where, query, columns, filename);
+
+    try {
+      if (query.format === 'xlsx') {
+        await this.streamXlsx(res, rows(), columns, filename);
+      } else {
+        await this.streamCsv(res, rows(), columns, filename);
+      }
+    } catch (error) {
+      // Headers are already out, so the status can't change: abort the connection so
+      // the browser fails the download instead of saving a truncated file.
+      res.destroy(error instanceof Error ? error : undefined);
+      throw error;
+    }
   }
 
   /** Yields matching rows in id-stable pages until the set is exhausted or capped. */
@@ -75,8 +101,7 @@ export class LeadsExportService {
 
   private async streamCsv(
     res: Response,
-    where: Prisma.LeadWhereInput,
-    query: ExportLeadsQueryDto,
+    pages: AsyncIterable<LeadExportRow[]>,
     columns: ExportColumn[],
     filename: string,
   ): Promise<void> {
@@ -91,7 +116,7 @@ export class LeadsExportService {
       columns.map((column) => csvCell(column.header)).join(',') + '\r\n',
     );
 
-    for await (const rows of this.batches(where, query.sort, query.direction)) {
+    for await (const rows of pages) {
       let chunk = '';
       for (const row of rows) {
         chunk +=
@@ -106,8 +131,7 @@ export class LeadsExportService {
 
   private async streamXlsx(
     res: Response,
-    where: Prisma.LeadWhereInput,
-    query: ExportLeadsQueryDto,
+    pages: AsyncIterable<LeadExportRow[]>,
     columns: ExportColumn[],
     filename: string,
   ): Promise<void> {
@@ -127,7 +151,7 @@ export class LeadsExportService {
     const sheet = workbook.addWorksheet('Leads');
     sheet.addRow(columns.map((column) => column.header)).commit();
 
-    for await (const rows of this.batches(where, query.sort, query.direction)) {
+    for await (const rows of pages) {
       for (const row of rows) {
         sheet.addRow(columns.map((column) => column.value(row))).commit();
       }

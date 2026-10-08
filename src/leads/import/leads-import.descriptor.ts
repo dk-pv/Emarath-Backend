@@ -10,6 +10,8 @@ import { LeadsImportRepository, PreparedLead } from './leads-import.repository';
 /** What one Leads import run carries into row-building and persistence. */
 export interface LeadsImportContext {
   pipeline: string;
+  /** The pipeline's first stage — the status of a row whose Lead Status is blank. */
+  defaultStatus: string;
   user: CurrentUser;
   /** The run's ImportJob, named on each created lead's audit events (ADR-0083). */
   jobId: string;
@@ -38,6 +40,11 @@ export class LeadsImportDescriptor implements ImportDescriptor<
     return this.repository.existingPhones(values);
   }
 
+  /** The status a blank Lead Status cell imports as: the pipeline's first stage, else 'New'. */
+  async defaultStatus(pipeline: string): Promise<string> {
+    return (await this.repository.firstStageName(pipeline)) ?? 'New';
+  }
+
   buildRecord(
     mapped: Record<string, string>,
     context: LeadsImportContext,
@@ -55,7 +62,7 @@ export class LeadsImportDescriptor implements ImportDescriptor<
       country: mapped.country ?? null,
       source: mapped.source ?? null,
       // Defaults mirror LeadsService.create so imported and hand-entered leads agree.
-      status: mapped.status || 'New',
+      status: mapped.status || context.defaultStatus,
       pipeline: context.pipeline,
       product: mapped.product ?? null,
       productQty: mapped.productQty ?? null,

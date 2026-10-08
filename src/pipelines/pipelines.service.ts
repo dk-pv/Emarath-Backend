@@ -412,8 +412,9 @@ export class PipelinesService {
   /**
    * Removes a pipeline, but only when nothing depends on it.
    *
-   * Live leads block it — clearing or reassigning `Lead.pipeline` would silently rewrite
-   * business data. The default blocks it too, because something must always be the default.
+   * Any lead on it, live or archived, blocks it — clearing or reassigning `Lead.pipeline`
+   * would silently rewrite business data. The default blocks it too, because something
+   * must always be the default.
    * Its stages go with it: a stage cannot exist without its pipeline, and since no lead is
    * on the pipeline, no lead is in any of its stages either, so nothing is orphaned.
    */
@@ -426,12 +427,14 @@ export class PipelinesService {
       );
     }
 
+    // Archived leads count too: an archived lead keeps its pipeline, so unarchiving it
+    // after the pipeline (and its stages) were deleted would put it on no board.
     const inUse = await this.prisma.lead.count({
-      where: { pipeline: pipeline.name, deletedAt: null },
+      where: { pipeline: pipeline.name },
     });
     if (inUse > 0) {
       throw new ConflictException(
-        `This pipeline holds ${inUse} lead${inUse === 1 ? '' : 's'}. Move them before deleting it.`,
+        `This pipeline holds ${inUse} lead${inUse === 1 ? '' : 's'} (archived ones included). Move them before deleting it.`,
       );
     }
 

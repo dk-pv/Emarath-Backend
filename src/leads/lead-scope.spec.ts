@@ -91,10 +91,12 @@ describe('leadScopeWhere', () => {
     });
   });
 
+  // QC too (2026-10-01): it is the only gate on QC reading a lead's sales journey.
   it.each([
     UserRole.LOGISTICS_MANAGER,
     UserRole.LOGISTICS_EXECUTIVE,
     UserRole.ACCOUNTS_EXECUTIVE,
+    UserRole.QC,
   ])('gives %s no lead at all, even the archived view (ADR-0084)', (role) => {
     expect(leadScopeWhere(user(role))).toEqual({
       deletedAt: null,
