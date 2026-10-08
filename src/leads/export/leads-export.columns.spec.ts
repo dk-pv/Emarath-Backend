@@ -37,7 +37,10 @@ describe('column value formatters', () => {
 
   it('joins assigned agent names and tag names', () => {
     const row = {
-      assignments: [{ user: { name: 'Aisha' } }, { user: { name: 'Omar' } }],
+      assignments: [
+        { createdAt: new Date('2026-08-01'), user: { name: 'Aisha' } },
+        { createdAt: new Date('2026-08-02'), user: { name: 'Omar' } },
+      ],
       tags: [{ tag: { name: 'QC VERIFIED' } }],
     };
     expect(value('assigned', row)).toBe('Aisha, Omar');

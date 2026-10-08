@@ -3,7 +3,8 @@ import { ActivityType, Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
-import { ActivitiesService, LOCATION_GATE_MESSAGE } from './activities.service';
+import { ActivitiesService } from './activities.service';
+import { activityScopeWhere } from './activity-scope';
 import { CreateActivityDto } from './dto/create-activity.dto';
 
 const LEAD_ID = '11111111-1111-1111-1111-111111111111';
@@ -103,8 +104,8 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     activityCount,
     activityFindFirst,
     activityUpdate,
-    gpsHasValidCheckIn,
-    gpsVerify,
+    userFindMany,
+    leadCount,
   };
 }
 
@@ -574,7 +575,6 @@ describe('ActivitiesService.update', () => {
     activityFindFirst.mockResolvedValue({
       id: ACT_ID,
       leadId: LEAD_ID,
-      locationId: null,
       lead: { name: 'Acme' },
     });
     leadCount.mockResolvedValue(0);
@@ -583,48 +583,6 @@ describe('ActivitiesService.update', () => {
       BadRequestException,
     );
     expect(activityUpdate).not.toHaveBeenCalled();
-  });
-
-  it('refuses a non-admin edit that drops a location-tied follow-up’s site', async () => {
-    const { service, activityFindFirst, activityUpdate } = makeService(
-      UserRole.SALES_AGENT,
-    );
-    activityFindFirst.mockResolvedValue({
-      id: ACT_ID,
-      leadId: LEAD_ID,
-      locationId: '44444444-4444-4444-4444-444444444444',
-      lead: { name: 'Acme' },
-    });
-
-    // The Call shape carries no location, so this edit would untie the gate.
-    await expect(service.update(ACT_ID, editDto())).rejects.toThrow(
-      'Only an administrator can change or remove the site of a location-tied follow-up.',
-    );
-    expect(activityUpdate).not.toHaveBeenCalled();
-  });
-
-  it('lets an administrator move a location-tied follow-up to another site', async () => {
-    const { service, activityFindFirst, activityUpdate } = makeService();
-    activityFindFirst.mockResolvedValue({
-      id: ACT_ID,
-      leadId: LEAD_ID,
-      locationId: '44444444-4444-4444-4444-444444444444',
-      lead: { name: 'Acme' },
-    });
-    activityUpdate.mockResolvedValue(
-      activityRow({ type: ActivityType.MEETING }),
-    );
-    const site = '55555555-5555-5555-5555-555555555555';
-
-    await service.update(
-      ACT_ID,
-      editDto({ type: ActivityType.MEETING, locationId: site }),
-    );
-
-    const args = (activityUpdate.mock.calls as unknown[][])[0][0] as {
-      data: { location: unknown };
-    };
-    expect(args.data.location).toEqual({ connect: { id: site } });
   });
 
   it('keeps a sales agent on their own activity', async () => {

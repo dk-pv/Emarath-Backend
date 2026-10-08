@@ -210,25 +210,10 @@ export class ActivitiesService {
       select: {
         id: true,
         leadId: true,
-        locationId: true,
         lead: { select: { name: true } },
       },
     });
     if (!activity) throw new NotFoundException(ACTIVITY_OUT_OF_SCOPE);
-
-    // A location-tied follow-up can only be completed after an on-site check-in
-    // (ACT-04.1 AC4). Letting its assignee drop or move the site in an edit would
-    // switch that gate off, so only an administrator may change it — the remedy the
-    // completion gate's own message points to.
-    if (
-      activity.locationId &&
-      dto.locationId !== activity.locationId &&
-      user.role !== UserRole.SUPERADMIN
-    ) {
-      throw new BadRequestException(
-        'Only an administrator can change or remove the site of a location-tied follow-up.',
-      );
-    }
 
     const assigneeIds = new Set(dto.assigneeIds);
     if (user.role === UserRole.SALES_AGENT) assigneeIds.add(user.id);

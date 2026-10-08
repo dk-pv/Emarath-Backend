@@ -240,7 +240,6 @@ describe('Operational roles across every route (ADR-0084)', () => {
       'GET /api/leads/export',
       'GET /api/activities',
       'GET /api/calls/log',
-      'GET /api/gps/locations',
       'GET /api/reports/leads/by-ownership',
       'GET /api/dashboard/kpis',
       'GET /api/assignment-rules',

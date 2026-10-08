@@ -15,7 +15,7 @@ export const OPERATIONAL_ROLES: readonly UserRole[] = [
 ];
 
 /**
- * The roles the sales modules (leads, activities, calls, GPS, reports, dashboard) were
+ * The roles the sales modules (leads, activities, calls, reports, dashboard) were
  * built for. Use it where a route must list every sales role — never `Object.values(UserRole)`,
  * which would silently admit each role added later.
  */
