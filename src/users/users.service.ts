@@ -63,8 +63,6 @@ const USER_DETAIL_SELECT = {
   leadFormId: true,
   pipelines: true,
   appAccess: true,
-  trackCheckInOut: true,
-  trackMeetingLocation: true,
   includeInReporting: true,
   autoFollowUpPrompt: true,
   whatsappInboxAccess: true,
@@ -198,8 +196,6 @@ export class UsersService {
           leadFormId: dto.leadFormId ?? null,
           pipelines: dto.pipelines ?? [],
           appAccess: dto.appAccess ?? false,
-          trackCheckInOut: dto.trackCheckInOut ?? false,
-          trackMeetingLocation: dto.trackMeetingLocation ?? false,
           includeInReporting: dto.includeInReporting ?? false,
           autoFollowUpPrompt: dto.autoFollowUpPrompt ?? false,
           whatsappInboxAccess: dto.whatsappInboxAccess ?? null,
@@ -274,8 +270,6 @@ export class UsersService {
           leadFormId: dto.leadFormId,
           pipelines: dto.pipelines,
           appAccess: dto.appAccess,
-          trackCheckInOut: dto.trackCheckInOut,
-          trackMeetingLocation: dto.trackMeetingLocation,
           includeInReporting: dto.includeInReporting,
           autoFollowUpPrompt: dto.autoFollowUpPrompt,
           whatsappInboxAccess: dto.whatsappInboxAccess,
@@ -575,20 +569,25 @@ export class UsersService {
       leadFormId: row.leadFormId,
       pipelines: row.pipelines,
       appAccess: row.appAccess,
-      trackCheckInOut: row.trackCheckInOut,
-      trackMeetingLocation: row.trackMeetingLocation,
       includeInReporting: row.includeInReporting,
       autoFollowUpPrompt: row.autoFollowUpPrompt,
       whatsappInboxAccess:
         (whatsappInboxAccess as UserDetailResponse['whatsappInboxAccess']) ??
         null,
       monthlyGoalAmount: monthlyGoalAmount?.toString() ?? null,
-      permissions: modulePermissions.map((entry): PermissionEntryResponse => ({
-        module: entry.module as PermissionEntryResponse['module'],
-        canView: entry.canView,
-        canAdd: entry.canAdd,
-        canEdit: entry.canEdit,
-      })),
+      // A stored row for a module that has left the catalogue would round-trip through
+      // the wizard and fail the DTO's @IsIn on the next save. The migration that drops a
+      // module deletes its rows, but the code can deploy before that migration runs.
+      permissions: modulePermissions
+        .filter((entry) =>
+          PERMISSION_CATALOG.some((row) => row.module === entry.module),
+        )
+        .map((entry): PermissionEntryResponse => ({
+          module: entry.module as PermissionEntryResponse['module'],
+          canView: entry.canView,
+          canAdd: entry.canAdd,
+          canEdit: entry.canEdit,
+        })),
     };
   }
 }

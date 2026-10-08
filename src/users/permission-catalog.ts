@@ -32,7 +32,6 @@ export const PERMISSION_CATALOG = [
     add: true,
     edit: true,
   },
-  { module: 'GPS_MAP', label: 'GPS/Map', view: true, add: false, edit: false },
   { module: 'REPORTS', label: 'Reports', view: true, add: false, edit: false },
   { module: 'SETTINGS', label: 'Settings', view: true, add: true, edit: true },
   {

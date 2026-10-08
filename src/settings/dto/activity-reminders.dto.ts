@@ -71,8 +71,9 @@ export const ACTIVITY_GENERAL_DEFAULTS: ActivityGeneralSettings = {
 
 /**
  * The follow-up form's field catalogue — the seven the reference's builder lists, and
- * nothing else. Each one is a real column on `Activity`, which is why the list is closed:
- * a key the form cannot render is a key the API cannot store.
+ * nothing else, so the list is closed. Every key but `LOCATION` is a real column on
+ * `Activity`; `LOCATION` stays for parity with the reference's builder. It has had no
+ * column since the GPS removal (ADR-0086), and no follow-up form renders it.
  */
 export const FOLLOW_UP_FIELDS = [
   { key: 'DESCRIPTION', label: 'Description' },
@@ -137,8 +138,8 @@ const positioned = (keys: readonly FollowUpFieldKey[]): FollowUpTypeField[] =>
 /**
  * The three types the reference's table ships with, bound to the three `ActivityType`
  * values the Add Follow-up drawer already offers. Their field sets are not invented: a
- * Call carries neither an End Time nor a Location (`ActivitiesService.assertTypeShape`),
- * and a Meeting and a Task carry both.
+ * Call carries no End Time (`ActivitiesService.assertTypeShape`) and, as in the
+ * reference, no Location; a Meeting and a Task carry both.
  */
 export const SHIPPED_FOLLOW_UP_TYPES: readonly Omit<
   FollowUpType,

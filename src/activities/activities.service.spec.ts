@@ -1,15 +1,9 @@
-import {
-  BadRequestException,
-  ConflictException,
-  NotFoundException,
-} from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { ActivityType, Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
-import { GpsService } from '../gps/gps.service';
 import { SettingsService } from '../settings/settings.service';
 import { ActivitiesService, LOCATION_GATE_MESSAGE } from './activities.service';
-import { activityScopeWhere } from './activity-scope';
 import { CreateActivityDto } from './dto/create-activity.dto';
 
 const LEAD_ID = '11111111-1111-1111-1111-111111111111';
@@ -27,7 +21,6 @@ function activityRow(overrides: Record<string, unknown> = {}) {
     dueAt: new Date(DUE),
     endAt: null,
     completedAt: null,
-    locationId: null,
     assignees: [{ userId: AGENT_ID }],
     ...overrides,
   };
@@ -88,17 +81,6 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     resolve: jest.fn().mockResolvedValue({ id: 'u1', role }),
   } as unknown as CurrentUserService;
 
-  // The GPS gate (ACT-10.1 / GPS-02.1): no valid check-in by default, so a
-  // location-tied completion is blocked unless a test says otherwise.
-  const gpsVerify = jest
-    .fn()
-    .mockResolvedValue({ ok: false, reason: 'NO_CHECK_IN' });
-  const gpsHasValidCheckIn = jest.fn().mockResolvedValue(false);
-  const gps = {
-    verifyLocationCheckIn: gpsVerify,
-    hasValidCheckIn: gpsHasValidCheckIn,
-  } as unknown as GpsService;
-
   // Settings → Activity and Reminders supplies the overdue rule; the shipped end-of-day
   // rule keeps these expectations reading exactly as they did before it was configurable.
   const getActivityGeneral = jest.fn().mockResolvedValue({
@@ -111,7 +93,7 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
   });
   const settings = { getActivityGeneral } as unknown as SettingsService;
 
-  const service = new ActivitiesService(prisma, currentUser, gps, settings);
+  const service = new ActivitiesService(prisma, currentUser, settings);
   return {
     service,
     leadFindFirst,
@@ -123,8 +105,6 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     activityUpdate,
     gpsHasValidCheckIn,
     gpsVerify,
-    userFindMany,
-    leadCount,
   };
 }
 
@@ -173,7 +153,6 @@ function listRow(overrides: Record<string, unknown> = {}) {
     dueAt: new Date(DUE),
     endAt: null,
     completedAt: null,
-    locationId: null,
     assignees: [{ user: { id: AGENT_ID, name: 'Agent Two' } }],
     lead: leadRow(),
     ...overrides,
@@ -202,46 +181,31 @@ describe('ActivitiesService.create', () => {
     expect(data.data.lead).toEqual({ connect: { id: LEAD_ID } });
     expect(data.data.dueAt).toEqual(new Date(DUE));
     expect(data.data.endAt).toBeNull();
-    expect(data.data.location).toBeUndefined();
     expect(data.data.assignees).toEqual({
       create: [{ user: { connect: { id: AGENT_ID } } }],
     });
   });
 
-  it('accepts an End Time and Location on a Meeting', async () => {
+  it('accepts an End Time on a Meeting', async () => {
     const { service, leadFindFirst, activityCreate } = makeService();
     leadFindFirst.mockResolvedValue({ id: LEAD_ID, name: 'Acme' });
     activityCreate.mockResolvedValue(
       activityRow({ type: ActivityType.MEETING }),
     );
     const end = '2026-08-01T10:00:00.000Z';
-    const loc = '44444444-4444-4444-4444-444444444444';
 
-    await service.create(
-      makeDto({ type: ActivityType.MEETING, endAt: end, locationId: loc }),
-    );
+    await service.create(makeDto({ type: ActivityType.MEETING, endAt: end }));
 
     const data = (activityCreate.mock.calls as unknown[][])[0][0] as {
       data: Record<string, unknown>;
     };
     expect(data.data.endAt).toEqual(new Date(end));
-    expect(data.data.location).toEqual({ connect: { id: loc } });
   });
 
   it('rejects an End Time on a Call', async () => {
     const { service, activityCreate } = makeService();
     await expect(
       service.create(makeDto({ endAt: '2026-08-01T10:00:00.000Z' })),
-    ).rejects.toBeInstanceOf(BadRequestException);
-    expect(activityCreate).not.toHaveBeenCalled();
-  });
-
-  it('rejects a Location on a Call', async () => {
-    const { service, activityCreate } = makeService();
-    await expect(
-      service.create(
-        makeDto({ locationId: '44444444-4444-4444-4444-444444444444' }),
-      ),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(activityCreate).not.toHaveBeenCalled();
   });
@@ -507,7 +471,6 @@ describe('ActivitiesService.complete', () => {
     activityFindFirst.mockResolvedValue({
       id: ACT_ID,
       completedAt: null,
-      locationId: null,
       lead: { name: 'Acme' },
     });
     activityUpdate.mockResolvedValue(
@@ -532,7 +495,6 @@ describe('ActivitiesService.complete', () => {
     activityFindFirst.mockResolvedValue({
       id: ACT_ID,
       completedAt: done,
-      locationId: null,
       lead: { name: 'Acme' },
     });
     activityUpdate.mockResolvedValue(activityRow({ completedAt: done }));
@@ -554,131 +516,6 @@ describe('ActivitiesService.complete', () => {
       NotFoundException,
     );
     expect(activityUpdate).not.toHaveBeenCalled();
-  });
-
-  // ACT-10.1 — location gate (AC1, AC2, AC3)
-  it('ACT-10.1 blocks completion of a location-tied activity with a 409', async () => {
-    const LOC_ID = '55555555-5555-5555-5555-555555555555';
-    const { service, activityFindFirst, activityUpdate } = makeService();
-    activityFindFirst.mockResolvedValue({
-      id: ACT_ID,
-      completedAt: null,
-      locationId: LOC_ID,
-      lead: { name: 'Acme' },
-    });
-
-    await expect(service.complete(ACT_ID)).rejects.toBeInstanceOf(
-      ConflictException,
-    );
-    // the gate must not write completedAt (AC2)
-    expect(activityUpdate).not.toHaveBeenCalled();
-  });
-
-  it('ACT-10.1 message is the blueprint-specified string (AC3)', async () => {
-    const LOC_ID = '55555555-5555-5555-5555-555555555555';
-    const { service, activityFindFirst } = makeService();
-    activityFindFirst.mockResolvedValue({
-      id: ACT_ID,
-      completedAt: null,
-      locationId: LOC_ID,
-      lead: { name: 'Acme' },
-    });
-
-    let caught: unknown;
-    try {
-      await service.complete(ACT_ID);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(ConflictException);
-    expect((caught as ConflictException).message).toBe(LOCATION_GATE_MESSAGE);
-  });
-
-  // GPS-09.1 AC2 — the refusal says *why*, not just "no".
-  it('GPS-09.1 explains a too-far check-in with the distance and radius', async () => {
-    const LOC_ID = '55555555-5555-5555-5555-555555555555';
-    const { service, activityFindFirst, activityUpdate, gpsVerify } =
-      makeService();
-    activityFindFirst.mockResolvedValue({
-      id: ACT_ID,
-      completedAt: null,
-      locationId: LOC_ID,
-      lead: { name: 'Acme' },
-    });
-    gpsVerify.mockResolvedValue({
-      ok: false,
-      reason: 'TOO_FAR',
-      meters: 182.37,
-      radius: 150,
-      locationName: 'Kozhikode Depot',
-    });
-
-    let caught: unknown;
-    try {
-      await service.complete(ACT_ID);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(ConflictException);
-    expect((caught as ConflictException).message).toBe(
-      'Your check-in was 182 m from Kozhikode Depot, outside the 150 m required to complete this activity.',
-    );
-    expect(activityUpdate).not.toHaveBeenCalled();
-  });
-
-  it('GPS-09.1 keeps the plain message when there is no check-in at all', async () => {
-    const LOC_ID = '55555555-5555-5555-5555-555555555555';
-    const { service, activityFindFirst, gpsVerify } = makeService();
-    activityFindFirst.mockResolvedValue({
-      id: ACT_ID,
-      completedAt: null,
-      locationId: LOC_ID,
-      lead: { name: 'Acme' },
-    });
-    gpsVerify.mockResolvedValue({ ok: false, reason: 'NO_CHECK_IN' });
-
-    await expect(service.complete(ACT_ID)).rejects.toThrow(
-      LOCATION_GATE_MESSAGE,
-    );
-  });
-
-  // ACT-10.1 — AC4: non-location activities complete normally
-  it('ACT-10.1 does not gate activities without a location (AC4)', async () => {
-    const { service, activityFindFirst, activityUpdate } = makeService();
-    activityFindFirst.mockResolvedValue({
-      id: ACT_ID,
-      completedAt: null,
-      locationId: null,
-      lead: { name: 'Acme' },
-    });
-    activityUpdate.mockResolvedValue(
-      activityRow({ completedAt: new Date('2026-07-24T10:00:00.000Z') }),
-    );
-
-    // must not throw
-    await expect(service.complete(ACT_ID)).resolves.toBeDefined();
-    expect(activityUpdate).toHaveBeenCalledTimes(1);
-  });
-
-  // GPS-02.1 AC3: a valid check-in satisfies the location gate.
-  it('completes a location-tied activity once the agent has a valid check-in (GPS-02.1)', async () => {
-    const LOC_ID = '55555555-5555-5555-5555-555555555555';
-    const { service, activityFindFirst, activityUpdate, gpsVerify } =
-      makeService();
-    activityFindFirst.mockResolvedValue({
-      id: ACT_ID,
-      completedAt: null,
-      locationId: LOC_ID,
-      lead: { name: 'Acme' },
-    });
-    gpsVerify.mockResolvedValue({ ok: true, checkInId: 'c1', meters: 12 });
-    activityUpdate.mockResolvedValue(
-      activityRow({ completedAt: new Date('2026-07-24T10:00:00.000Z') }),
-    );
-
-    await expect(service.complete(ACT_ID)).resolves.toBeDefined();
-    expect(gpsVerify).toHaveBeenCalledWith('u1', ACT_ID);
-    expect(activityUpdate).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -818,7 +655,6 @@ describe('ActivitiesService.duplicate', () => {
       description: 'meet them',
       dueAt: new Date(DUE),
       endAt: new Date('2026-08-01T10:00:00.000Z'),
-      locationId: '44444444-4444-4444-4444-444444444444',
       lead: { id: LEAD_ID, name: 'Acme' },
       assignees: [{ userId: AGENT_ID }],
     });
@@ -834,9 +670,6 @@ describe('ActivitiesService.duplicate', () => {
     };
     expect(data.data.lead).toEqual({ connect: { id: LEAD_ID } });
     expect(data.data.description).toBe('meet them');
-    expect(data.data.location).toEqual({
-      connect: { id: '44444444-4444-4444-4444-444444444444' },
-    });
     expect(data.data.assignees).toEqual({
       create: [{ user: { connect: { id: AGENT_ID } } }],
     });

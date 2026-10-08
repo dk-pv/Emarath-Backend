@@ -113,12 +113,12 @@ describe('UsersController', () => {
     await expect(controller.roles()).resolves.toHaveLength(1);
   });
 
-  it('serves the permission catalogue with 13 reference modules', () => {
+  it('serves the permission catalogue with 12 reference modules', () => {
     const { controller, permissionCatalog } = makeController();
     permissionCatalog.mockReturnValue(
-      Array.from({ length: 13 }, (_, i) => ({ module: String(i) })),
+      Array.from({ length: 12 }, (_, i) => ({ module: String(i) })),
     );
 
-    expect(controller.permissionCatalog()).toHaveLength(13);
+    expect(controller.permissionCatalog()).toHaveLength(12);
   });
 });

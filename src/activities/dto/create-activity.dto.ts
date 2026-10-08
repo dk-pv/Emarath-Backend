@@ -16,9 +16,9 @@ import { ActivityType } from '../../generated/prisma/client';
 /**
  * The Add Follow-up drawer's payload (ACT-03.1).
  *
- * Per-field shape only — the type-conditional rules (a Call has no End Time or
- * Location; End must not precede Start) are cross-field and keyed on `type`, so
- * they live in the service, not here. `description` is required in the form (C1,
+ * Per-field shape only — the type-conditional rules (a Call has no End Time; End
+ * must not precede Start) are cross-field and keyed on `type`, so they live in
+ * the service, not here. `description` is required in the form (C1,
  * resolved required by the video) even though the column is nullable for
  * imported rows, so requiredness is a rule about this form, not the schema.
  */
@@ -57,12 +57,6 @@ export class CreateActivityDto {
   @IsDateString({}, { message: 'End time must be a valid date' })
   @IsOptional()
   endAt?: string;
-
-  /** Optional Location (Meeting/Task only); its catalogue is the GPS module's. */
-  @Transform(emptyToUndefined)
-  @IsUUID('all', { message: 'location must be a valid id' })
-  @IsOptional()
-  locationId?: string;
 
   @IsArray()
   @ArrayNotEmpty({ message: 'at least one assignee is required' })

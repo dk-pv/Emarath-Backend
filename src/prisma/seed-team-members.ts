@@ -41,7 +41,6 @@ const SALES_PERMISSIONS: PermissionTemplate = {
   LEADS: { view: true, add: true, edit: true },
   ACTIVITIES: { view: true, add: true, edit: true },
   CALLS: { view: true, add: true },
-  GPS_MAP: { view: true },
   REPORTS: { view: true },
 };
 
@@ -80,8 +79,6 @@ interface SampleMember {
   isActive: boolean;
   reportsToAhmed: boolean;
   appAccess: boolean;
-  trackCheckInOut: boolean;
-  trackMeetingLocation: boolean;
   includeInReporting: boolean;
   autoFollowUpPrompt: boolean;
   whatsappInboxAccess: 'RESTRICTED' | 'FULL' | null;
@@ -106,8 +103,6 @@ const MEMBERS: SampleMember[] = [
     isActive: true,
     reportsToAhmed: false,
     appAccess: true,
-    trackCheckInOut: true,
-    trackMeetingLocation: true,
     includeInReporting: true,
     autoFollowUpPrompt: false,
     whatsappInboxAccess: 'FULL',
@@ -129,8 +124,6 @@ const MEMBERS: SampleMember[] = [
     isActive: true,
     reportsToAhmed: true,
     appAccess: true,
-    trackCheckInOut: true,
-    trackMeetingLocation: false,
     includeInReporting: true,
     autoFollowUpPrompt: true,
     whatsappInboxAccess: 'RESTRICTED',
@@ -152,8 +145,6 @@ const MEMBERS: SampleMember[] = [
     isActive: true,
     reportsToAhmed: true,
     appAccess: true,
-    trackCheckInOut: true,
-    trackMeetingLocation: true,
     includeInReporting: true,
     autoFollowUpPrompt: false,
     whatsappInboxAccess: 'RESTRICTED',
@@ -175,8 +166,6 @@ const MEMBERS: SampleMember[] = [
     isActive: true,
     reportsToAhmed: true,
     appAccess: false,
-    trackCheckInOut: false,
-    trackMeetingLocation: false,
     includeInReporting: true,
     autoFollowUpPrompt: true,
     whatsappInboxAccess: 'RESTRICTED',
@@ -198,8 +187,6 @@ const MEMBERS: SampleMember[] = [
     isActive: false,
     reportsToAhmed: true,
     appAccess: false,
-    trackCheckInOut: false,
-    trackMeetingLocation: false,
     includeInReporting: false,
     autoFollowUpPrompt: false,
     whatsappInboxAccess: null,
@@ -221,8 +208,6 @@ const MEMBERS: SampleMember[] = [
     isActive: true,
     reportsToAhmed: false,
     appAccess: false,
-    trackCheckInOut: false,
-    trackMeetingLocation: false,
     includeInReporting: true,
     autoFollowUpPrompt: false,
     whatsappInboxAccess: null,
@@ -244,8 +229,6 @@ const MEMBERS: SampleMember[] = [
     isActive: true,
     reportsToAhmed: true,
     appAccess: true,
-    trackCheckInOut: false,
-    trackMeetingLocation: false,
     includeInReporting: true,
     autoFollowUpPrompt: true,
     whatsappInboxAccess: 'RESTRICTED',
@@ -267,8 +250,6 @@ const MEMBERS: SampleMember[] = [
     isActive: true,
     reportsToAhmed: true,
     appAccess: false,
-    trackCheckInOut: false,
-    trackMeetingLocation: false,
     includeInReporting: true,
     autoFollowUpPrompt: false,
     whatsappInboxAccess: 'RESTRICTED',
@@ -290,8 +271,6 @@ const MEMBERS: SampleMember[] = [
     isActive: false,
     reportsToAhmed: true,
     appAccess: false,
-    trackCheckInOut: false,
-    trackMeetingLocation: false,
     includeInReporting: false,
     autoFollowUpPrompt: false,
     whatsappInboxAccess: null,
@@ -313,8 +292,6 @@ const MEMBERS: SampleMember[] = [
     isActive: true,
     reportsToAhmed: false,
     appAccess: false,
-    trackCheckInOut: false,
-    trackMeetingLocation: false,
     includeInReporting: true,
     autoFollowUpPrompt: false,
     whatsappInboxAccess: null,
@@ -422,8 +399,6 @@ async function main(): Promise<void> {
         leadFormId: member.leadForm ? leadForm.id : null,
         pipelines: member.pipelines,
         appAccess: member.appAccess,
-        trackCheckInOut: member.trackCheckInOut,
-        trackMeetingLocation: member.trackMeetingLocation,
         includeInReporting: member.includeInReporting,
         autoFollowUpPrompt: member.autoFollowUpPrompt,
         whatsappInboxAccess: member.whatsappInboxAccess,

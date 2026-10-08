@@ -19,7 +19,6 @@ export interface ActivityItem {
   dueAt: string;
   endAt: string | null;
   completedAt: string | null;
-  locationId: string | null;
   assigneeIds: string[];
 }
 
@@ -35,7 +34,6 @@ export const ACTIVITY_SELECT = {
   dueAt: true,
   endAt: true,
   completedAt: true,
-  locationId: true,
   assignees: { select: { userId: true } },
 } satisfies Prisma.ActivitySelect;
 
@@ -67,7 +65,6 @@ export function toActivityItem(
     dueAt: row.dueAt.toISOString(),
     endAt: row.endAt ? row.endAt.toISOString() : null,
     completedAt: row.completedAt ? row.completedAt.toISOString() : null,
-    locationId: row.locationId,
     assigneeIds: row.assignees.map((a) => a.userId),
   };
 }
@@ -85,7 +82,6 @@ export interface ActivityListItem {
   dueAt: string;
   endAt: string | null;
   completedAt: string | null;
-  locationId: string | null;
   assignees: { id: string; name: string }[];
   lead: LeadListItem;
 }
@@ -123,7 +119,6 @@ export const ACTIVITY_LIST_SELECT = {
   dueAt: true,
   endAt: true,
   completedAt: true,
-  locationId: true,
   assignees: { select: { user: { select: { id: true, name: true } } } },
   lead: { select: LEAD_LIST_SELECT },
 } satisfies Prisma.ActivitySelect;
@@ -141,7 +136,6 @@ export function toActivityListItem(row: ActivityListRow): ActivityListItem {
     dueAt: row.dueAt.toISOString(),
     endAt: row.endAt ? row.endAt.toISOString() : null,
     completedAt: row.completedAt ? row.completedAt.toISOString() : null,
-    locationId: row.locationId,
     assignees: row.assignees.map((a) => a.user),
     lead: toLeadListItem(row.lead),
   };

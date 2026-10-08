@@ -48,8 +48,6 @@ function detailRow(overrides: Record<string, unknown> = {}) {
     leadFormId: FORM_ID,
     pipelines: ['Lead Pipeline'],
     appAccess: false,
-    trackCheckInOut: true,
-    trackMeetingLocation: false,
     includeInReporting: false,
     autoFollowUpPrompt: false,
     whatsappInboxAccess: 'RESTRICTED',
@@ -548,11 +546,26 @@ describe('UsersService.detail', () => {
 
     expect(detail.pipelines).toEqual(['Lead Pipeline']);
     expect(detail.whatsappInboxAccess).toBe('RESTRICTED');
-    expect(detail.trackCheckInOut).toBe(true);
     expect(detail.permissions).toEqual([
       { module: 'LEADS', canView: true, canAdd: true, canEdit: true },
     ]);
     expect(JSON.stringify(detail)).not.toContain('passwordHash');
+  });
+
+  it('drops a stored permission row whose module left the catalogue', async () => {
+    const mocks = makeService();
+    mocks.findFirst.mockResolvedValue(
+      detailRow({
+        modulePermissions: [
+          { module: 'LEADS', canView: true, canAdd: true, canEdit: true },
+          { module: 'GPS_MAP', canView: true, canAdd: false, canEdit: false },
+        ],
+      }),
+    );
+
+    const detail = await mocks.service.detail(OTHER);
+
+    expect(detail.permissions.map((entry) => entry.module)).toEqual(['LEADS']);
   });
 
   it('404s an unknown or removed member', async () => {

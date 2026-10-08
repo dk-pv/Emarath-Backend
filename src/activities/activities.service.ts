@@ -1,13 +1,11 @@
 import {
   BadRequestException,
-  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { ActivityType, Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
-import { GpsService, type CheckInVerification } from '../gps/gps.service';
 import { SettingsService } from '../settings/settings.service';
 import { leadScopeWhere } from '../leads/lead-scope';
 import { activityScopeWhere } from './activity-scope';
@@ -38,31 +36,6 @@ import {
 const LEAD_OUT_OF_SCOPE = 'That lead does not exist or is not in your scope.';
 const ACTIVITY_OUT_OF_SCOPE =
   'That activity does not exist or is not in your scope.';
-/**
- * ACT-10.1: the message surfaced when a location-tied activity is completed
- * without a valid GPS check-in. Exported so the spec can assert against the
- * exact string without duplicating it.
- */
-export const LOCATION_GATE_MESSAGE =
-  'Check in on site to complete this activity.';
-
-/**
- * The reason a location-tied completion was refused, phrased for the user (GPS-09.1
- * AC2). Distances are rounded to whole metres — a GPS fix is not precise enough for
- * decimals to mean anything, and "182 m" reads as a fact where "182.37 m" reads as a
- * machine talking.
- */
-export function locationGateMessage(
-  verdict: Extract<CheckInVerification, { ok: false }>,
-): string {
-  if (verdict.reason === 'TOO_FAR') {
-    return `Your check-in was ${Math.round(verdict.meters)} m from ${verdict.locationName}, outside the ${verdict.radius} m required to complete this activity.`;
-  }
-  if (verdict.reason === 'NO_LOCATION') {
-    return 'This activity is tied to a location that no longer exists. Ask an administrator to fix its location before completing it.';
-  }
-  return LOCATION_GATE_MESSAGE;
-}
 
 /**
  * Activity writes (ACT-03.1). Injects `PrismaService` directly — like the row
@@ -75,7 +48,6 @@ export class ActivitiesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
-    private readonly gps: GpsService,
     private readonly settings: SettingsService,
   ) {}
 
@@ -197,12 +169,6 @@ export class ActivitiesService {
    * out-of-scope or missing id is a 404, never a cross-scope write. Idempotent:
    * an already-completed activity keeps its original `completedAt` (re-completing
    * is a no-op in outcome).
-   *
-   * ponytail: the location-tied completion gate (a 409 until a valid on-site GPS
-   * check-in exists) is ACT-10.1 — it needs the GPS module, which isn't built.
-   * The architecture ships non-location completion now and adds the gate when GPS
-   * lands; building it now would permanently block location-tied activities with
-   * no way to satisfy it.
    */
   async complete(id: string): Promise<ActivityItem> {
     const user = await this.currentUser.resolve();
@@ -212,33 +178,10 @@ export class ActivitiesService {
       select: {
         id: true,
         completedAt: true,
-        locationId: true,
         lead: { select: { name: true } },
       },
     });
     if (!activity) throw new NotFoundException(ACTIVITY_OUT_OF_SCOPE);
-
-    /**
-     * ACT-10.1 location gate (ADR-0027 dec 6, blueprint §1.8, §10).
-     *
-     * A location-tied activity (`locationId != null`) requires an on-site GPS
-     * check-in before it can be marked complete. GPS-02.1 wires the real test:
-     * the agent must have a check-in verifying this follow-up. When `locationId`
-     * is null the branch is skipped and completion proceeds normally.
-     *
-     * GPS-09.1 completes the rule: `GpsService.verifyLocationCheckIn` measures the
-     * agent's own check-in against the site's coordinates and returns the reason it
-     * failed, which becomes the 409's message so the user is told whether they never
-     * checked in or were too far away.
-     */
-    if (activity.locationId !== null) {
-      const verdict = await this.gps.verifyLocationCheckIn(
-        user.id,
-        activity.id,
-      );
-      if (!verdict.ok)
-        throw new ConflictException(locationGateMessage(verdict));
-    }
 
     const updated = await this.prisma.activity.update({
       where: { id },
@@ -260,7 +203,7 @@ export class ActivitiesService {
 
     const dueAt = new Date(dto.dueAt);
     const endAt = dto.endAt ? new Date(dto.endAt) : null;
-    this.assertTypeShape(dto.type, dueAt, endAt, dto.locationId);
+    this.assertTypeShape(dto.type, dueAt, endAt);
 
     const activity = await this.prisma.activity.findFirst({
       where: { AND: [activityScopeWhere(user), { id }] },
@@ -299,11 +242,6 @@ export class ActivitiesService {
           description: dto.description,
           dueAt,
           endAt,
-          // `disconnect`, not `undefined`: an edit that drops the location must clear
-          // it, which is what `locationId: null` did before the relation existed.
-          location: dto.locationId
-            ? { connect: { id: dto.locationId } }
-            : { disconnect: true },
           assignees: {
             deleteMany: {},
             create: [...assigneeIds].map((userId) => ({
@@ -357,7 +295,7 @@ export class ActivitiesService {
    * Duplicates a follow-up (ACT-08.1 AC2). Scoped like the other row actions — an
    * out-of-scope or unknown id is a 404, never a cross-scope read. The copy is a
    * fresh, incomplete follow-up: every field is carried over (type, lead,
-   * description, times, location, the assignee set) except completion, which
+   * description, times, the assignee set) except completion, which
    * starts clear. Reuses the create nested-write shape; the source assignees came
    * from a row already in scope, so no foreign key can be invalid.
    */
@@ -371,7 +309,6 @@ export class ActivitiesService {
         description: true,
         dueAt: true,
         endAt: true,
-        locationId: true,
         lead: { select: { id: true, name: true } },
         assignees: { select: { userId: true } },
       },
@@ -385,9 +322,6 @@ export class ActivitiesService {
         description: source.description,
         dueAt: source.dueAt,
         endAt: source.endAt,
-        location: source.locationId
-          ? { connect: { id: source.locationId } }
-          : undefined,
         assignees: {
           create: source.assignees.map((a) => ({
             user: { connect: { id: a.userId } },
@@ -438,18 +372,15 @@ export class ActivitiesService {
 
   /**
    * The type-conditional shape shared by create and edit (video / blueprint §9):
-   * a Call carries neither an End Time nor a Location; an End Time must not
-   * precede the Start Time.
+   * a Call carries no End Time; an End Time must not precede the Start Time.
    */
   private assertTypeShape(
     type: ActivityType,
     dueAt: Date,
     endAt: Date | null,
-    locationId?: string,
   ): void {
-    if (type === ActivityType.CALL) {
-      if (endAt) throw new BadRequestException('A Call has no end time.');
-      if (locationId) throw new BadRequestException('A Call has no location.');
+    if (type === ActivityType.CALL && endAt) {
+      throw new BadRequestException('A Call has no end time.');
     }
     if (endAt && endAt < dueAt) {
       throw new BadRequestException(
@@ -473,7 +404,7 @@ export class ActivitiesService {
 
     const dueAt = new Date(dto.dueAt);
     const endAt = dto.endAt ? new Date(dto.endAt) : null;
-    this.assertTypeShape(dto.type, dueAt, endAt, dto.locationId);
+    this.assertTypeShape(dto.type, dueAt, endAt);
 
     const lead = await this.prisma.lead.findFirst({
       where: { AND: [leadScopeWhere(user), { id: dto.leadId }] },
@@ -493,9 +424,6 @@ export class ActivitiesService {
           description: dto.description,
           dueAt,
           endAt,
-          location: dto.locationId
-            ? { connect: { id: dto.locationId } }
-            : undefined,
           assignees: {
             create: [...assigneeIds].map((userId) => ({
               user: { connect: { id: userId } },

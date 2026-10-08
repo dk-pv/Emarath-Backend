@@ -106,11 +106,9 @@ model User {
   /// Permissions & Tracking toggles (wizard step 3). All default off, matching the
   /// reference's fresh-member state; none is read by any guard yet — they are stored
   /// configuration surfaced back through the API.
-  appAccess            Boolean @default(false) @map("app_access")
-  trackCheckInOut      Boolean @default(false) @map("track_check_in_out")
-  trackMeetingLocation Boolean @default(false) @map("track_meeting_location")
-  includeInReporting   Boolean @default(false) @map("include_in_reporting")
-  autoFollowUpPrompt   Boolean @default(false) @map("auto_follow_up_prompt")
+  appAccess          Boolean @default(false) @map("app_access")
+  includeInReporting Boolean @default(false) @map("include_in_reporting")
+  autoFollowUpPrompt Boolean @default(false) @map("auto_follow_up_prompt")
 
   /// WhatsApp inbox access level ("RESTRICTED" | "FULL"), nullable = not set.
   whatsappInboxAccess String? @map("whatsapp_inbox_access") @db.VarChar(20)
@@ -141,9 +139,6 @@ model User {
   activityAssignments ActivityAssignee[]
   /// CALL-01.1: calls made or received by this agent.
   calls               Call[]
-  /// GPS-01.1: field check-ins and passive tracking points for this agent.
-  checkIns            CheckIn[]
-  locationPoints      LocationPoint[]
   /// AUTH-01.3: refresh-token sessions (one lineage per device).
   refreshTokens       RefreshToken[]
   /// AUTH-03.1: outstanding/used password-reset tokens.
@@ -323,7 +318,7 @@ model LeadFormField {
 model UserModulePermission {
   id      String  @id @default(uuid()) @db.Uuid
   userId  String  @map("user_id") @db.Uuid
-  /// Catalogue key ("LEADS", "GPS_MAP", ...). A string, validated in the service —
+  /// Catalogue key ("LEADS", "REPORTS", ...). A string, validated in the service —
   /// an enum would cost a migration per module for no integrity the catalogue check
   /// does not already give.
   module  String  @db.VarChar(40)
@@ -939,9 +934,7 @@ enum ActivityType {
 /// as `dueAt` (Due Date + Start Time); `endAt` is the Meeting/Task End Time (M2).
 /// `description` is the "Follow-up Description" — nullable here because imported/
 /// legacy rows may lack it, but the create/edit DTO enforces non-empty (C1,
-/// resolved required by the video). `locationId` is the optional Location select
-/// (Meeting/Task only); its catalogue + on-site check-in are the GPS module's, so
-/// there is no FK until that table exists (E1). `completedAt` is ACT-04.1.
+/// resolved required by the video). `completedAt` is ACT-04.1.
 model Activity {
   id          String       @id @default(uuid()) @db.Uuid
   type        ActivityType
@@ -950,20 +943,13 @@ model Activity {
   dueAt       DateTime     @map("due_at")
   endAt       DateTime?    @map("end_at")
   completedAt DateTime?    @map("completed_at")
-  /// GPS-09.1: the site this follow-up must be carried out at. Null = not location-tied.
-  locationId  String?      @map("location_id") @db.Uuid
 
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   deletedAt DateTime? @map("deleted_at")
 
   lead      Lead               @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  /// Restrict: a site with follow-ups tied to it must not vanish and silently
-  /// un-gate them.
-  location  Location?          @relation(fields: [locationId], references: [id], onDelete: Restrict)
   assignees ActivityAssignee[]
-  /// GPS-01.1: the field check-ins that verify this follow-up (ACT-10.1 gate).
-  checkIns  CheckIn[]
 
   /// Overdue/Today/Tomorrow/All bucketing compares dueAt to day boundaries.
   @@index([dueAt])
@@ -1048,86 +1034,6 @@ model Call {
   @@index([agentId, startedAt])
   @@index([leadId, deletedAt])
   @@map("calls")
-}
-
-/// A field visit (GPS-01.1). One row per visit: the check-in time/coordinates,
-/// plus the check-out time/coordinates once the agent leaves (both nullable
-/// until then). May verify a location-tied follow-up (ACT-10.1 gate) via
-/// `activityId`. Coordinates are Decimal(9,6) — ~0.1 m precision, signed, and
-/// exact (never float drift on a comparison). No PostGIS: the backlog's queries
-/// are by agent and period, which a btree index serves.
-model CheckIn {
-  id          String    @id @default(uuid()) @db.Uuid
-  agentId     String    @map("agent_id") @db.Uuid
-  checkInAt   DateTime  @map("check_in_at")
-  checkInLat  Decimal   @map("check_in_lat") @db.Decimal(9, 6)
-  checkInLng  Decimal   @map("check_in_lng") @db.Decimal(9, 6)
-  checkOutAt  DateTime? @map("check_out_at")
-  checkOutLat Decimal?  @map("check_out_lat") @db.Decimal(9, 6)
-  checkOutLng Decimal?  @map("check_out_lng") @db.Decimal(9, 6)
-  /// The follow-up this visit verifies; null when the check-in is not tied to one.
-  activityId  String?   @map("activity_id") @db.Uuid
-
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  deletedAt DateTime? @map("deleted_at")
-
-  agent    User      @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  /// SetNull, not Cascade: deleting the follow-up must not erase the proof the
-  /// visit happened.
-  activity Activity? @relation(fields: [activityId], references: [id], onDelete: SetNull)
-
-  /// AC4: query a field agent's visits over a period.
-  @@index([agentId, checkInAt])
-  @@index([activityId])
-  @@map("check_ins")
-}
-
-/// A named site a follow-up can be tied to (GPS-09.1).
-///
-/// ADR-0027 modelled `Activity.locationId` as "a soft reference to a location whose
-/// catalogue is the GPS module's (no FK until that table exists)". This is that table:
-/// the completion gate needs a coordinate to measure a check-in against, and there was
-/// nowhere to store one. Owned by GPS because the gate and the check-ins are.
-model Location {
-  id           String  @id @default(uuid()) @db.Uuid
-  name         String  @db.VarChar(160)
-  /// The site's centre. Same precision as CheckIn's coordinates so a distance
-  /// between the two is computed from like-for-like values.
-  lat          Decimal @db.Decimal(9, 6)
-  lng          Decimal @db.Decimal(9, 6)
-  /// Per-site override of the configured default radius, in metres. Null = use the
-  /// default; a large depot legitimately needs a wider gate than a shop doorway.
-  radiusMeters Int?    @map("radius_meters")
-
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  deletedAt DateTime? @map("deleted_at")
-
-  activities Activity[]
-
-  @@index([deletedAt])
-  @@map("locations")
-}
-
-/// A passive automatic-tracking location point (GPS-01.1) — a stream of pings per
-/// field agent. Append-only telemetry, so no soft-delete; a purge is a retention
-/// policy, not a per-row delete.
-model LocationPoint {
-  id         String   @id @default(uuid()) @db.Uuid
-  agentId    String   @map("agent_id") @db.Uuid
-  recordedAt DateTime @map("recorded_at")
-  lat        Decimal  @db.Decimal(9, 6)
-  lng        Decimal  @db.Decimal(9, 6)
-
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  agent User @relation(fields: [agentId], references: [id], onDelete: Cascade)
-
-  /// AC2/AC4: an agent's track over a period.
-  @@index([agentId, recordedAt])
-  @@map("location_points")
 }
 
 /// A company-wide document (DOC-01.1). A general-purpose repository — product

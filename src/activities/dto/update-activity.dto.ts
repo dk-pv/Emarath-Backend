@@ -51,11 +51,6 @@ export class UpdateActivityDto {
   @IsOptional()
   endAt?: string;
 
-  @Transform(emptyToUndefined)
-  @IsUUID('all', { message: 'location must be a valid id' })
-  @IsOptional()
-  locationId?: string;
-
   @IsArray()
   @ArrayNotEmpty({ message: 'at least one assignee is required' })
   @ArrayMaxSize(MAX_ASSIGNEES)

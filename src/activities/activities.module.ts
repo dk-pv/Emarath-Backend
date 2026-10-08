@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ActivitiesController } from './activities.controller';
 import { ActivitiesService } from './activities.service';
-import { GpsModule } from '../gps/gps.module';
 import { SettingsModule } from '../settings/settings.module';
 
 /**
@@ -12,7 +11,7 @@ import { SettingsModule } from '../settings/settings.module';
  */
 @Module({
   // SettingsModule exports the service holding the configured overdue rule.
-  imports: [GpsModule, SettingsModule],
+  imports: [SettingsModule],
   controllers: [ActivitiesController],
   providers: [ActivitiesService],
 })

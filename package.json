@@ -30,7 +30,6 @@
     "seed:run": "nest build && node dist/prisma/seed.js",
     "seed:ui-reference": "nest build && node dist/prisma/seed-ui-reference.js",
     "seed:documents": "nest build && node dist/prisma/seed-documents.js",
-    "seed:gps": "nest build && node dist/prisma/seed-gps.js",
     "seed:integrations": "nest build && node dist/prisma/seed-integrations.js",
     "seed:users-access": "nest build && node dist/prisma/seed-users-access.js",
     "seed:team-members": "nest build && node dist/prisma/seed-team-members.js",

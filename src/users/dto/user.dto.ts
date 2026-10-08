@@ -160,14 +160,6 @@ class TeamMemberConfigDto {
 
   @IsBoolean()
   @IsOptional()
-  trackCheckInOut?: boolean;
-
-  @IsBoolean()
-  @IsOptional()
-  trackMeetingLocation?: boolean;
-
-  @IsBoolean()
-  @IsOptional()
   includeInReporting?: boolean;
 
   @IsBoolean()
@@ -331,8 +323,6 @@ export interface UserDetailResponse extends UserResponse {
   leadFormId: string | null;
   pipelines: string[];
   appAccess: boolean;
-  trackCheckInOut: boolean;
-  trackMeetingLocation: boolean;
   includeInReporting: boolean;
   autoFollowUpPrompt: boolean;
   whatsappInboxAccess: WhatsappAccessLevel | null;
