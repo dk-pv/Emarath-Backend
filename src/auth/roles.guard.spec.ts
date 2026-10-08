@@ -70,6 +70,7 @@ describe('RolesGuard — operational roles (ADR-0084)', () => {
     UserRole.LOGISTICS_MANAGER,
     UserRole.LOGISTICS_EXECUTIVE,
     UserRole.ACCOUNTS_EXECUTIVE,
+    UserRole.QC,
   ];
   const as = (role: UserRole): CurrentUser => ({ id: 'o', role, team: null });
 

@@ -15,6 +15,7 @@ import {
 import {
   DEFAULT_PAGE_SIZE,
   MAX_FILTER_VALUE_LENGTH,
+  MAX_PAGE,
   MAX_FILTER_VALUES,
   MAX_PAGE_SIZE,
   MAX_SEARCH_LENGTH,
@@ -48,6 +49,7 @@ export class ListActivitiesQueryDto {
   @Type(() => Number)
   @IsInt({ message: 'page must be an integer' })
   @Min(1, { message: 'page must be 1 or greater' })
+  @Max(MAX_PAGE, { message: `page must be at most ${MAX_PAGE}` })
   @IsOptional()
   page: number = 1;
 

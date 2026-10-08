@@ -3,11 +3,13 @@ import { escapeLike } from '../leads/lead-search';
 
 /**
  * Free-text search over the worklist (ACT-07.1 AC1): Customer Name and the
- * activity title. The title is derived ("{Type} with {name}"), never stored, so
- * the customer-name half is matched on the linked lead and the title's only other
- * word — the type label — is matched when the term is a prefix of it ("cal" →
- * CALL). Reuses the Leads `escapeLike` so `%`/`_` are literal. An empty term adds
- * no condition (AC5).
+ * activity title. The title is derived ("{Type} with {name}"), never stored, so a
+ * term matches it exactly when it falls inside one of three parts: the customer
+ * name; the "{Type} with " prefix ("eting", "Call with"); or across the two, a
+ * tail of the prefix followed by the start of the name ("with Om", "Meeting with
+ * Omar"). Each part is a plain Prisma predicate, so the page and the tab counts
+ * share one `where`. Reuses the Leads `escapeLike` so `%`/`_` are literal. An
+ * empty term adds no condition (AC5).
  */
 export function activitySearchWhere(
   term: string | undefined,
@@ -15,31 +17,44 @@ export function activitySearchWhere(
   const trimmed = term?.trim();
   if (!trimmed) return undefined;
 
-  const needle = escapeLike(trimmed);
   const or: Prisma.ActivityWhereInput[] = [
-    { lead: { name: { contains: needle, mode: 'insensitive' } } },
+    {
+      lead: {
+        name: { contains: escapeLike(trimmed), mode: 'insensitive' },
+      },
+    },
   ];
 
-  const type = matchTypeLabel(trimmed);
-  if (type) or.push({ type });
+  const t = trimmed.toLowerCase();
+  for (const [label, type] of Object.entries(TYPE_LABELS)) {
+    const prefix = `${label} with `;
+    if (prefix.includes(t)) {
+      or.push({ type });
+      continue;
+    }
+    for (let split = 1; split < t.length; split++) {
+      if (!prefix.endsWith(t.slice(0, split))) continue;
+      or.push({
+        type,
+        lead: {
+          name: {
+            startsWith: escapeLike(trimmed.slice(split)),
+            mode: 'insensitive',
+          },
+        },
+      });
+    }
+  }
 
   return { OR: or };
 }
 
+/** The title's type labels, lower-cased (`activityTitle` in activity-response.dto.ts). */
 const TYPE_LABELS: Record<Lowercase<string>, ActivityType> = {
   call: ActivityType.CALL,
   meeting: ActivityType.MEETING,
   task: ActivityType.TASK,
 };
-
-/** The type whose label the term is a prefix of ("meet" → MEETING), or none. */
-function matchTypeLabel(term: string): ActivityType | undefined {
-  const t = term.toLowerCase();
-  for (const [label, type] of Object.entries(TYPE_LABELS)) {
-    if (label.startsWith(t)) return type;
-  }
-  return undefined;
-}
 
 export interface ActivityFilters {
   /** User ids matched through the assignee join (AC2). */

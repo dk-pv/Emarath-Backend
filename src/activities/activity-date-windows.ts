@@ -1,4 +1,5 @@
 import { Prisma } from '../generated/prisma/client';
+import { overdueCutoff, type OverdueRule } from './activity-buckets';
 
 /**
  * The Workpex Activities filter popup's quick date checkboxes. Distinct from the
@@ -49,15 +50,20 @@ function range(
  * Every window except Overdue is a pure due-date range: on the All or Completed tab
  * "Today" means everything due today, done or not, and the open/done split is the
  * tab's job. Overdue is the exception — a completed item is never overdue — so it
- * keeps the `completedAt: null` half its tab predicate has.
+ * keeps the `completedAt: null` half its tab predicate has, and the same cutoff as the
+ * Overdue tab (Settings' overdue rule), so ticking it never drops a row the tab shows.
  */
 function windowWhere(
   window: ActivityDateWindow,
   edges: ActivityWindowEdges,
+  rule: OverdueRule | undefined,
 ): Prisma.ActivityWhereInput | undefined {
   switch (window) {
     case 'overdue':
-      return { completedAt: null, dueAt: { lt: edges.todayStart } };
+      return {
+        completedAt: null,
+        dueAt: { lt: overdueCutoff(edges, rule) },
+      };
     case 'today':
       return range(edges.todayStart, edges.todayEnd);
     case 'tomorrow':
@@ -82,11 +88,12 @@ function windowWhere(
 export function activityDateWindowWhere(
   windows: readonly ActivityDateWindow[] | undefined,
   edges: ActivityWindowEdges,
+  rule?: OverdueRule,
 ): Prisma.ActivityWhereInput | undefined {
   if (!windows?.length) return undefined;
 
   const or = windows
-    .map((window) => windowWhere(window, edges))
+    .map((window) => windowWhere(window, edges, rule))
     .filter((where): where is Prisma.ActivityWhereInput => where !== undefined);
 
   if (or.length === 0) return undefined;

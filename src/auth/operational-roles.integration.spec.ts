@@ -16,7 +16,8 @@ import { UserRole } from '../generated/prisma/client';
  * controller added later is covered without anyone remembering this spec.
  *
  * Proves the two halves of the operational-roles rule:
- *   1. a post-sale role is refused on every non-public route except Documents;
+ *   1. a post-sale role (QC included) is refused on every non-public route except Documents
+ *      and the Logistics/journey routes that name it;
  *   2. each sales role reaches exactly the routes it reached before those roles existed,
  *      against a hand-written table, so no existing access moved.
  */
@@ -126,6 +127,10 @@ const ADMIN_ONLY_ROUTES = new Set([
 const MANAGER_AND_ADMIN_ROUTES = new Set([
   'POST /api/leads/bulk/reassign',
   'POST /api/leads/:id/reassign',
+  'POST /api/stages',
+  'PATCH /api/stages/reorder',
+  'PATCH /api/stages/:id',
+  'DELETE /api/stages/:id',
 ]);
 
 /*
@@ -142,17 +147,26 @@ const LOGISTICS_QC_LABELS = new Set([
   'POST /api/logistics/orders/:id/qc-verify',
   'POST /api/logistics/orders/:id/qc-reject',
 ]);
+/* Both Logistics roles (client clarification 2026-10-01, Q1). */
 const LOGISTICS_SHIPMENT_LABELS = new Set([
-  'POST /api/logistics/orders/:id/resubmit',
   'POST /api/logistics/orders/:id/dispatch',
   'POST /api/logistics/orders/:id/deliver',
   'POST /api/logistics/orders/:id/cancel',
+]);
+/* The Logistics Manager alone: RTO, the QC-verified edit (Q5), the AWB correction (Q9). */
+const LOGISTICS_MANAGER_LABELS = new Set([
   'POST /api/logistics/orders/:id/rto',
+  'PATCH /api/logistics/orders/:id',
+  'PATCH /api/logistics/orders/:id/awb',
+]);
+/* The Sales Manager, on their own team's orders (Q1). */
+const LOGISTICS_RESUBMIT_LABELS = new Set([
+  'POST /api/logistics/orders/:id/resubmit',
 ]);
 
 /*
   The journey read (ADR-0083): the same readers as an order — every sales role on their own
-  leads, both Logistics roles on the orders they work — because it returns the history of the
+  leads, both Logistics roles and QC on the orders they work — because it returns the history of the
   records those two scopes already grant. Accounts is not named until its own phase.
 */
 const JOURNEY_LABELS = new Set(['GET /api/audit/events']);
@@ -162,21 +176,33 @@ function isLogisticsRoute(label: string): boolean {
     LOGISTICS_READ_LABELS.has(label) ||
     JOURNEY_LABELS.has(label) ||
     LOGISTICS_QC_LABELS.has(label) ||
-    LOGISTICS_SHIPMENT_LABELS.has(label)
+    LOGISTICS_SHIPMENT_LABELS.has(label) ||
+    LOGISTICS_MANAGER_LABELS.has(label) ||
+    LOGISTICS_RESUBMIT_LABELS.has(label)
   );
 }
 
-/** Who each Logistics route admits: QC checks, the Manager ships, Sales only read. */
+/**
+ * Who each Logistics route admits: QC checks, both Logistics roles ship, the Manager corrects
+ * and records RTO, the Sales Manager resubmits, and every other sales role only reads.
+ */
 function logisticsAdmits(label: string, role: UserRole): boolean {
   if (role === UserRole.SUPERADMIN) return isLogisticsRoute(label);
   if (LOGISTICS_READ_LABELS.has(label) || JOURNEY_LABELS.has(label)) {
     return role !== UserRole.ACCOUNTS_EXECUTIVE;
   }
-  if (LOGISTICS_QC_LABELS.has(label)) {
-    return role === UserRole.LOGISTICS_EXECUTIVE;
-  }
+  if (LOGISTICS_QC_LABELS.has(label)) return role === UserRole.QC;
   if (LOGISTICS_SHIPMENT_LABELS.has(label)) {
+    return (
+      role === UserRole.LOGISTICS_MANAGER ||
+      role === UserRole.LOGISTICS_EXECUTIVE
+    );
+  }
+  if (LOGISTICS_MANAGER_LABELS.has(label)) {
     return role === UserRole.LOGISTICS_MANAGER;
+  }
+  if (LOGISTICS_RESUBMIT_LABELS.has(label)) {
+    return role === UserRole.SALES_MANAGER;
   }
   return false;
 }
@@ -232,9 +258,28 @@ describe('Operational roles across every route (ADR-0084)', () => {
       ...JOURNEY_LABELS,
       ...LOGISTICS_QC_LABELS,
       ...LOGISTICS_SHIPMENT_LABELS,
+      ...LOGISTICS_MANAGER_LABELS,
+      ...LOGISTICS_RESUBMIT_LABELS,
     ]) {
       expect(labels).toContain(expected);
     }
+  });
+
+  /*
+    The groups are what RolesGuard reads, so they are pinned by hand: a role dropped from
+    OPERATIONAL_ROLES would otherwise just vanish from the loop below while gaining the sales
+    routes' default-open access — QC's refusal on every lead route rests on this list.
+  */
+  it('classifies every role exactly once, QC among the operational roles', () => {
+    expect([...OPERATIONAL_ROLES]).toEqual([
+      UserRole.LOGISTICS_MANAGER,
+      UserRole.LOGISTICS_EXECUTIVE,
+      UserRole.ACCOUNTS_EXECUTIVE,
+      UserRole.QC,
+    ]);
+    expect([...OPERATIONAL_ROLES, ...SALES_MODULE_ROLES].sort()).toEqual(
+      Object.values(UserRole).sort(),
+    );
   });
 
   describe.each(OPERATIONAL_ROLES)('%s', (role) => {

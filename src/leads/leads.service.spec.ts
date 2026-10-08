@@ -162,8 +162,11 @@ function makeService(
   const $transaction = jest.fn((run: (client: typeof tx) => Promise<unknown>) =>
     run(tx),
   );
+  // A pipeline's first stage, for a lead saved with no status: 'New' on Lead Pipeline.
+  const stageFindFirst = jest.fn().mockResolvedValue({ name: 'New' });
   const prisma = {
     lead: { findMany: leadFindMany },
+    stage: { findFirst: stageFindFirst },
     blockedEnquiry: { create: blockedCreate },
     $transaction,
   } as unknown as PrismaService;
@@ -194,6 +197,7 @@ function makeService(
     (update.mock.calls[call] as [string, UpdateArgs])[1];
   return {
     leadFindMany,
+    stageFindFirst,
     blockedCreate,
     getSalesCrmDuplicate,
     service,
@@ -406,6 +410,24 @@ describe('LeadsService.create', () => {
     expect(data.status).toBe('New');
     expect(data.pipeline).toBe('Lead Pipeline');
     expect(data.category).toBe('Default');
+  });
+
+  it("lands a status-less lead on its own pipeline's first stage", async () => {
+    const { service, dataOf, stageFindFirst } = makeService();
+    stageFindFirst.mockResolvedValue({ name: 'Intake' });
+    await service.create({ ...BASE_DTO, pipeline: 'Complaints' });
+    expect(stageFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { pipeline: 'Complaints' } }),
+    );
+    expect(dataOf().status).toBe('Intake');
+    expect(dataOf().pipeline).toBe('Complaints');
+  });
+
+  it("falls back to 'New' when the pipeline has no stages", async () => {
+    const { service, dataOf, stageFindFirst } = makeService();
+    stageFindFirst.mockResolvedValue(null);
+    await service.create({ ...BASE_DTO, pipeline: 'Empty' });
+    expect(dataOf().status).toBe('New');
   });
 
   it('keeps provided status/pipeline/category over the defaults', async () => {

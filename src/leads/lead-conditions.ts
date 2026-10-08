@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
 import { answeredCallWhere, noEngagementWhere } from './lead-engagement-where';
+import { escapeLike } from './lead-search';
 
 /**
  * The Leads advanced filter condition engine (Workpex "Filter" — ADR-0039, expanded
@@ -16,6 +17,12 @@ import { answeredCallWhere, noEngagementWhere } from './lead-engagement-where';
  *   user    — is/isnt/isEmpty/isNotEmpty  (through the assignment join)
  *   tags    — is/isnt/isEmpty/isNotEmpty  (through the lead-tag join)
  * Date operators receive ISO instants the client computed in its own timezone.
+ *
+ * Text values are matched literally (`%` and `_` are escaped, as search does). A negative
+ * operator (isn't, doesn't contain, not equals, not between) keeps the leads whose field is
+ * empty, the same rule the join fields' `none` shapes already follow — "Country isn't
+ * Qatar" includes the leads with no country. On a NOT NULL column there is no empty value
+ * to keep, and Prisma rejects a null filter there, so those columns are marked `required`.
  */
 
 export type LeadConditionOperator =
@@ -49,7 +56,14 @@ type FieldKind =
   'text' | 'numeric' | 'date' | 'enum' | 'user' | 'tags' | 'team' | 'activity';
 
 type FieldSpec =
-  | { kind: 'text' | 'numeric' | 'date' | 'enum'; column: string }
+  | {
+      kind: 'text' | 'numeric' | 'date' | 'enum';
+      column: string;
+      /** NOT NULL in the Lead model: empty means '' (text) or nothing (number/date). */
+      required?: true;
+      /** An Int column: values must be whole and fit in 32 bits. */
+      integer?: true;
+    }
   | { kind: 'user' }
   | { kind: 'tags' }
   /** The assignee's team (`User.team`) — what the Leads By Status Team filter drills through. */
@@ -68,9 +82,9 @@ type FieldSpec =
  */
 const FIELDS: Record<string, FieldSpec> = {
   // Scalar text (free-text columns)
-  name: { kind: 'text', column: 'name' },
+  name: { kind: 'text', column: 'name', required: true },
   firstName: { kind: 'text', column: 'firstName' },
-  primaryPhone: { kind: 'text', column: 'primaryPhone' },
+  primaryPhone: { kind: 'text', column: 'primaryPhone', required: true },
   secondaryPhone: { kind: 'text', column: 'secondaryPhone' },
   source: { kind: 'text', column: 'source' },
   city: { kind: 'text', column: 'city' },
@@ -80,11 +94,11 @@ const FIELDS: Record<string, FieldSpec> = {
   nationalCode: { kind: 'text', column: 'nationalCode' },
   product2: { kind: 'text', column: 'product2' },
   // Scalar enum (lookup-backed)
-  status: { kind: 'enum', column: 'status' },
+  status: { kind: 'enum', column: 'status', required: true },
   callStatus: { kind: 'enum', column: 'callStatus' },
   category: { kind: 'enum', column: 'category' },
   language: { kind: 'enum', column: 'language' },
-  pipeline: { kind: 'enum', column: 'pipeline' },
+  pipeline: { kind: 'enum', column: 'pipeline', required: true },
   paymentMethod: { kind: 'enum', column: 'paymentMethod' },
   product: { kind: 'enum', column: 'product' },
   // Scalar numeric
@@ -92,12 +106,26 @@ const FIELDS: Record<string, FieldSpec> = {
   forecastedAmount: { kind: 'numeric', column: 'forecastedAmount' },
   productQty: { kind: 'numeric', column: 'productQty' },
   product2Qty: { kind: 'numeric', column: 'product2Qty' },
-  callAttempts: { kind: 'numeric', column: 'callAttempts' },
-  whatsappAttempts: { kind: 'numeric', column: 'whatsappAttempts' },
+  callAttempts: {
+    kind: 'numeric',
+    column: 'callAttempts',
+    required: true,
+    integer: true,
+  },
+  whatsappAttempts: {
+    kind: 'numeric',
+    column: 'whatsappAttempts',
+    required: true,
+    integer: true,
+  },
   // Scalar date
-  createdAt: { kind: 'date', column: 'createdAt' },
+  createdAt: { kind: 'date', column: 'createdAt', required: true },
   /** Kept by the `leads_status_changed_at` trigger; the Leads By Status "Status Changed Date" drill-down. */
-  statusChangedAt: { kind: 'date', column: 'statusChangedAt' },
+  statusChangedAt: {
+    kind: 'date',
+    column: 'statusChangedAt',
+    required: true,
+  },
   bookingDate: { kind: 'date', column: 'bookingDate' },
   // Join fields
   assignedAgent: { kind: 'user' },
@@ -156,10 +184,18 @@ const VALUELESS: ReadonlySet<LeadConditionOperator> = new Set([
   'isEmpty',
   'isNotEmpty',
 ]);
+/** Operators that take a start and an end — `on` too, as the client's [day start, next day). */
 const RANGE: ReadonlySet<LeadConditionOperator> = new Set([
   'between',
   'notBetween',
+  'on',
 ]);
+
+/** The largest value a Postgres `integer` column holds. */
+const MAX_INT = 2_147_483_647;
+
+/** The syntax a Postgres `uuid` accepts; anything else would fail inside the query. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Parses + validates the JSON `conditions` param. Bad JSON, an unknown field, an
@@ -210,14 +246,40 @@ export function parseLeadConditions(raw: string | undefined): LeadCondition[] {
     } else if (cleaned.length === 0) {
       throw new BadRequestException(`${String(field)} ${op} needs a value`);
     }
+    // Values reach the database typed, so a malformed one is refused here as a 400 rather
+    // than failing inside the query as a 500.
     if (spec.kind === 'numeric') {
+      const integer = 'integer' in spec && spec.integer === true;
       for (const v of cleaned) {
-        if (!Number.isFinite(Number(v))) {
+        const n = Number(v);
+        if (!Number.isFinite(n)) {
           throw new BadRequestException(
             `${String(field)} needs a numeric value`,
           );
         }
+        if (integer && (!Number.isInteger(n) || Math.abs(n) > MAX_INT)) {
+          throw new BadRequestException(
+            `${String(field)} needs a whole number`,
+          );
+        }
       }
+    }
+    if (
+      spec.kind === 'date' &&
+      cleaned.some((v) => Number.isNaN(Date.parse(v)))
+    ) {
+      throw new BadRequestException(`${String(field)} needs a valid date`);
+    }
+    if (
+      (spec.kind === 'user' || spec.kind === 'tags') &&
+      cleaned.some((v) => !UUID.test(v))
+    ) {
+      throw new BadRequestException(`${String(field)} needs valid ids`);
+    }
+    if (spec.kind === 'activity' && cleaned.some((v) => !activityKey(v))) {
+      throw new BadRequestException(
+        `${String(field)} must be Contacted or No Activity`,
+      );
     }
     return { field: field as string, operator: op, values: cleaned };
   });
@@ -232,43 +294,67 @@ function col(field: string, where: unknown): Prisma.LeadWhereInput {
   return { [field]: where } as Prisma.LeadWhereInput;
 }
 
-function textScalarWhere(
-  field: string,
-  op: LeadConditionOperator,
-  v: string[],
-) {
+/** A scalar column and whether it is NOT NULL (see `FieldSpec.required`). */
+type Scalar = { column: string; required?: true };
+
+/** Matches no lead — the empty-value operators on a NOT NULL number/date column. */
+const NOTHING: Prisma.LeadWhereInput = { id: { in: [] } };
+
+/** A negative match that keeps the leads with no value (see the header). */
+function orEmpty(
+  { column, required }: Scalar,
+  where: Prisma.LeadWhereInput,
+): Prisma.LeadWhereInput {
+  return required ? where : { OR: [where, col(column, null)] };
+}
+
+/** Empty for a string column: '' always, null too when the column allows it. */
+function emptyString({ column, required }: Scalar): Prisma.LeadWhereInput {
+  return required
+    ? col(column, '')
+    : { OR: [col(column, null), col(column, '')] };
+}
+
+function textScalarWhere(spec: Scalar, op: LeadConditionOperator, v: string[]) {
+  const field = spec.column;
+  const literal = escapeLike(v[0] ?? '');
   switch (op) {
     case 'is':
-      return col(field, { equals: v[0], ...insensitive });
+      return col(field, { equals: literal, ...insensitive });
     case 'isnt':
-      return { NOT: col(field, { equals: v[0], ...insensitive }) };
+      return orEmpty(spec, {
+        NOT: col(field, { equals: literal, ...insensitive }),
+      });
     case 'contains':
-      return col(field, { contains: v[0], ...insensitive });
+      return col(field, { contains: literal, ...insensitive });
     case 'doesntContain':
-      return { NOT: col(field, { contains: v[0], ...insensitive }) };
+      return orEmpty(spec, {
+        NOT: col(field, { contains: literal, ...insensitive }),
+      });
     case 'startsWith':
-      return col(field, { startsWith: v[0], ...insensitive });
+      return col(field, { startsWith: literal, ...insensitive });
     case 'endsWith':
-      return col(field, { endsWith: v[0], ...insensitive });
+      return col(field, { endsWith: literal, ...insensitive });
     case 'isEmpty':
-      return { OR: [col(field, null), col(field, '')] };
+      return emptyString(spec);
     case 'isNotEmpty':
-      return { AND: [col(field, { not: null }), col(field, { not: '' })] };
+      return { NOT: emptyString(spec) };
     default:
       return {};
   }
 }
 
 function numericScalarWhere(
-  field: string,
+  spec: Scalar,
   op: LeadConditionOperator,
   v: string[],
 ) {
+  const field = spec.column;
   switch (op) {
     case 'equals':
       return col(field, { equals: num(v, 0) });
     case 'notEquals':
-      return col(field, { not: num(v, 0) });
+      return orEmpty(spec, col(field, { not: num(v, 0) }));
     case 'lessThan':
       return col(field, { lt: num(v, 0) });
     case 'lessThanOrEqual':
@@ -280,32 +366,29 @@ function numericScalarWhere(
     case 'between':
       return col(field, { gte: num(v, 0), lte: num(v, 1) });
     case 'notBetween':
-      return {
+      return orEmpty(spec, {
         OR: [col(field, { lt: num(v, 0) }), col(field, { gt: num(v, 1) })],
-      };
+      });
     case 'isEmpty':
-      return col(field, null);
+      return spec.required ? NOTHING : col(field, null);
     case 'isNotEmpty':
-      return col(field, { not: null });
+      return spec.required ? {} : col(field, { not: null });
     default:
       return {};
   }
 }
 
-function enumScalarWhere(
-  field: string,
-  op: LeadConditionOperator,
-  v: string[],
-) {
+function enumScalarWhere(spec: Scalar, op: LeadConditionOperator, v: string[]) {
+  const field = spec.column;
   switch (op) {
     case 'is':
       return col(field, { in: v });
     case 'isnt':
-      return { NOT: col(field, { in: v }) };
+      return orEmpty(spec, { NOT: col(field, { in: v }) });
     case 'isEmpty':
-      return { OR: [col(field, null), col(field, '')] };
+      return emptyString(spec);
     case 'isNotEmpty':
-      return { AND: [col(field, { not: null }), col(field, { not: '' })] };
+      return { NOT: emptyString(spec) };
     default:
       return {};
   }
@@ -329,20 +412,17 @@ function dateComparison(
   }
 }
 
-function dateScalarWhere(
-  field: string,
-  op: LeadConditionOperator,
-  v: string[],
-) {
+function dateScalarWhere(spec: Scalar, op: LeadConditionOperator, v: string[]) {
+  const field = spec.column;
   switch (op) {
     case 'notBetween':
-      return {
+      return orEmpty(spec, {
         OR: [col(field, { lt: at(v, 0) }), col(field, { gte: at(v, 1) })],
-      };
+      });
     case 'isEmpty':
-      return col(field, null);
+      return spec.required ? NOTHING : col(field, null);
     case 'isNotEmpty':
-      return col(field, { not: null });
+      return spec.required ? {} : col(field, { not: null });
     default:
       return col(field, dateComparison(op, v));
   }
@@ -377,6 +457,12 @@ const ACTIVITY_WHERE: Record<string, Prisma.LeadWhereInput> = {
   noactivity: noEngagementWhere(),
 };
 
+/** The ACTIVITY_WHERE key a value names, case- and space-insensitively; undefined if none. */
+function activityKey(value: string): string | undefined {
+  const key = value.toLowerCase().replace(/\s+/g, '');
+  return key in ACTIVITY_WHERE ? key : undefined;
+}
+
 /**
  * "Activity is Contacted / No Activity" — the same predicates the Today Leads and No
  * Activity reports (and the ownership metrics) run, so a drill-down lands on exactly the
@@ -387,8 +473,9 @@ function activityWhere(
   v: string[],
 ): Prisma.LeadWhereInput {
   const picked = v
-    .map((value) => ACTIVITY_WHERE[value.toLowerCase().replace(/\s+/g, '')])
-    .filter((where): where is Prisma.LeadWhereInput => Boolean(where));
+    .map((value) => activityKey(value))
+    .filter((key): key is string => key !== undefined)
+    .map((key) => ACTIVITY_WHERE[key]);
   if (picked.length === 0) return {};
   const any = picked.length === 1 ? picked[0] : { OR: picked };
   return op === 'isnt' ? { NOT: any } : any;
@@ -443,17 +530,20 @@ function relationDateWhere(
     return { [relation]: { none: base } } as Prisma.LeadWhereInput;
   if (op === 'isNotEmpty')
     return { [relation]: { some: base } } as Prisma.LeadWhereInput;
-  const inner =
-    op === 'notBetween'
-      ? {
-          OR: [
-            { [relColumn]: { lt: at(v, 0) } },
-            { [relColumn]: { gte: at(v, 1) } },
-          ],
-        }
-      : { [relColumn]: dateComparison(op, v) };
+  // "Not between" means no row falls inside the range: a lead with one follow-up in it
+  // must not match through another outside it, and a lead with none at all does match,
+  // like every other negative operator here.
+  if (op === 'notBetween') {
+    return {
+      NOT: {
+        [relation]: {
+          some: { ...base, [relColumn]: { gte: at(v, 0), lt: at(v, 1) } },
+        },
+      },
+    };
+  }
   return {
-    [relation]: { some: { ...base, ...inner } },
+    [relation]: { some: { ...base, [relColumn]: dateComparison(op, v) } },
   } as Prisma.LeadWhereInput;
 }
 
@@ -466,6 +556,7 @@ function complaintsTextWhere(
   const base = { deletedAt: null };
   if (op === 'isEmpty') return { complaints: { none: base } };
   if (op === 'isNotEmpty') return { complaints: { some: base } };
+  const literal = escapeLike(v[0] ?? '');
   const match = (extra: object) => ({
     complaints: { some: { ...base, [relColumn]: extra } },
   });
@@ -474,17 +565,17 @@ function complaintsTextWhere(
   });
   switch (op) {
     case 'is':
-      return match({ equals: v[0], ...insensitive });
+      return match({ equals: literal, ...insensitive });
     case 'isnt':
-      return none({ equals: v[0], ...insensitive });
+      return none({ equals: literal, ...insensitive });
     case 'contains':
-      return match({ contains: v[0], ...insensitive });
+      return match({ contains: literal, ...insensitive });
     case 'doesntContain':
-      return none({ contains: v[0], ...insensitive });
+      return none({ contains: literal, ...insensitive });
     case 'startsWith':
-      return match({ startsWith: v[0], ...insensitive });
+      return match({ startsWith: literal, ...insensitive });
     case 'endsWith':
-      return match({ endsWith: v[0], ...insensitive });
+      return match({ endsWith: literal, ...insensitive });
     default:
       return {};
   }
@@ -511,13 +602,13 @@ export function leadConditionWhere(
       case 'activity':
         return activityWhere(c.operator, c.values);
       case 'text':
-        return textScalarWhere(spec.column, c.operator, c.values);
+        return textScalarWhere(spec, c.operator, c.values);
       case 'numeric':
-        return numericScalarWhere(spec.column, c.operator, c.values);
+        return numericScalarWhere(spec, c.operator, c.values);
       case 'date':
-        return dateScalarWhere(spec.column, c.operator, c.values);
+        return dateScalarWhere(spec, c.operator, c.values);
       case 'enum':
-        return enumScalarWhere(spec.column, c.operator, c.values);
+        return enumScalarWhere(spec, c.operator, c.values);
       default:
         return {};
     }

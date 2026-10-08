@@ -30,6 +30,7 @@ import {
   SetLeadStatusDto,
 } from './dto/row-actions.dto';
 import { LOST_STATUS } from '../lead-status.constants';
+import { firstStageName } from '../../stages/stages.service';
 
 /**
  * The scalar and relation fields a duplicate copies (LEAD-10.1 AC2, decided
@@ -284,11 +285,7 @@ export class LeadRowActionsService {
     });
     if (!target) throw new NotFoundException(OUT_OF_SCOPE_REASON);
 
-    const firstStage = await this.prisma.stage.findFirst({
-      where: { pipeline: dto.pipeline },
-      orderBy: { position: 'asc' },
-      select: { name: true },
-    });
+    const firstStage = await firstStageName(this.prisma, dto.pipeline);
     if (!firstStage) {
       throw new BadRequestException(
         `The “${dto.pipeline}” pipeline has no stages, so a lead can’t be moved into it.`,
@@ -302,7 +299,7 @@ export class LeadRowActionsService {
       (tx) =>
         tx.lead.update({
           where: { id },
-          data: { pipeline: dto.pipeline, status: firstStage.name },
+          data: { pipeline: dto.pipeline, status: firstStage },
           select: LEAD_LIST_SELECT,
         }),
     );

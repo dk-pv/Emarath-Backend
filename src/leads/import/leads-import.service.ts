@@ -145,9 +145,12 @@ export class LeadsImportService {
       createdBy: { connect: { id: user.id } },
     });
 
+    const defaultStatus = await this.descriptor.defaultStatus(dto.pipeline);
+
     // Background write — deliberately not awaited; the response returns the id now.
     void this.processJob(job.id, rows, {
       pipeline: dto.pipeline,
+      defaultStatus,
       user,
       jobId: job.id,
     });

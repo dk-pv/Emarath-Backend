@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '../../generated/prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { LeadAuditContext, recordLeadsCreated } from '../lead-audit';
+import { firstStageName } from '../../stages/stages.service';
 
 /** One import-ready lead: the create-many row plus, for a sales-agent import, the
  * assignment that keeps the lead inside the importer's scope. */
@@ -21,6 +22,10 @@ const LOOKUP_CHUNK = 1000;
 @Injectable()
 export class LeadsImportRepository {
   constructor(private readonly prisma: PrismaService) {}
+
+  firstStageName(pipeline: string): Promise<string | null> {
+    return firstStageName(this.prisma, pipeline);
+  }
 
   /**
    * The Primary Phone values already present on a non-deleted lead.

@@ -521,7 +521,7 @@ describe('PipelinesService.remove', () => {
     expect(remove).not.toHaveBeenCalled();
   });
 
-  it('counts only live leads', async () => {
+  it('counts archived leads too, so none is left on a deleted pipeline', async () => {
     const { service, findUnique, leadCount } = makeService();
     findUnique.mockResolvedValue({
       id: 'p2',
@@ -533,7 +533,7 @@ describe('PipelinesService.remove', () => {
     await service.remove('p2');
 
     expect(leadCount).toHaveBeenCalledWith({
-      where: { pipeline: 'QC', deletedAt: null },
+      where: { pipeline: 'QC' },
     });
   });
 

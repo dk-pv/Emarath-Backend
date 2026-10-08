@@ -33,7 +33,10 @@ export type AuditAction =
   | 'DISPATCHED'
   | 'DELIVERED'
   | 'CANCELLED'
-  | 'RTO';
+  | 'RTO'
+  // The Logistics Manager's correction of a dispatched order's tracking number (Q9). A
+  // correction of the order's data is the generic UPDATED.
+  | 'AWB_CORRECTED';
 
 /**
  * Who made a change. A person is identified by user id. An automation or an integration

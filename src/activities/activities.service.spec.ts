@@ -9,6 +9,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { GpsService } from '../gps/gps.service';
 import { SettingsService } from '../settings/settings.service';
 import { ActivitiesService, LOCATION_GATE_MESSAGE } from './activities.service';
+import { activityScopeWhere } from './activity-scope';
 import { CreateActivityDto } from './dto/create-activity.dto';
 
 const LEAD_ID = '11111111-1111-1111-1111-111111111111';
@@ -52,13 +53,27 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
   const activityCount = jest.fn();
   const activityFindFirst = jest.fn();
   const activityUpdate = jest.fn();
+  // Assignee access (ADR-0086): every id resolves to a live user who can open the lead,
+  // unless a test says otherwise.
+  const userFindMany = jest.fn((args: { where: { id: { in: string[] } } }) =>
+    Promise.resolve(
+      args.where.id.in.map((id) => ({
+        id,
+        name: `User ${id}`,
+        role: UserRole.SALES_AGENT,
+        team: null,
+      })),
+    ),
+  );
+  const leadCount = jest.fn().mockResolvedValue(1);
   // $transaction runs the ops array and resolves to the ops' return values —
   // exactly what the real client does, so the mocked findMany/count values flow
   // straight through.
   const $transaction = jest.fn((ops: unknown[]) => Promise.resolve(ops));
 
   const prisma = {
-    lead: { findFirst: leadFindFirst },
+    lead: { findFirst: leadFindFirst, count: leadCount },
+    user: { findMany: userFindMany },
     activity: {
       create: activityCreate,
       findMany: activityFindMany,
@@ -108,6 +123,8 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     activityUpdate,
     gpsHasValidCheckIn,
     gpsVerify,
+    userFindMany,
+    leadCount,
   };
 }
 
@@ -270,6 +287,49 @@ describe('ActivitiesService.create', () => {
     expect(ids).toContain(AGENT_ID);
   });
 
+  it('refuses an assignee who cannot open the lead, naming them (ADR-0086)', async () => {
+    const { service, leadFindFirst, activityCreate, leadCount } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID, name: 'Acme' });
+    leadCount.mockResolvedValue(0);
+
+    await expect(service.create(makeDto())).rejects.toThrow(
+      `User ${AGENT_ID} can't be assigned this follow-up: the lead is outside their access.`,
+    );
+    expect(activityCreate).not.toHaveBeenCalled();
+  });
+
+  it('checks each assignee against the lead with their own lead scope', async () => {
+    const { service, leadFindFirst, activityCreate, leadCount } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID, name: 'Acme' });
+    activityCreate.mockResolvedValue(activityRow());
+
+    await service.create(makeDto());
+
+    expect(leadCount).toHaveBeenCalledWith({
+      where: {
+        AND: [
+          {
+            deletedAt: null,
+            assignments: { some: { userId: AGENT_ID } },
+          },
+          { id: LEAD_ID },
+        ],
+      },
+    });
+  });
+
+  it('refuses an assignee id that is not a live user', async () => {
+    const { service, leadFindFirst, activityCreate, userFindMany } =
+      makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID, name: 'Acme' });
+    userFindMany.mockResolvedValue([]);
+
+    await expect(service.create(makeDto())).rejects.toThrow(
+      'One or more assignees do not exist.',
+    );
+    expect(activityCreate).not.toHaveBeenCalled();
+  });
+
   it('maps a bad assignee foreign key to a 400', async () => {
     const { service, leadFindFirst, activityCreate } = makeService();
     leadFindFirst.mockResolvedValue({ id: LEAD_ID, name: 'Acme' });
@@ -290,9 +350,8 @@ describe('ActivitiesService.list', () => {
   it('returns lead-joined rows, total and per-bucket counts', async () => {
     const { service, activityFindMany, activityCount } = makeService();
     activityFindMany.mockReturnValue([listRow()]);
-    // consumed in order: page total, then overdue/today/tomorrow/completed/all.
+    // consumed in order: overdue/today/tomorrow/completed/all.
     activityCount
-      .mockReturnValueOnce(1)
       .mockReturnValueOnce(5)
       .mockReturnValueOnce(2)
       .mockReturnValueOnce(3)
@@ -306,7 +365,9 @@ describe('ActivitiesService.list', () => {
       ...BOUNDS,
     });
 
-    expect(res.total).toBe(1);
+    // The active tab's count is the total — the footer and the badge are one number.
+    expect(res.total).toBe(14);
+    expect(res.overdueBefore).toBe(BOUNDS.todayStart);
     expect(res.counts).toEqual({
       overdue: 5,
       today: 2,
@@ -350,7 +411,7 @@ describe('ActivitiesService.list', () => {
     );
 
     // The badge counts read the same instant, so a tab cannot disagree with its count.
-    const counted = (activityCount.mock.calls as unknown[][])[1][0] as {
+    const counted = (activityCount.mock.calls as unknown[][])[0][0] as {
       where: { AND: { dueAt?: { lt?: Date } }[] };
     };
     expect(counted.where.AND.at(-1)?.dueAt?.lt).toEqual(cutoff);
@@ -385,10 +446,9 @@ describe('ActivitiesService.list', () => {
     const args = (activityFindMany.mock.calls as unknown[][])[0][0] as {
       where: { AND: unknown[] };
     };
-    expect(args.where.AND[0]).toEqual({
-      deletedAt: null,
-      assignees: { some: { userId: 'u1' } },
-    });
+    expect(args.where.AND[0]).toEqual(
+      activityScopeWhere({ id: 'u1', role: UserRole.SALES_AGENT }),
+    );
   });
 
   it('folds search + filters into the page query and the tab counts', async () => {
@@ -411,15 +471,15 @@ describe('ActivitiesService.list', () => {
     };
     // scope, search, assignee filter, status filter, then the bucket predicate.
     expect(page.where.AND).toEqual([
-      { deletedAt: null },
+      activityScopeWhere({ id: 'u1', role: UserRole.SUPERADMIN }),
       { OR: [{ lead: { name: { contains: 'acme', mode: 'insensitive' } } }] },
       { assignees: { some: { userId: { in: [AGENT_ID] } } } },
       { lead: { status: { in: ['New'] } } },
       {},
     ]);
     // Counts share the same base (everything but the bucket), so a badge counts
-    // the filtered set. First count call is the page total; the next is a bucket.
-    const bucketCount = (activityCount.mock.calls as unknown[][])[1][0] as {
+    // the filtered set.
+    const bucketCount = (activityCount.mock.calls as unknown[][])[0][0] as {
       where: { AND: unknown[] };
     };
     expect(bucketCount.where.AND).toHaveLength(4 + 1);
@@ -669,6 +729,65 @@ describe('ActivitiesService.update', () => {
       NotFoundException,
     );
     expect(activityUpdate).not.toHaveBeenCalled();
+  });
+
+  it('refuses an edit that hands the follow-up to someone without lead access', async () => {
+    const { service, activityFindFirst, activityUpdate, leadCount } =
+      makeService();
+    activityFindFirst.mockResolvedValue({
+      id: ACT_ID,
+      leadId: LEAD_ID,
+      locationId: null,
+      lead: { name: 'Acme' },
+    });
+    leadCount.mockResolvedValue(0);
+
+    await expect(service.update(ACT_ID, editDto())).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(activityUpdate).not.toHaveBeenCalled();
+  });
+
+  it('refuses a non-admin edit that drops a location-tied follow-up’s site', async () => {
+    const { service, activityFindFirst, activityUpdate } = makeService(
+      UserRole.SALES_AGENT,
+    );
+    activityFindFirst.mockResolvedValue({
+      id: ACT_ID,
+      leadId: LEAD_ID,
+      locationId: '44444444-4444-4444-4444-444444444444',
+      lead: { name: 'Acme' },
+    });
+
+    // The Call shape carries no location, so this edit would untie the gate.
+    await expect(service.update(ACT_ID, editDto())).rejects.toThrow(
+      'Only an administrator can change or remove the site of a location-tied follow-up.',
+    );
+    expect(activityUpdate).not.toHaveBeenCalled();
+  });
+
+  it('lets an administrator move a location-tied follow-up to another site', async () => {
+    const { service, activityFindFirst, activityUpdate } = makeService();
+    activityFindFirst.mockResolvedValue({
+      id: ACT_ID,
+      leadId: LEAD_ID,
+      locationId: '44444444-4444-4444-4444-444444444444',
+      lead: { name: 'Acme' },
+    });
+    activityUpdate.mockResolvedValue(
+      activityRow({ type: ActivityType.MEETING }),
+    );
+    const site = '55555555-5555-5555-5555-555555555555';
+
+    await service.update(
+      ACT_ID,
+      editDto({ type: ActivityType.MEETING, locationId: site }),
+    );
+
+    const args = (activityUpdate.mock.calls as unknown[][])[0][0] as {
+      data: { location: unknown };
+    };
+    expect(args.data.location).toEqual({ connect: { id: site } });
   });
 
   it('keeps a sales agent on their own activity', async () => {

@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { LEAD_EDIT_SELECT, LEAD_LIST_SELECT } from './dto/lead-response.dto';
 import { LeadSortColumn } from './dto/list-leads-query.dto';
 import { pinnedPageSlice } from './pinned-page';
+import { duplicatePhones } from './lead-where';
 
 export interface FindLeadsArgs {
   where: Prisma.LeadWhereInput;
@@ -144,6 +145,12 @@ export class LeadsRepository {
           },
         });
       }
+      // `lead` was read before the complaint changed; re-read so the row the list
+      // adopts shows the COMPLAINTS value just saved.
+      return tx.lead.findUniqueOrThrow({
+        where: { id },
+        select: LEAD_LIST_SELECT,
+      });
     }
 
     return lead;
@@ -212,16 +219,10 @@ export class LeadsRepository {
 
   /**
    * The primary phones held by more than one lead inside a scoped `where` — the
-   * "Duplicate Lead" search scope. Grouped in the database, so no lead set streams out
-   * to be compared here; the caller narrows its page to these phones.
+   * "Duplicate Lead" search scope (one grouped query, shared with the export).
    */
   async duplicatePhones(where: Prisma.LeadWhereInput): Promise<string[]> {
-    const groups = await this.prisma.lead.groupBy({
-      by: ['primaryPhone'],
-      where,
-      having: { primaryPhone: { _count: { gt: 1 } } },
-    });
-    return groups.map((group) => group.primaryPhone);
+    return duplicatePhones(this.prisma, where);
   }
 
   /** Pins a lead for one user (ADR-0031). Idempotent — re-pinning is a no-op. */

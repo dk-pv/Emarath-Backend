@@ -11,7 +11,11 @@ import { GpsService, type CheckInVerification } from '../gps/gps.service';
 import { SettingsService } from '../settings/settings.service';
 import { leadScopeWhere } from '../leads/lead-scope';
 import { activityScopeWhere } from './activity-scope';
-import { activityBucketWhere, DayBoundaries } from './activity-buckets';
+import {
+  activityBucketWhere,
+  DayBoundaries,
+  overdueCutoff,
+} from './activity-buckets';
 import { resolveOverdueRule } from './activity-overdue-rule';
 import { activityFilterWhere, activitySearchWhere } from './activity-filters';
 import {
@@ -108,6 +112,11 @@ export class ActivitiesService {
       }),
     );
 
+    // The one overdue rule, read from Settings → Activity and Reminders. The page, every
+    // tab count and the Overdue checkbox share it, so a badge can never disagree with the
+    // tab it labels.
+    const overdueRule = await resolveOverdueRule(this.settings);
+
     // The filter popup's quick-date checkboxes and its explicit From/To range.
     // Both sit in `base`, so they narrow the tab counts too — a badge keeps
     // counting exactly what its tab would show under the active filters (AC5).
@@ -121,17 +130,17 @@ export class ActivitiesService {
       monthStart: optional(query.monthStart),
       monthEnd: optional(query.monthEnd),
     };
-    const windows = activityDateWindowWhere(query.dateWindow, edges);
+    const windows = activityDateWindowWhere(
+      query.dateWindow,
+      edges,
+      overdueRule,
+    );
     if (windows) base.push(windows);
     const dueRange = activityDueRangeWhere(
       optional(query.dueFrom),
       optional(query.dueTo),
     );
     if (dueRange) base.push(dueRange);
-
-    // The one overdue rule, read from Settings → Activity and Reminders. The page and
-    // every tab count share it, so a badge can never disagree with the tab it labels.
-    const overdueRule = await resolveOverdueRule(this.settings);
 
     const where: Prisma.ActivityWhereInput = {
       AND: [
@@ -147,12 +156,12 @@ export class ActivitiesService {
         },
       });
 
-    // One transaction, not two: the page, its total and the five tab counts all
-    // read the same snapshot, and the request acquires a pooled connection once.
-    // Splitting the counts into a second transaction doubled the acquisitions per
-    // page load, which is what pushed concurrent callers past Prisma's transaction
-    // maxWait and returned a 500 on a perfectly valid request.
-    const [rows, total, overdue, today, tomorrow, completed, all] =
+    // One transaction, not two: the page and the five tab counts go out together,
+    // and the request acquires a pooled connection once. Splitting the counts into a
+    // second transaction doubled the acquisitions per page load, which is what pushed
+    // concurrent callers past Prisma's transaction maxWait and returned a 500 on a
+    // perfectly valid request.
+    const [rows, overdue, today, tomorrow, completed, all] =
       await this.prisma.$transaction([
         this.prisma.activity.findMany({
           where,
@@ -162,18 +171,22 @@ export class ActivitiesService {
           skip: (query.page - 1) * query.size,
           take: query.size,
         }),
-        this.prisma.activity.count({ where }),
         bucketCount('overdue'),
         bucketCount('today'),
         bucketCount('tomorrow'),
         bucketCount('completed'),
         bucketCount('all'),
       ]);
+    const counts = { overdue, today, tomorrow, completed, all };
 
     return {
       rows: rows.map(toActivityListItem),
-      total,
-      counts: { overdue, today, tomorrow, completed, all },
+      // The active tab's own count is its total, so the footer and the badge are one
+      // number (a separate count could land on a different snapshot).
+      total: counts[query.bucket],
+      counts,
+      // The instant the server called overdue, so row styling matches the tab.
+      overdueBefore: overdueCutoff(boundaries, overdueRule).toISOString(),
     };
   }
 
@@ -251,12 +264,32 @@ export class ActivitiesService {
 
     const activity = await this.prisma.activity.findFirst({
       where: { AND: [activityScopeWhere(user), { id }] },
-      select: { id: true, lead: { select: { name: true } } },
+      select: {
+        id: true,
+        leadId: true,
+        locationId: true,
+        lead: { select: { name: true } },
+      },
     });
     if (!activity) throw new NotFoundException(ACTIVITY_OUT_OF_SCOPE);
 
+    // A location-tied follow-up can only be completed after an on-site check-in
+    // (ACT-04.1 AC4). Letting its assignee drop or move the site in an edit would
+    // switch that gate off, so only an administrator may change it — the remedy the
+    // completion gate's own message points to.
+    if (
+      activity.locationId &&
+      dto.locationId !== activity.locationId &&
+      user.role !== UserRole.SUPERADMIN
+    ) {
+      throw new BadRequestException(
+        'Only an administrator can change or remove the site of a location-tied follow-up.',
+      );
+    }
+
     const assigneeIds = new Set(dto.assigneeIds);
     if (user.role === UserRole.SALES_AGENT) assigneeIds.add(user.id);
+    await this.assertAssigneesCanAccess(activity.leadId, assigneeIds);
 
     try {
       const updated = await this.prisma.activity.update({
@@ -367,6 +400,43 @@ export class ActivitiesService {
   }
 
   /**
+   * Every assignee must be able to open the follow-up's lead (ACT-06.1 AC5,
+   * ADR-0086). A follow-up is only visible through a lead its viewer may open, so
+   * an assignee outside the lead's scope — or in an operational role, which sees no
+   * lead at all — would hold a task they can never see. Refused with a 400 naming
+   * them; handing a lead's work to someone else is a lead reassignment. Each check
+   * reuses `leadScopeWhere` as that assignee, so it is the same rule the worklist
+   * applies to them.
+   */
+  private async assertAssigneesCanAccess(
+    leadId: string,
+    assigneeIds: Set<string>,
+  ): Promise<void> {
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: [...assigneeIds] }, deletedAt: null },
+      select: { id: true, name: true, role: true, team: true },
+    });
+    if (users.length !== assigneeIds.size) {
+      throw new BadRequestException('One or more assignees do not exist.');
+    }
+
+    const reachable = await Promise.all(
+      users.map((assignee) =>
+        this.prisma.lead.count({
+          where: { AND: [leadScopeWhere(assignee), { id: leadId }] },
+        }),
+      ),
+    );
+    const blocked = users.filter((_, index) => reachable[index] === 0);
+    if (blocked.length > 0) {
+      const names = blocked.map((assignee) => assignee.name).join(', ');
+      throw new BadRequestException(
+        `${names} can't be assigned this follow-up: the lead is outside their access.`,
+      );
+    }
+  }
+
+  /**
    * The type-conditional shape shared by create and edit (video / blueprint §9):
    * a Call carries neither an End Time nor a Location; an End Time must not
    * precede the Start Time.
@@ -413,6 +483,7 @@ export class ActivitiesService {
 
     const assigneeIds = new Set(dto.assigneeIds);
     if (user.role === UserRole.SALES_AGENT) assigneeIds.add(user.id);
+    await this.assertAssigneesCanAccess(lead.id, assigneeIds);
 
     try {
       const activity = await this.prisma.activity.create({

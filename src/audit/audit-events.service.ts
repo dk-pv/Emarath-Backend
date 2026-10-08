@@ -63,8 +63,8 @@ export class AuditEventsService {
    *
    * The lead scope comes first: a sales caller who can open the lead gets every event on it,
    * including the Logistics ones, which is the Lead → Logistics → Accounts timeline the client
-   * asked for. Failing that, the order scope is tried, which is how the Logistics roles reach a
-   * journey at all — they hold no sales access (ADR-0084), so they get their own record's
+   * asked for. Failing that, the order scope is tried, which is how the Logistics roles and QC
+   * reach a journey at all — they hold no sales access (ADR-0084), so they get their own record's
    * events and never the lead's. A lead the caller can reach by neither route is a 404 in the
    * same words the lead reads use, so this endpoint cannot be used to probe for leads.
    */

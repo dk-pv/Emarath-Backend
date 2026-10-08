@@ -695,6 +695,65 @@ describe('applyLeadChanges — the converted-lead guards', () => {
   });
 
   /*
+    The lock holds in QC NOT APPROVED too: while the order waits for the Sales Manager's
+    resubmit, Sales may not move the lead on themselves — not back to WON (which would bypass the
+    resubmit), not to any other stage, and not to another pipeline. Only the write-back may.
+  */
+  it.each([
+    ['back to WON', { status: 'WON' }],
+    ['to another stage', { status: 'HOT' }],
+    ['to another pipeline', { pipeline: 'LOGISTICS' }],
+  ] as const)(
+    'refuses moving a QC-rejected lead %s outside the Logistics write-back',
+    async (_label, change) => {
+      const { tx, createMany, createManyAndReturn } = makeTx(
+        [
+          [auditRow({ status: 'QC NOT APPROVED', pipeline: 'Lead Pipeline' })],
+          [
+            auditRow({
+              status: 'QC NOT APPROVED',
+              pipeline: 'Lead Pipeline',
+              ...change,
+            }),
+          ],
+        ],
+        [LEAD],
+      );
+
+      await expect(
+        applyLeadChanges(tx, [LEAD], context, () => Promise.resolve()),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(createMany).not.toHaveBeenCalled();
+      expect(createManyAndReturn).not.toHaveBeenCalled();
+    },
+  );
+
+  /*
+    Q2/Q3 (2026-10-01): after a QC rejection Sales corrects the lead, which sits in
+    `QC NOT APPROVED` with its order. The correction is an ordinary edit, so the guard lets it
+    through; only the status stays the Logistics workflow's.
+  */
+  it('lets Sales correct a QC-rejected lead while it waits to be resubmitted', async () => {
+    const { tx, createMany } = makeTx(
+      [
+        [auditRow({ status: 'QC NOT APPROVED', street: 'Old Rd' })],
+        [auditRow({ status: 'QC NOT APPROVED', street: 'Corniche Rd' })],
+      ],
+      [LEAD],
+    );
+
+    await applyLeadChanges(tx, [LEAD], context, change);
+
+    expect(recorded(createMany)).toMatchObject([
+      {
+        action: 'UPDATED',
+        before: { street: 'Old Rd' },
+        after: { street: 'Corniche Rd' },
+      },
+    ]);
+  });
+
+  /*
     Pinned as it stands: archiving is a soft delete of the lead, which the guard does not
     refuse, and it touches no order — there is no path that deletes one. Whether a converted
     lead should be archivable at all is still with the client.

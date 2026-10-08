@@ -15,7 +15,7 @@ import {
  * here — events are written by the change that caused them and never afterwards.
  *
  * `LOGISTICS_READ_ROLES` is the reader set an order already uses: every sales role (their own
- * leads only, enforced in the service) plus both Logistics roles. Accounts is not named, so
+ * leads only, enforced in the service) plus both Logistics roles and QC. Accounts is not named, so
  * ADR-0084's deny-by-default keeps it out until its own phase gives it a scope.
  */
 @Controller('audit/events')

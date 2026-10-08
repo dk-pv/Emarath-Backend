@@ -36,7 +36,16 @@ export const LEAD_EXPORT_SELECT = {
   callAttempts: true,
   whatsappAttempts: true,
   createdAt: true,
-  assignments: { select: { user: { select: { name: true } } } },
+  /** The same latest non-deleted complaint the list's COMPLAINTS cell shows. */
+  complaints: {
+    where: { deletedAt: null },
+    orderBy: { createdAt: 'desc' },
+    take: 1,
+    select: { details: true },
+  },
+  assignments: {
+    select: { createdAt: true, user: { select: { name: true } } },
+  },
   tags: { select: { tag: { select: { name: true } } } },
 } satisfies Prisma.LeadSelect;
 
@@ -76,6 +85,15 @@ function formatDate(date: Date): string {
  */
 const decimal = (value: Prisma.Decimal | null): string =>
   value?.toString() ?? '';
+
+/** The latest assignment — the list's "Assigned Date". */
+function assignedDate(row: LeadExportRow): string {
+  const latest = row.assignments.reduce<Date | null>(
+    (found, a) => (found === null || a.createdAt > found ? a.createdAt : found),
+    null,
+  );
+  return latest ? formatDate(latest) : '';
+}
 
 /**
  * Catalog order: the default (visible) columns first, in the Leads table's
@@ -137,12 +155,12 @@ export const EXPORT_COLUMNS: ExportColumn[] = [
   { key: 'product2', header: 'Product 2', value: (r) => r.product2 ?? '' },
   {
     key: 'product2Qty',
-    header: 'QTY of Product 2',
+    header: 'QTY OF PRODUCT 2',
     value: (r) => decimal(r.product2Qty),
   },
   {
     key: 'bookingDate',
-    header: 'Booking Date',
+    header: 'BOOKING DATE',
     value: (r) => (r.bookingDate ? formatDate(r.bookingDate) : ''),
   },
   {
@@ -152,7 +170,7 @@ export const EXPORT_COLUMNS: ExportColumn[] = [
   },
   { key: 'state', header: 'State', value: (r) => r.state ?? '' },
   { key: 'street', header: 'Street', value: (r) => r.street ?? '' },
-  { key: 'city', header: 'City', value: (r) => r.city ?? '' },
+  { key: 'city', header: 'CITY', value: (r) => r.city ?? '' },
   {
     key: 'nationalCode',
     header: 'National Code',
@@ -160,14 +178,20 @@ export const EXPORT_COLUMNS: ExportColumn[] = [
   },
   {
     key: 'callAttempts',
-    header: 'Call Attempts',
+    header: 'NO. OF CALL ATTEMPTS',
     value: (r) => String(r.callAttempts),
   },
   {
     key: 'whatsappAttempts',
-    header: 'WhatsApp Attempts',
+    header: 'NO. OF MSG ATTEMPTS',
     value: (r) => String(r.whatsappAttempts),
   },
+  {
+    key: 'complaints',
+    header: 'COMPLAINTS',
+    value: (r) => r.complaints[0]?.details ?? '',
+  },
+  { key: 'assignedDate', header: 'Assigned Date', value: assignedDate },
 ];
 
 const COLUMN_BY_KEY = new Map(

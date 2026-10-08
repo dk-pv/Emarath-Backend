@@ -2,96 +2,112 @@ import { LogisticsStatus, Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUser } from '../auth/current-user';
 import { leadScopeWhere } from '../leads/lead-scope';
 import { SALES_MODULE_ROLES } from '../auth/role-groups';
-import { LOGISTICS_TRANSITIONS, LogisticsAction } from './logistics-status';
+import {
+  LOGISTICS_TRANSITIONS,
+  LogisticsAction,
+  ORDER_EDIT_STATUSES,
+  OrderEdit,
+} from './logistics-status';
 
 /**
- * Who may do what to a Logistics order (client clarification of 2026-09-23, §"Logistics
- * permissions"). Enforced server-side with `@Roles()` on every route — the UI hiding a button
- * is not a permission (ADR-0084: RolesGuard admits an operational role only where it is named).
- *
- * The client named a "QC role" and a "Logistics Manager". The system has two logistics roles
- * (ADR-0084), so QC maps to **LOGISTICS_EXECUTIVE** and the shipment lifecycle to
- * **LOGISTICS_MANAGER**; that mapping is the one inference in this file and is recorded in
- * ADR-0085 for the client to confirm. SUPERADMIN keeps the existing administrative model.
+ * Who may do what to a Logistics order: the client clarification of 2026-10-01 (Q1, Q2, Q5,
+ * Q9), which replaces the provisional mapping recorded in ADR-0085. Enforced server-side with
+ * `@Roles()` on every route — the UI hiding a button is not a permission (ADR-0084: RolesGuard
+ * admits an operational role only where it is named). SUPERADMIN keeps the existing
+ * administrative model and is listed on every action.
  */
 
 /**
- * The QC routes' gate: QC verify and QC reject, and nothing else — QC cannot dispatch, deliver
- * or cancel. The role is the provisional inference described above, so both actions are withheld
- * (`WITHHELD_ACTIONS`): the routes stay gated, but nothing offers them.
+ * QC verifies or rejects an order and takes no other action (Q1). Confirmed by the client
+ * (Q11): QC is a dedicated role responsible only for verification. The Logistics Manager does
+ * not QC.
  */
-export const QC_ROLES: readonly UserRole[] = [
+export const QC_ROLES: readonly UserRole[] = [UserRole.QC, UserRole.SUPERADMIN];
+
+/** Dispatch, delivery and cancellation: both Logistics roles (Q1). */
+export const SHIPMENT_ROLES: readonly UserRole[] = [
+  UserRole.LOGISTICS_MANAGER,
   UserRole.LOGISTICS_EXECUTIVE,
   UserRole.SUPERADMIN,
 ];
 
 /**
- * Dispatch, delivery, cancellation and RTO. The resubmit route is gated here too, provisionally:
- * who resubmits is the open half of CD-2, so RESUBMIT is **withheld** — never offered by
- * `allowedActions` and called by no UI until the client answers. (It sits with the order's
- * lifecycle role rather than with Sales, who hold no Logistics mutation at all.)
+ * The Logistics Manager's own: editing a QC-verified order (Q5) and correcting an AWB after
+ * dispatch (Q9). RTO stays here as it was: Q1 gives the Executive Dispatch, Delivery and
+ * Cancel and says nothing about RTO, so the Executive is not given it — pending open client
+ * question Q14. If the Executive gets it, `ACTION_ROLES.RTO` becomes `SHIPMENT_ROLES`.
  */
-export const SHIPMENT_ROLES: readonly UserRole[] = [
+export const MANAGER_ROLES: readonly UserRole[] = [
   UserRole.LOGISTICS_MANAGER,
   UserRole.SUPERADMIN,
 ];
 
-/** Reading an order: the sales roles (their own leads only) plus both logistics roles. */
+/**
+ * Resubmitting a QC-rejected order once Sales has corrected the lead (Q1, Q2): the Sales
+ * Manager, on the orders of leads in their own scope only — the service reads the order
+ * through `logisticsOrderScopeWhere`, so a manager outside the team gets a 404. A sales agent
+ * (BDE) corrects the lead but is not named as a resubmitter — open client question Q18; a yes
+ * adds `UserRole.SALES_AGENT` here.
+ */
+export const RESUBMIT_ROLES: readonly UserRole[] = [
+  UserRole.SALES_MANAGER,
+  UserRole.SUPERADMIN,
+];
+
+/** Reading an order: the sales roles (their own leads only), both Logistics roles and QC. */
 export const LOGISTICS_READ_ROLES: readonly UserRole[] = [
   ...SALES_MODULE_ROLES,
   UserRole.LOGISTICS_MANAGER,
   UserRole.LOGISTICS_EXECUTIVE,
+  UserRole.QC,
 ];
+
+/** Everything a caller can do to an order: the status moves, and the two edits. */
+export type OrderAction = LogisticsAction | OrderEdit;
 
 /**
  * The roles each action's route admits. The controller's `@Roles()` reads this table, so a
  * route and the actions offered for it can never disagree about who may take them.
  */
-export const ACTION_ROLES: Readonly<
-  Record<LogisticsAction, readonly UserRole[]>
-> = {
-  QC_VERIFY: QC_ROLES,
-  QC_REJECT: QC_ROLES,
-  RESUBMIT: SHIPMENT_ROLES,
-  DISPATCH: SHIPMENT_ROLES,
-  DELIVER: SHIPMENT_ROLES,
-  CANCEL: SHIPMENT_ROLES,
-  RTO: SHIPMENT_ROLES,
-};
+export const ACTION_ROLES: Readonly<Record<OrderAction, readonly UserRole[]>> =
+  {
+    QC_VERIFY: QC_ROLES,
+    QC_REJECT: QC_ROLES,
+    RESUBMIT: RESUBMIT_ROLES,
+    DISPATCH: SHIPMENT_ROLES,
+    DELIVER: SHIPMENT_ROLES,
+    CANCEL: SHIPMENT_ROLES,
+    RTO: MANAGER_ROLES,
+    EDIT: MANAGER_ROLES,
+    CORRECT_AWB: MANAGER_ROLES,
+  };
 
-/**
- * Actions whose endpoint still works, gated exactly as before, but which `allowedActions`
- * never offers, because who should take them is still with the client: which role performs QC
- * (the Executive mapping above is an inference awaiting confirmation), and who resubmits a
- * rejected order — together with whether that resubmit refreshes the order from the corrected
- * lead. Offering them would turn an unconfirmed guess into a button. When the client answers,
- * this list shrinks and `ACTION_ROLES` changes, here and nowhere else.
- */
-export const WITHHELD_ACTIONS: readonly LogisticsAction[] = [
-  'QC_VERIFY',
-  'QC_REJECT',
-  'RESUBMIT',
-];
+/** The statuses an action may be taken from: a move's sources, or an edit's statuses. */
+export function actionStatuses(
+  action: OrderAction,
+): readonly LogisticsStatus[] {
+  return action === 'EDIT' || action === 'CORRECT_AWB'
+    ? ORDER_EDIT_STATUSES[action]
+    : LOGISTICS_TRANSITIONS[action].from;
+}
 
 /**
  * What the caller may do to an order in `status` right now — advisory, for the UI to render,
  * never a permission: each route's `@Roles()` and the conditional update in the service stay
  * the authority, and this can only ever be a subset of what they accept.
  *
- * An action is offered when all three hold: the transition table allows it from this status,
- * the caller's role is one its route admits, and it is not withheld. Nothing else is consulted
- * and nothing is special-cased — SUPERADMIN gets what the tables give it, not a bypass.
- * Visibility needs no check of its own: an order reaches a caller only through their scope,
- * and every role an action admits already reads every order.
+ * An action is offered when both hold: it may be taken from this status, and the caller's role
+ * is one its route admits. Nothing else is consulted and nothing is special-cased — SUPERADMIN
+ * gets what the tables give it, not a bypass. Visibility needs no check of its own: an order
+ * reaches a caller only through their scope.
  */
 export function allowedActions(
   status: LogisticsStatus,
   role: UserRole,
-): LogisticsAction[] {
-  return (Object.keys(LOGISTICS_TRANSITIONS) as LogisticsAction[]).filter(
+): OrderAction[] {
+  return (Object.keys(ACTION_ROLES) as OrderAction[]).filter(
     (action) =>
-      !WITHHELD_ACTIONS.includes(action) &&
-      LOGISTICS_TRANSITIONS[action].from.includes(status) &&
+      actionStatuses(action).includes(status) &&
       ACTION_ROLES[action].includes(role),
   );
 }
@@ -100,7 +116,7 @@ export function allowedActions(
  * The orders a caller may read, as a query fragment (CLAUDE.md §8 — scope belongs in the
  * query, never in the UI).
  *
- * Logistics works every order, so its two roles and the admin are unrestricted. A sales caller
+ * Logistics works every order, so its two roles, QC and the admin are unrestricted. A sales caller
  * sees an order only when its lead is one they can already see, which reuses `leadScopeWhere`
  * verbatim: a sales agent reads their own converted leads' orders and no one else's. Any other
  * role (Accounts today) matches nothing, so a route opened to it by mistake still returns none.
@@ -112,6 +128,7 @@ export function logisticsOrderScopeWhere(
     case UserRole.SUPERADMIN:
     case UserRole.LOGISTICS_MANAGER:
     case UserRole.LOGISTICS_EXECUTIVE:
+    case UserRole.QC:
       return {};
 
     case UserRole.SALES_MANAGER:

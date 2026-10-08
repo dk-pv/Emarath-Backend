@@ -50,6 +50,7 @@ describe('importJobScopeWhere (AUTH-02.1)', () => {
     UserRole.LOGISTICS_MANAGER,
     UserRole.LOGISTICS_EXECUTIVE,
     UserRole.ACCOUNTS_EXECUTIVE,
+    UserRole.QC,
   ])('gives %s no import job (ADR-0084)', (role) => {
     expect(importJobScopeWhere({ id: 'u1', role })).toEqual({
       deletedAt: null,

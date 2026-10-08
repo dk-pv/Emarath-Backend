@@ -5,13 +5,15 @@ import { LogisticsStatus, UserRole } from '../generated/prisma/client';
 import { CurrentUser } from '../auth/current-user';
 import { RolesGuard } from '../auth/roles.guard';
 import { LogisticsOrdersController } from './logistics-orders.controller';
-import { LOGISTICS_TRANSITIONS, LogisticsAction } from './logistics-status';
 import {
   ACTION_ROLES,
   LOGISTICS_READ_ROLES,
+  MANAGER_ROLES,
+  OrderAction,
   QC_ROLES,
+  RESUBMIT_ROLES,
   SHIPMENT_ROLES,
-  WITHHELD_ACTIONS,
+  actionStatuses,
   allowedActions,
   logisticsOrderScopeWhere,
 } from './logistics-roles';
@@ -19,31 +21,45 @@ import {
 const user = (role: UserRole): CurrentUser => ({ id: 'u1', role, team: null });
 
 /**
- * The client's permission split, kept in one readable place. The route matrix
- * (`operational-roles.integration.spec.ts`) proves these lists are the ones actually on the
- * routes; this proves the lists say what the client asked for.
+ * The client's permission split (clarification of 2026-10-01), kept in one readable place.
+ * The route matrix (`operational-roles.integration.spec.ts`) proves these lists are the ones
+ * actually on the routes; this proves the lists say what the client asked for.
  */
 describe('the Logistics permission split', () => {
-  it('gives QC the checks and nothing else', () => {
-    expect([...QC_ROLES]).toEqual([
+  it('gives QC the checks and nothing else (Q1)', () => {
+    expect([...QC_ROLES]).toEqual([UserRole.QC, UserRole.SUPERADMIN]);
+    for (const roles of [SHIPMENT_ROLES, MANAGER_ROLES, RESUBMIT_ROLES]) {
+      expect(roles).not.toContain(UserRole.QC);
+    }
+  });
+
+  it('lets both Logistics roles dispatch, deliver and cancel (Q1)', () => {
+    expect([...SHIPMENT_ROLES]).toEqual([
+      UserRole.LOGISTICS_MANAGER,
       UserRole.LOGISTICS_EXECUTIVE,
       UserRole.SUPERADMIN,
     ]);
-    expect(QC_ROLES).not.toContain(UserRole.LOGISTICS_MANAGER);
-    expect(QC_ROLES).not.toContain(UserRole.SALES_AGENT);
   });
 
-  it('gives the Logistics Manager the shipment lifecycle and no QC decision', () => {
-    expect([...SHIPMENT_ROLES]).toEqual([
+  it('keeps RTO, the order edit and the AWB correction with the Logistics Manager (Q5, Q9)', () => {
+    expect([...MANAGER_ROLES]).toEqual([
       UserRole.LOGISTICS_MANAGER,
       UserRole.SUPERADMIN,
     ]);
-    expect(SHIPMENT_ROLES).not.toContain(UserRole.LOGISTICS_EXECUTIVE);
+    expect(MANAGER_ROLES).not.toContain(UserRole.LOGISTICS_EXECUTIVE);
   });
 
-  it('lets Sales read, and keeps Accounts out until its own phase', () => {
+  it('lets the Sales Manager resubmit, and no other sales role (Q1)', () => {
+    expect([...RESUBMIT_ROLES]).toEqual([
+      UserRole.SALES_MANAGER,
+      UserRole.SUPERADMIN,
+    ]);
+  });
+
+  it('lets Sales and QC read, and keeps Accounts out until its own phase', () => {
     expect(LOGISTICS_READ_ROLES).toContain(UserRole.SALES_AGENT);
     expect(LOGISTICS_READ_ROLES).toContain(UserRole.SALES_MANAGER);
+    expect(LOGISTICS_READ_ROLES).toContain(UserRole.QC);
     expect(LOGISTICS_READ_ROLES).not.toContain(UserRole.ACCOUNTS_EXECUTIVE);
   });
 });
@@ -53,6 +69,7 @@ describe('logisticsOrderScopeWhere', () => {
     UserRole.SUPERADMIN,
     UserRole.LOGISTICS_MANAGER,
     UserRole.LOGISTICS_EXECUTIVE,
+    UserRole.QC,
   ])('leaves %s unrestricted — Logistics works every order', (role) => {
     expect(logisticsOrderScopeWhere(user(role))).toEqual({});
   });
@@ -85,9 +102,6 @@ describe('logisticsOrderScopeWhere', () => {
     expect(logisticsOrderScopeWhere(user(UserRole.LOGISTICS_MANAGER))).toEqual(
       {},
     );
-    expect(
-      logisticsOrderScopeWhere(user(UserRole.LOGISTICS_EXECUTIVE)),
-    ).toEqual({});
   });
 
   it('matches nothing for a role with no Logistics business', () => {
@@ -99,105 +113,95 @@ describe('logisticsOrderScopeWhere', () => {
 
 const ALL_STATUSES = Object.values(LogisticsStatus);
 const ALL_ROLES = Object.values(UserRole);
-const ALL_ACTIONS = Object.keys(LOGISTICS_TRANSITIONS) as LogisticsAction[];
+const ALL_ACTIONS = Object.keys(ACTION_ROLES) as OrderAction[];
 
-/*
-  The client-confirmed shipment lifecycle, per status, for a role that holds every confirmed
-  permission. The QC and resubmit steps are empty on purpose: those actions are withheld until
-  the client says who takes them (WITHHELD_ACTIONS).
-*/
-const BY_STATUS: [LogisticsStatus, LogisticsAction[]][] = [
-  [LogisticsStatus.INITIAL, []],
-  [LogisticsStatus.QC_REJECTED, []],
-  [LogisticsStatus.QC_VERIFIED, ['DISPATCH']],
-  [LogisticsStatus.DISPATCHED, ['DELIVER', 'CANCEL', 'RTO']],
-  [LogisticsStatus.DELIVERED, []],
-  [LogisticsStatus.CANCELLED, []],
-  [LogisticsStatus.RTO, []],
-];
+const S = LogisticsStatus;
 
-describe('allowedActions — by status', () => {
-  it('has a row for every status, so a new one cannot slip in undecided', () => {
-    expect(BY_STATUS.map(([status]) => status).sort()).toEqual(
-      [...ALL_STATUSES].sort(),
-    );
+/** What each role is offered, status by status. Anything not listed is offered nothing. */
+const BY_ROLE: Partial<
+  Record<UserRole, Partial<Record<LogisticsStatus, OrderAction[]>>>
+> = {
+  [UserRole.QC]: { [S.INITIAL]: ['QC_VERIFY', 'QC_REJECT'] },
+  [UserRole.LOGISTICS_MANAGER]: {
+    [S.QC_VERIFIED]: ['DISPATCH', 'EDIT'],
+    [S.DISPATCHED]: ['DELIVER', 'CANCEL', 'RTO', 'CORRECT_AWB'],
+    [S.DELIVERED]: ['CORRECT_AWB'],
+    [S.CANCELLED]: ['CORRECT_AWB'],
+    [S.RTO]: ['CANCEL', 'CORRECT_AWB'],
+  },
+  [UserRole.LOGISTICS_EXECUTIVE]: {
+    [S.QC_VERIFIED]: ['DISPATCH'],
+    [S.DISPATCHED]: ['DELIVER', 'CANCEL'],
+    [S.RTO]: ['CANCEL'],
+  },
+  [UserRole.SALES_MANAGER]: { [S.QC_REJECTED]: ['RESUBMIT'] },
+};
+
+describe('allowedActions — by role and status', () => {
+  it.each(
+    ALL_ROLES.filter((role) => role !== UserRole.SUPERADMIN).flatMap((role) =>
+      ALL_STATUSES.map((status): [UserRole, LogisticsStatus] => [role, status]),
+    ),
+  )('%s on a %s order', (role, status) => {
+    expect(allowedActions(status, role)).toEqual(BY_ROLE[role]?.[status] ?? []);
   });
 
-  it.each(BY_STATUS)(
-    '%s offers the Logistics Manager %j',
-    (status, expected) => {
-      expect(allowedActions(status, UserRole.LOGISTICS_MANAGER)).toEqual(
-        expected,
-      );
-    },
-  );
-
-  it('gives SUPERADMIN what the same tables give it — no bypass of its own', () => {
+  it('gives SUPERADMIN every action the tables allow from each status — no bypass of its own', () => {
     for (const status of ALL_STATUSES) {
       expect(allowedActions(status, UserRole.SUPERADMIN)).toEqual(
-        allowedActions(status, UserRole.LOGISTICS_MANAGER),
+        ALL_ACTIONS.filter((action) => actionStatuses(action).includes(status)),
       );
-    }
-  });
-});
-
-describe('allowedActions — by role', () => {
-  it.each([
-    UserRole.SALES_MANAGER,
-    UserRole.SALES_AGENT,
-    UserRole.CUSTOMER_SERVICE_AGENT,
-    UserRole.MARKETING_ANALYST,
-  ])('offers %s nothing: reading an order is not acting on it', (role) => {
-    for (const status of ALL_STATUSES) {
-      expect(allowedActions(status, role)).toEqual([]);
-    }
-  });
-
-  // Its only routes are the QC checks, which are withheld until the client names the QC role.
-  it('offers the Logistics Executive nothing while QC is withheld', () => {
-    for (const status of ALL_STATUSES) {
-      expect(allowedActions(status, UserRole.LOGISTICS_EXECUTIVE)).toEqual([]);
-    }
-  });
-
-  it('offers Accounts nothing', () => {
-    for (const status of ALL_STATUSES) {
-      expect(allowedActions(status, UserRole.ACCOUNTS_EXECUTIVE)).toEqual([]);
     }
   });
 });
 
 describe('allowedActions — never offers what the confirmed rules forbid', () => {
-  const offeredAnywhere = (action: LogisticsAction, status: LogisticsStatus) =>
+  const offeredAnywhere = (action: OrderAction, status: LogisticsStatus) =>
     ALL_ROLES.some((role) => allowedActions(status, role).includes(action));
   const except = (...kept: LogisticsStatus[]) =>
     ALL_STATUSES.filter((status) => !kept.includes(status));
 
-  it.each(except(LogisticsStatus.DISPATCHED))(
-    'offers no one CANCEL, DELIVER or RTO from %s',
+  it.each(except(S.DISPATCHED))(
+    'offers no one DELIVER or RTO from %s',
     (status) => {
-      // CD-3: no cancel before dispatch. CD-4: RTO only from DISPATCHED — so never before
-      // it, never again after RTO, and not from DELIVERED, which stays with the client.
-      for (const action of ['CANCEL', 'DELIVER', 'RTO'] as const) {
-        expect(offeredAnywhere(action, status)).toBe(false);
-      }
+      expect(offeredAnywhere('DELIVER', status)).toBe(false);
+      expect(offeredAnywhere('RTO', status)).toBe(false);
     },
   );
 
-  it.each(except(LogisticsStatus.QC_VERIFIED))(
-    'offers no one DISPATCH from %s',
+  // CD-3: no cancel before dispatch. Q6: an RTO order is closed by cancelling it.
+  it.each(except(S.DISPATCHED, S.RTO))(
+    'offers no one CANCEL from %s',
+    (status) => {
+      expect(offeredAnywhere('CANCEL', status)).toBe(false);
+    },
+  );
+
+  it.each(except(S.QC_VERIFIED))(
+    'offers no one DISPATCH or the order edit from %s',
     (status) => {
       expect(offeredAnywhere('DISPATCH', status)).toBe(false);
+      expect(offeredAnywhere('EDIT', status)).toBe(false);
     },
   );
 
-  it('offers no one a QC decision or a resubmit, whatever the role or status', () => {
-    for (const status of ALL_STATUSES) {
-      for (const action of ['QC_VERIFY', 'QC_REJECT', 'RESUBMIT'] as const) {
-        expect(offeredAnywhere(action, status)).toBe(false);
-      }
-    }
-  });
+  it.each([S.INITIAL, S.QC_VERIFIED, S.QC_REJECTED])(
+    'offers no one an AWB correction before dispatch (%s)',
+    (status) => {
+      expect(offeredAnywhere('CORRECT_AWB', status)).toBe(false);
+    },
+  );
+
+  // Q8: once cancelled, no further status. Delivered stays terminal too.
+  it.each([S.CANCELLED, S.DELIVERED])(
+    'offers no one a status move from %s',
+    (status) => {
+      const moves = ALL_ROLES.flatMap((role) =>
+        allowedActions(status, role),
+      ).filter((action) => action !== 'CORRECT_AWB');
+      expect(moves).toEqual([]);
+    },
+  );
 });
 
 /*
@@ -208,7 +212,7 @@ describe('allowedActions — never offers what the confirmed rules forbid', () =
 */
 describe('allowedActions — agrees with the routes that enforce them', () => {
   const guard = new RolesGuard(new Reflector());
-  const HANDLER: Record<LogisticsAction, keyof LogisticsOrdersController> = {
+  const HANDLER: Record<OrderAction, keyof LogisticsOrdersController> = {
     QC_VERIFY: 'qcVerify',
     QC_REJECT: 'qcReject',
     RESUBMIT: 'resubmit',
@@ -216,9 +220,11 @@ describe('allowedActions — agrees with the routes that enforce them', () => {
     DELIVER: 'deliver',
     CANCEL: 'cancel',
     RTO: 'rto',
+    EDIT: 'edit',
+    CORRECT_AWB: 'correctAwb',
   };
 
-  function routeAdmits(action: LogisticsAction, role: UserRole): boolean {
+  function routeAdmits(action: OrderAction, role: UserRole): boolean {
     const handler = LogisticsOrdersController.prototype[HANDLER[action]];
     const context = {
       getHandler: () => handler,
@@ -235,16 +241,15 @@ describe('allowedActions — agrees with the routes that enforce them', () => {
     }
   }
 
-  it('offers an action exactly where its route admits the role and the table allows the move — bar the withheld', () => {
+  it('offers an action exactly where its route admits the role and the status allows it', () => {
     let offered = 0;
     for (const role of ALL_ROLES) {
       for (const status of ALL_STATUSES) {
         const actions = allowedActions(status, role);
         for (const action of ALL_ACTIONS) {
-          const possible =
+          const expected =
             routeAdmits(action, role) &&
-            LOGISTICS_TRANSITIONS[action].from.includes(status);
-          const expected = possible && !WITHHELD_ACTIONS.includes(action);
+            actionStatuses(action).includes(status);
           expect({
             role,
             status,
@@ -255,30 +260,39 @@ describe('allowedActions — agrees with the routes that enforce them', () => {
         }
       }
     }
-    // The check above is not vacuous: the Manager and the admin each get DISPATCH once and
-    // DELIVER, CANCEL and RTO once — eight offers across the whole matrix.
-    expect(offered).toBe(8);
+    // Not vacuous: QC 2×1 each for verify and reject, resubmit 2, dispatch 3, deliver 3,
+    // cancel 3 roles × 2 statuses, RTO 2, edit 2, AWB correction 2 roles × 4 statuses.
+    expect(offered).toBe(30);
   });
 
-  it('withholds exactly the actions whose taker the client has not confirmed', () => {
-    expect([...WITHHELD_ACTIONS].sort()).toEqual([
-      'QC_REJECT',
-      'QC_VERIFY',
-      'RESUBMIT',
-    ]);
-  });
-
-  it('leaves the withheld routes gated exactly as before — withheld is not refused', () => {
+  it('gates every route by the one table', () => {
     expect(ACTION_ROLES).toEqual({
       QC_VERIFY: QC_ROLES,
       QC_REJECT: QC_ROLES,
-      RESUBMIT: SHIPMENT_ROLES,
+      RESUBMIT: RESUBMIT_ROLES,
       DISPATCH: SHIPMENT_ROLES,
       DELIVER: SHIPMENT_ROLES,
       CANCEL: SHIPMENT_ROLES,
-      RTO: SHIPMENT_ROLES,
+      RTO: MANAGER_ROLES,
+      EDIT: MANAGER_ROLES,
+      CORRECT_AWB: MANAGER_ROLES,
     });
-    expect(routeAdmits('QC_VERIFY', UserRole.LOGISTICS_EXECUTIVE)).toBe(true);
-    expect(routeAdmits('RESUBMIT', UserRole.LOGISTICS_MANAGER)).toBe(true);
+  });
+
+  it.each([
+    ['QC_VERIFY', UserRole.QC, true],
+    ['DISPATCH', UserRole.QC, false],
+    ['DELIVER', UserRole.QC, false],
+    ['CANCEL', UserRole.QC, false],
+    ['RTO', UserRole.QC, false],
+    ['EDIT', UserRole.QC, false],
+    ['DISPATCH', UserRole.LOGISTICS_EXECUTIVE, true],
+    ['EDIT', UserRole.LOGISTICS_EXECUTIVE, false],
+    ['CORRECT_AWB', UserRole.LOGISTICS_EXECUTIVE, false],
+    ['RESUBMIT', UserRole.SALES_MANAGER, true],
+    ['RESUBMIT', UserRole.SALES_AGENT, false],
+    ['QC_VERIFY', UserRole.LOGISTICS_MANAGER, false],
+  ] as const)('the %s route admits %s: %s', (action, role, admitted) => {
+    expect(routeAdmits(action, role)).toBe(admitted);
   });
 });

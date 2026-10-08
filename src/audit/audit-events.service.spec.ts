@@ -263,6 +263,7 @@ describe('AuditEventsService authorization', () => {
     },
     { role: UserRole.LOGISTICS_MANAGER, lead: NO_LEADS, order: {} },
     { role: UserRole.LOGISTICS_EXECUTIVE, lead: NO_LEADS, order: {} },
+    { role: UserRole.QC, lead: NO_LEADS, order: {} },
     {
       role: UserRole.ACCOUNTS_EXECUTIVE,
       lead: NO_LEADS,
@@ -300,9 +301,13 @@ describe('AuditEventsService authorization', () => {
     order they work, and then read that order's own events — never the lead's, which carry the
     sales data the guard and the scope helpers keep from them.
   */
-  it('gives a Logistics role its order’s events and none of the lead’s', async () => {
+  it.each([
+    UserRole.LOGISTICS_MANAGER,
+    UserRole.LOGISTICS_EXECUTIVE,
+    UserRole.QC,
+  ])('gives %s its order’s events and none of the lead’s', async (role) => {
     const { service, findMany } = makeService({
-      role: UserRole.LOGISTICS_MANAGER,
+      role,
       lead: false,
       order: true,
     });

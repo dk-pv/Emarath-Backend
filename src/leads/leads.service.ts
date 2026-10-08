@@ -20,7 +20,8 @@ import { auditLeadChanges, recordLeadsCreated } from './lead-audit';
 
 import { LeadsRepository } from './leads.repository';
 import { leadScopeWhere } from './lead-scope';
-import { buildLeadWhere } from './lead-where';
+import { buildLeadWhere, withSearchScope } from './lead-where';
+import { firstStageName } from '../stages/stages.service';
 import {
   LeadActivity,
   LeadEditData,
@@ -249,7 +250,7 @@ export class LeadsService {
       language: dto.language ?? null,
       country: dto.country ?? null,
       source: dto.source ?? null,
-      status: dto.status || 'New',
+      status: await this.defaultStatus(dto),
       pipeline: dto.pipeline || 'Lead Pipeline',
       product: dto.product ?? null,
       productQty: dto.productQty ?? null,
@@ -431,7 +432,7 @@ export class LeadsService {
       language: dto.language ?? null,
       country: dto.country ?? null,
       source: dto.source ?? null,
-      status: dto.status || 'New',
+      status: await this.defaultStatus(dto),
       pipeline: dto.pipeline || 'Lead Pipeline',
       product: dto.product ?? null,
       productQty: dto.productQty ?? null,
@@ -569,20 +570,26 @@ export class LeadsService {
   }
 
   /**
-   * The list's `where`, narrowed for the "Duplicate Lead" search scope to leads whose
-   * primary phone another lead also holds. Duplicates are judged across the caller's
-   * whole scoped set — not only the rows the search term matches — so a search inside
-   * the scope still finds a lead whose twin carries a different name.
+   * The status a lead is saved with: the one given, else its pipeline's first stage —
+   * so a lead created on any board lands in that board's first column — else 'New'
+   * (a pipeline with no stages yet).
    */
-  private async listWhere(
+  private async defaultStatus(dto: {
+    status?: string;
+    pipeline?: string;
+  }): Promise<string> {
+    if (dto.status) return dto.status;
+    const pipeline = dto.pipeline || 'Lead Pipeline';
+    return (await firstStageName(this.prisma, pipeline)) ?? 'New';
+  }
+
+  /** The list's `where`, with the "Duplicate Lead" search scope applied (`withSearchScope`). */
+  private listWhere(
     user: CurrentUser,
     query: ListLeadsQueryDto,
   ): Promise<Prisma.LeadWhereInput> {
-    const where = this.buildWhere(user, query);
-    if (query.searchScope !== 'duplicate') return where;
-    const phones = await this.repository.duplicatePhones(
-      buildLeadWhere(user, { archived: query.archived }),
+    return withSearchScope(user, query, this.buildWhere(user, query), (scope) =>
+      this.repository.duplicatePhones(scope),
     );
-    return { AND: [where, { primaryPhone: { in: phones } }] };
   }
 }
