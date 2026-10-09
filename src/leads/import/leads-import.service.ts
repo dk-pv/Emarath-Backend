@@ -6,14 +6,18 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '../../generated/prisma/client';
 import { CurrentUserService } from '../../auth/current-user';
-import { EvaluatedRow, RowError } from '../../common/import/import-descriptor';
+import {
+  EvaluatedRow,
+  ImportField,
+  RowError,
+} from '../../common/import/import-descriptor';
 import { ImportEngineService } from '../../common/import/import-engine.service';
+import { SampleFormat, buildSampleFile } from '../../common/import/sample-file';
 import { parseSpreadsheet } from '../../common/import/spreadsheet-parser';
 import {
   LeadsImportContext,
   LeadsImportDescriptor,
 } from './leads-import.descriptor';
-import { LEADS_REQUIRED_FIELDS } from './leads-import.fields';
 import {
   ImportJobRepository,
   resolveHistoryLimit,
@@ -69,7 +73,7 @@ export class LeadsImportService {
     await this.currentUser.resolve();
     const sheet = await parseSpreadsheet(file);
 
-    const preview = sheet.rows.slice(0, PREVIEW_LIMIT).map((cells) => {
+    const preview = sheet.rows.slice(0, PREVIEW_LIMIT).map(({ cells }) => {
       const row: Record<string, string> = {};
       sheet.headers.forEach((header, index) => {
         row[header] = cells[index] ?? '';
@@ -80,6 +84,16 @@ export class LeadsImportService {
     return { columns: sheet.headers, preview, totalRows: sheet.rows.length };
   }
 
+  /** The import template, generated from the field catalog the importer validates against. */
+  async sample(format: SampleFormat): Promise<Buffer> {
+    await this.currentUser.resolve();
+    return buildSampleFile(
+      this.descriptor.fields,
+      await this.descriptor.sampleRows(),
+      format,
+    );
+  }
+
   async validate(
     file: UploadedFile,
     dto: ImportBodyDto,
@@ -87,17 +101,25 @@ export class LeadsImportService {
     await this.currentUser.resolve();
     const sheet = await parseSpreadsheet(file);
     const mapping = this.parseMapping(dto.mapping);
-    this.assertRequiredMapped(mapping);
+    this.assertMapping(mapping);
+    const run = await this.descriptor.prepare(dto.pipeline);
 
     const { rows, summary } = await this.engine.evaluate(
       sheet,
       mapping,
       this.descriptor,
+      run.fields,
     );
+
+    // Rows that need attention first, so the bounded window always shows them.
+    const window = [
+      ...rows.filter((row) => row.status !== 'valid'),
+      ...rows.filter((row) => row.status === 'valid'),
+    ].slice(0, VALIDATE_ROW_LIMIT);
 
     return {
       ...summary,
-      rows: rows.slice(0, VALIDATE_ROW_LIMIT).map((row) => ({
+      rows: window.map((row) => ({
         rowNumber: row.rowNumber,
         values: row.values,
         status: row.status,
@@ -113,16 +135,14 @@ export class LeadsImportService {
     const user = await this.currentUser.resolve();
     const sheet = await parseSpreadsheet(file);
     const mapping = this.parseMapping(dto.mapping);
-    this.assertRequiredMapped(mapping);
-
-    if (sheet.rows.length === 0) {
-      throw new BadRequestException('The file has no data rows to import.');
-    }
+    this.assertMapping(mapping);
+    const run = await this.descriptor.prepare(dto.pipeline);
 
     const { rows, summary } = await this.engine.evaluate(
       sheet,
       mapping,
       this.descriptor,
+      run.fields,
     );
 
     const errors = this.collectErrors(rows);
@@ -145,12 +165,10 @@ export class LeadsImportService {
       createdBy: { connect: { id: user.id } },
     });
 
-    const defaultStatus = await this.descriptor.defaultStatus(dto.pipeline);
-
     // Background write — deliberately not awaited; the response returns the id now.
     void this.processJob(job.id, rows, {
       pipeline: dto.pipeline,
-      defaultStatus,
+      defaultStatus: run.defaultStatus,
       user,
       jobId: job.id,
     });
@@ -164,6 +182,8 @@ export class LeadsImportService {
     context: LeadsImportContext,
   ): Promise<void> {
     const settledCount = rows.filter((row) => row.status !== 'valid').length;
+    // Set before the progress write, so it stays right even when that write fails.
+    let landed = 0;
 
     try {
       const imported = await this.engine.persistValid(
@@ -171,6 +191,7 @@ export class LeadsImportService {
         this.descriptor,
         context,
         async (importedSoFar) => {
+          landed = importedSoFar;
           await this.jobs.update(jobId, {
             processedRows: settledCount + importedSoFar,
             importedCount: importedSoFar,
@@ -188,9 +209,35 @@ export class LeadsImportService {
       this.logger.error(
         `Import job ${jobId} failed: ${(error as Error).message}`,
       );
+      // Valid rows after the failed batch were never written. They count as failed and
+      // join the error report, so the totals add up and the report lists what to retry.
+      const unwritten = rows
+        .filter((row) => row.status === 'valid')
+        .slice(landed)
+        .map((row): RowError => ({
+          rowNumber: row.rowNumber,
+          values: row.values,
+          reason:
+            'Not imported: the import stopped before this row was written. Import the file again to add it.',
+          errorCode: 'NOT_IMPORTED',
+        }));
+      const errors = [...this.collectErrors(rows), ...unwritten];
       await this.jobs
-        .update(jobId, { status: 'FAILED', completedAt: new Date() })
-        .catch(() => undefined);
+        .update(jobId, {
+          status: 'FAILED',
+          completedAt: new Date(),
+          importedCount: landed,
+          processedRows: rows.length,
+          failedCount:
+            rows.filter((row) => row.status === 'invalid').length +
+            unwritten.length,
+          errors: errors as unknown as Prisma.InputJsonValue,
+        })
+        .catch((updateError: unknown) =>
+          this.logger.error(
+            `Import job ${jobId}: could not record the failure: ${(updateError as Error).message}`,
+          ),
+        );
     }
   }
 
@@ -214,7 +261,7 @@ export class LeadsImportService {
       importJobScopeWhere(user),
       resolveHistoryLimit(limit),
     );
-    return { jobs: rows.map(toImportJobResponse) };
+    return { jobs: rows.map((row) => toImportJobResponse(row)) };
   }
 
   private collectErrors(rows: EvaluatedRow[]): RowError[] {
@@ -256,12 +303,32 @@ export class LeadsImportService {
     return mapping;
   }
 
-  private assertRequiredMapped(mapping: Record<string, string | null>): void {
-    const mappedValues = new Set(
-      Object.values(mapping).filter((value): value is string => Boolean(value)),
+  /**
+   * Every mapped target is a real field, none is fed by two columns (the engine would
+   * silently keep one), and every required field is mapped.
+   */
+  private assertMapping(mapping: Record<string, string | null>): void {
+    const mapped = Object.values(mapping).filter((value): value is string =>
+      Boolean(value),
     );
-    const missing = LEADS_REQUIRED_FIELDS.filter(
-      (field) => !mappedValues.has(field.value),
+    const byValue = new Map<string, ImportField>(
+      this.descriptor.fields.map((field) => [field.value, field]),
+    );
+
+    const unknown = mapped.find((value) => !byValue.has(value));
+    if (unknown) {
+      throw new BadRequestException(`"${unknown}" is not an import field.`);
+    }
+    const twice = mapped.find(
+      (value, index) => mapped.indexOf(value) !== index,
+    );
+    if (twice) {
+      throw new BadRequestException(
+        `${byValue.get(twice)?.label} is mapped from more than one column. Map it from one column only.`,
+      );
+    }
+    const missing = this.descriptor.fields.filter(
+      (field) => field.required && !mapped.includes(field.value),
     );
     if (missing.length) {
       throw new BadRequestException(

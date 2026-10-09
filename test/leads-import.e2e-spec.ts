@@ -30,12 +30,8 @@ describe('Leads import (e2e)', () => {
     const required = body.fields
       .filter((field) => field.required)
       .map((field) => field.value);
-    expect(required).toEqual([
-      'name',
-      'primaryPhone',
-      'actualAmount',
-      'paymentMethod',
-    ]);
+    // Exactly what New Lead requires (ADR-0088).
+    expect(required).toEqual(['name', 'primaryPhone']);
   });
 
   it('POST /api/leads/import/validate without a file is a 400', async () => {

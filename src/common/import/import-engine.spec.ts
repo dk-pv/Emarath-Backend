@@ -17,10 +17,10 @@ function makeDescriptor(existing: string[] = []): {
   const descriptor: ImportDescriptor<Record<string, string>, undefined> = {
     module: 'test',
     fields: FIELDS,
-    dedupeField: 'phone',
-    findExistingDuplicates: (values) =>
+    dedupeKeys: (mapped) => (mapped.phone ? [`phone ${mapped.phone}`] : []),
+    findExistingDuplicates: (keys) =>
       Promise.resolve(
-        new Set(values.filter((value) => existing.includes(value))),
+        new Set(keys.filter((key) => existing.includes(key.slice(6)))),
       ),
     buildRecord: (mapped) => mapped,
     persistBatch: (records) => {
@@ -34,11 +34,11 @@ function makeDescriptor(existing: string[] = []): {
 const SHEET: ParsedSheet = {
   headers: ['Name', 'Phone', 'Amount'],
   rows: [
-    ['Alice', '111', '100'], // valid
-    ['', '222', '100'], // invalid — name required
-    ['Bob', '111', '50'], // duplicate of Alice's phone (in file)
-    ['Carol', '999', 'x'], // invalid — amount not a number
-    ['Dave', '777', '10'], // duplicate of an existing phone
+    { rowNumber: 2, cells: ['Alice', '111', '100'] }, // valid
+    { rowNumber: 3, cells: ['', '222', '100'] }, // invalid — name required
+    { rowNumber: 4, cells: ['Bob', '111', '50'] }, // duplicate of Alice's phone (in file)
+    { rowNumber: 5, cells: ['Carol', '999', 'x'] }, // invalid — amount not a number
+    { rowNumber: 7, cells: ['Dave', '777', '10'] }, // existing phone; row 6 was blank
   ],
 };
 
@@ -55,20 +55,51 @@ describe('ImportEngineService.evaluate', () => {
 
     expect(rows[0].status).toBe('valid');
     expect(rows[1].error?.errorCode).toBe('REQUIRED_FIELD_MISSING');
-    expect(rows[2].error?.errorCode).toBe('DUPLICATE_IN_FILE');
+    expect(rows[2].error).toEqual({
+      errorCode: 'DUPLICATE_IN_FILE',
+      reason: 'A row earlier in the file has the same phone 111',
+    });
     expect(rows[3].error?.errorCode).toBe('INVALID_NUMBER');
-    expect(rows[4].error?.errorCode).toBe('DUPLICATE_EXISTING');
+    expect(rows[4].error).toEqual({
+      errorCode: 'DUPLICATE_EXISTING',
+      reason: 'A lead with phone 777 already exists',
+    });
   });
 
-  it('numbers rows from 2 (the header is row 1) and keeps original values', async () => {
+  it('keeps each row’s own row number and original values', async () => {
     const { descriptor } = makeDescriptor();
     const { rows } = await engine.evaluate(SHEET, MAPPING, descriptor);
-    expect(rows[0].rowNumber).toBe(2);
+    expect(rows.map((row) => row.rowNumber)).toEqual([2, 3, 4, 5, 7]);
     expect(rows[0].values).toEqual({
       Name: 'Alice',
       Phone: '111',
       Amount: '100',
     });
+  });
+
+  it('validates against the run’s fields when given, not the catalog', async () => {
+    const { descriptor } = makeDescriptor();
+    const sheet: ParsedSheet = {
+      headers: ['Name', 'Phone', 'Tier'],
+      rows: [
+        { rowNumber: 2, cells: ['Alice', '111', 'gold'] },
+        { rowNumber: 3, cells: ['Bob', '222', 'Bronze'] },
+      ],
+    };
+    const fields: ImportField[] = [
+      ...FIELDS,
+      { value: 'tier', label: 'Tier', type: 'string', options: ['Gold'] },
+    ];
+
+    const { rows } = await engine.evaluate(
+      sheet,
+      { Name: 'name', Phone: 'phone', Tier: 'tier' },
+      descriptor,
+      fields,
+    );
+
+    expect(rows[0].mapped.tier).toBe('Gold');
+    expect(rows[1].error?.errorCode).toBe('INVALID_OPTION');
   });
 });
 

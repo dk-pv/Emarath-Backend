@@ -106,8 +106,8 @@ describe('LeadsImportRepository.insertLeads — audit (ADR-0083)', () => {
   });
 
   /*
-    An import row whose Lead Status column reads WON is stored as WON like any other value —
-    it is never checked against the stage catalogue — and converts like every other WON path
+    An import row whose Lead Status column reads WON (any case — the import stores the stage's
+    own spelling, ADR-0088) is stored as WON and converts like every other WON path
     (ADR-0085 A2 path 7): the batch's transaction creates its Logistics order and records the
     CONVERTED event beside CREATED, with the order named on the conversion alone.
   */
@@ -154,5 +154,53 @@ describe('LeadsImportRepository.insertLeads — audit (ADR-0083)', () => {
       repository.insertLeads([record(LEAD_A, null)], audit),
     ).rejects.toThrow('duplicate key');
     expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('LeadsImportRepository.existingContacts', () => {
+  function makeLookup(rows: { phone: object[]; email: object[] }) {
+    const findMany = jest
+      .fn()
+      .mockResolvedValueOnce(rows.phone)
+      .mockResolvedValueOnce(rows.email);
+    const prisma = { lead: { findMany } } as unknown as PrismaService;
+    return { repository: new LeadsImportRepository(prisma), findMany };
+  }
+
+  it('matches a phone in either phone column and an email ignoring case', async () => {
+    const { repository, findMany } = makeLookup({
+      phone: [{ primaryPhone: '971500000001', secondaryPhone: '971500000002' }],
+      email: [{ email: 'Ali@Example.com' }],
+    });
+
+    const found = await repository.existingContacts(
+      ['971500000002'],
+      ['ali@example.com'],
+      false,
+    );
+
+    const [phoneArgs, emailArgs] = findMany.mock.calls.map(
+      (call) => (call as [{ where: unknown }])[0].where,
+    );
+    expect(phoneArgs).toEqual({
+      deletedAt: null,
+      OR: [
+        { primaryPhone: { in: ['971500000002'] } },
+        { secondaryPhone: { in: ['971500000002'] } },
+      ],
+    });
+    expect(emailArgs).toEqual({
+      deletedAt: null,
+      email: { in: ['ali@example.com'], mode: 'insensitive' },
+    });
+    expect(found.phones).toEqual(new Set(['971500000001', '971500000002']));
+    expect(found.emails).toEqual(new Set(['ali@example.com']));
+  });
+
+  it('includes archived leads when Duplicate Settings says so', async () => {
+    const { repository, findMany } = makeLookup({ phone: [], email: [] });
+    await repository.existingContacts(['971500000001'], [], true);
+    const where = (findMany.mock.calls[0] as [{ where: object }])[0].where;
+    expect(where).not.toHaveProperty('deletedAt');
   });
 });

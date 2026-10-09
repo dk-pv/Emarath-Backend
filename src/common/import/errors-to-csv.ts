@@ -42,7 +42,7 @@ function collectValueColumns(errors: RowError[]): string[] {
 }
 
 /** Quotes a field when it contains a comma, quote or newline; doubles inner quotes. */
-function escapeCsv(value: string): string {
+export function escapeCsv(value: string): string {
   if (/[",\r\n]/.test(value)) {
     return `"${value.replace(/"/g, '""')}"`;
   }

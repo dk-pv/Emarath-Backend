@@ -10,7 +10,8 @@
  */
 
 /** How a field's raw string is validated and later coerced by the descriptor. */
-export type ImportFieldType = 'string' | 'decimal' | 'int' | 'date';
+export type ImportFieldType =
+  'string' | 'decimal' | 'int' | 'date' | 'phone' | 'email';
 
 export interface ImportField {
   /** Internal key a column maps to (e.g. "primaryPhone"). */
@@ -20,8 +21,13 @@ export interface ImportField {
   type: ImportFieldType;
   /** A required field must be mapped and non-empty on every row. */
   required?: boolean;
-  /** Max characters for a `string` field, mirroring the column length. */
+  /** Max characters for a `string`/`email` field, mirroring the column length. */
   maxLength?: number;
+  /**
+   * The only values a `string` field accepts (a dropdown's options). Matched ignoring
+   * case and stored in the option's own spelling, so "hot" imports as "HOT".
+   */
+  options?: readonly string[];
 }
 
 /** The machine codes attached to a rejected/skipped row (see the API contract). */
@@ -29,9 +35,13 @@ export type ImportErrorCode =
   | 'REQUIRED_FIELD_MISSING'
   | 'INVALID_NUMBER'
   | 'INVALID_DATE'
+  | 'INVALID_PHONE'
+  | 'INVALID_EMAIL'
+  | 'INVALID_OPTION'
   | 'VALUE_TOO_LONG'
   | 'DUPLICATE_IN_FILE'
   | 'DUPLICATE_EXISTING'
+  | 'NOT_IMPORTED'
   | 'ROW_EMPTY';
 
 export type RowStatus = 'valid' | 'invalid' | 'duplicate';
@@ -65,13 +75,16 @@ export interface EvaluatedRow {
 export interface ImportDescriptor<TPrepared, TContext> {
   module: string;
   fields: readonly ImportField[];
-  /** Field value used to dedupe (e.g. "primaryPhone"), or null to skip dedupe. */
-  dedupeField: string | null;
   /**
-   * Given the dedupe values present in the file, the subset that already exists in
+   * The keys a valid row is deduplicated on, readable as-is in a reason (e.g.
+   * "phone 971501234567"). Two rows sharing any key are duplicates; [] skips dedupe.
+   */
+  dedupeKeys(mapped: Record<string, string>): string[];
+  /**
+   * Given the dedupe keys present in the file, the subset that already exists in
    * the database. Kept on the descriptor so dedupe stays a query, never a full scan.
    */
-  findExistingDuplicates(values: string[]): Promise<Set<string>>;
+  findExistingDuplicates(keys: string[]): Promise<Set<string>>;
   /** Turn one validated, mapped row into a persistable record. */
   buildRecord(mapped: Record<string, string>, context: TContext): TPrepared;
   /** Persist a batch atomically (one transaction per batch). */

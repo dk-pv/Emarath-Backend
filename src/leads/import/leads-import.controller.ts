@@ -25,14 +25,26 @@ import {
   ValidateResult,
 } from './dto/import-response.dto';
 
-/** Buffer at most the business cap; the service re-checks and reports cleanly. */
-const UPLOAD_OPTIONS = { limits: { fileSize: MAX_IMPORT_BYTES, files: 1 } };
+/**
+ * Buffer at most the business cap; the service re-checks and reports cleanly. Browsers
+ * send the file name as UTF-8, which multer would otherwise decode as latin1 and store
+ * an Arabic name garbled in the job history.
+ */
+const UPLOAD_OPTIONS = {
+  limits: { fileSize: MAX_IMPORT_BYTES, files: 1 },
+  defParamCharset: 'utf8',
+};
+
+const SAMPLE_CONTENT_TYPE = {
+  csv: 'text/csv; charset=utf-8',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+};
 
 /**
  * Bulk import endpoints (LEAD-07.1), all under `/api/leads/import`.
  *
  * Thin by design: the service owns parsing, validation and the job lifecycle.
- * Static routes (`fields`, `history`) are declared before `:jobId` so they are
+ * Static routes (`fields`, `sample`, `history`) are declared before `:jobId` so they are
  * never captured as an id, mirroring the leads controller's ordering.
  */
 @Controller('leads/import')
@@ -43,6 +55,26 @@ export class LeadsImportController {
   @Get('fields')
   fields(): { fields: ImportFieldOption[] } {
     return this.service.fields();
+  }
+
+  /** GET /api/leads/import/sample?format=csv|xlsx — the import template (ADR-0088). */
+  @Get('sample')
+  async sample(
+    @Res() res: Response,
+    @Query('format') format?: string,
+  ): Promise<void> {
+    if (format !== 'csv' && format !== 'xlsx') {
+      throw new BadRequestException('format must be csv or xlsx.');
+    }
+    const file = await this.service.sample(format);
+    res
+      .status(200)
+      .setHeader('Content-Type', SAMPLE_CONTENT_TYPE[format])
+      .setHeader(
+        'Content-Disposition',
+        `attachment; filename="leads-import-sample.${format}"`,
+      )
+      .send(file);
   }
 
   /** GET /api/leads/import/history — recent jobs, scoped by role. */

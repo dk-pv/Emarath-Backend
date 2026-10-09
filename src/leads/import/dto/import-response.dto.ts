@@ -73,18 +73,35 @@ export const IMPORT_JOB_SELECT = {
   failedCount: true,
   startedAt: true,
   completedAt: true,
+  updatedAt: true,
   createdBy: { select: { id: true, name: true } },
 } satisfies Prisma.ImportJobSelect;
+
+/**
+ * How long a PROCESSING job may go without progress before it reads as FAILED. Every
+ * batch's progress write bumps `updatedAt`, and a batch is bounded by the transaction
+ * timeout and wait (20 s + 15 s, PrismaService), so a job silent this long has lost its
+ * writer to a restart, deploy or crash. Decided on read: no startup sweep, so boot never
+ * waits on the database (CLAUDE.md §9) and a job an older instance is still writing
+ * during a deploy is never marked failed.
+ */
+export const STALE_PROCESSING_MS = 2 * 60 * 1000;
 
 type ImportJobRow = Prisma.ImportJobGetPayload<{
   select: typeof IMPORT_JOB_SELECT;
 }>;
 
-export function toImportJobResponse(row: ImportJobRow): ImportJobResponse {
+export function toImportJobResponse(
+  row: ImportJobRow,
+  now = new Date(),
+): ImportJobResponse {
+  const stale =
+    row.status === 'PROCESSING' &&
+    now.getTime() - row.updatedAt.getTime() > STALE_PROCESSING_MS;
   return {
     id: row.id,
     module: row.module,
-    status: row.status,
+    status: stale ? 'FAILED' : row.status,
     fileName: row.fileName,
     pipeline: row.pipeline,
     totalRows: row.totalRows,

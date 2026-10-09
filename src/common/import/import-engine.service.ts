@@ -4,8 +4,9 @@ import {
   EvaluatedRow,
   ImportDescriptor,
   ImportErrorCode,
+  ImportField,
 } from './import-descriptor';
-import { ParsedSheet } from './spreadsheet-parser';
+import { ParsedRow, ParsedSheet } from './spreadsheet-parser';
 
 /** Rows written per transaction — big enough to amortise round-trips, small
  * enough that one failed batch loses little and progress moves visibly. */
@@ -38,17 +39,21 @@ export class ImportEngineService {
    * Classifies every data row as valid, invalid or duplicate without writing
    * anything. Used by the preview (to show counts and per-row reasons) and by the
    * import (to know which rows to persist and which to report).
+   *
+   * `fields` defaults to the descriptor's catalog; a caller passes the run's own copy
+   * when per-run values (such as a field's allowed options) apply.
    */
   async evaluate(
     sheet: ParsedSheet,
     mapping: Record<string, string | null>,
     descriptor: ImportDescriptor<unknown, unknown>,
+    fields: readonly ImportField[] = descriptor.fields,
   ): Promise<EvaluationResult> {
     const fieldColumnIndex = this.indexFieldsToColumns(sheet.headers, mapping);
 
     // Pass 1 — field validation + collect dedupe candidates.
-    const staged = sheet.rows.map((cells, index) =>
-      this.stageRow(sheet.headers, cells, index, descriptor, fieldColumnIndex),
+    const staged = sheet.rows.map((row) =>
+      this.stageRow(sheet.headers, row, fields, fieldColumnIndex),
     );
 
     const existing = await this.lookupExistingDuplicates(staged, descriptor);
@@ -110,9 +115,8 @@ export class ImportEngineService {
 
   private stageRow(
     headers: string[],
-    cells: string[],
-    index: number,
-    descriptor: ImportDescriptor<unknown, unknown>,
+    { rowNumber, cells }: ParsedRow,
+    fields: readonly ImportField[],
     fieldColumnIndex: Map<string, number>,
   ): EvaluatedRow {
     const values: Record<string, string> = {};
@@ -124,7 +128,7 @@ export class ImportEngineService {
     const failures: { errorCode: ImportErrorCode; reason: string }[] = [];
     let anyMappedValue = false;
 
-    for (const field of descriptor.fields) {
+    for (const field of fields) {
       const position = fieldColumnIndex.get(field.value);
       const raw = position === undefined ? '' : (cells[position] ?? '');
       if (raw.trim() !== '') anyMappedValue = true;
@@ -153,8 +157,7 @@ export class ImportEngineService {
       : null;
 
     return {
-      // Row 1 is the header, so the first data row is row 2.
-      rowNumber: index + 2,
+      rowNumber,
       values,
       mapped,
       status: error ? 'invalid' : 'valid',
@@ -166,16 +169,14 @@ export class ImportEngineService {
     staged: EvaluatedRow[],
     descriptor: ImportDescriptor<unknown, unknown>,
   ): Promise<Set<string>> {
-    if (!descriptor.dedupeField) return new Set();
+    const candidates = new Set(
+      staged
+        .filter((row) => row.status === 'valid')
+        .flatMap((row) => descriptor.dedupeKeys(row.mapped)),
+    );
 
-    const field = descriptor.dedupeField;
-    const candidates = staged
-      .filter((row) => row.status === 'valid')
-      .map((row) => row.mapped[field])
-      .filter((value): value is string => Boolean(value));
-
-    if (candidates.length === 0) return new Set();
-    return descriptor.findExistingDuplicates([...new Set(candidates)]);
+    if (candidates.size === 0) return new Set();
+    return descriptor.findExistingDuplicates([...candidates]);
   }
 
   private settleRow(
@@ -184,11 +185,9 @@ export class ImportEngineService {
     seenInFile: Set<string>,
     existing: Set<string>,
   ): EvaluatedRow {
-    if (row.status === 'invalid' || !descriptor.dedupeField) return row;
+    if (row.status === 'invalid') return row;
 
-    const value = row.mapped[descriptor.dedupeField];
-    if (!value) return row;
-
+    const keys = descriptor.dedupeKeys(row.mapped);
     const duplicate = (
       errorCode: ImportErrorCode,
       reason: string,
@@ -198,20 +197,22 @@ export class ImportEngineService {
       error: { errorCode, reason },
     });
 
-    if (seenInFile.has(value)) {
+    const inFile = keys.find((key) => seenInFile.has(key));
+    if (inFile) {
       return duplicate(
         'DUPLICATE_IN_FILE',
-        'A row earlier in the file has the same Primary Phone',
+        `A row earlier in the file has the same ${inFile}`,
       );
     }
-    if (existing.has(value)) {
+    const known = keys.find((key) => existing.has(key));
+    if (known) {
       return duplicate(
         'DUPLICATE_EXISTING',
-        'A lead with this Primary Phone already exists',
+        `A lead with ${known} already exists`,
       );
     }
 
-    seenInFile.add(value);
+    keys.forEach((key) => seenInFile.add(key));
     return row;
   }
 

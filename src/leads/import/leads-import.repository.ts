@@ -2,10 +2,9 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '../../generated/prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { LeadAuditContext, recordLeadsCreated } from '../lead-audit';
-import { firstStageName } from '../../stages/stages.service';
 
-/** One import-ready lead: the create-many row plus, for a sales-agent import, the
- * assignment that keeps the lead inside the importer's scope. */
+/** One import-ready lead: the create-many row plus, for a sales-agent or sales-manager
+ * import, the assignment that keeps the lead inside the importer's scope. */
 export interface PreparedLead {
   data: Prisma.LeadCreateManyInput & { id: string };
   assignToUserId: string | null;
@@ -23,27 +22,54 @@ const LOOKUP_CHUNK = 1000;
 export class LeadsImportRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  firstStageName(pipeline: string): Promise<string | null> {
-    return firstStageName(this.prisma, pipeline);
-  }
-
   /**
-   * The Primary Phone values already present on a non-deleted lead.
+   * Which of these phones and emails an existing lead already holds — the matching
+   * rule of the New Lead form's duplicate check (`duplicateWhere`): a phone matches
+   * either phone column, an email matches ignoring case, and archived leads count only
+   * when Duplicate Settings says so.
    *
    * Global, not scoped: a phone that exists for any agent is still a duplicate, so
-   * the import must not create a second lead for it. Only the phone comes back —
-   * never the owning lead — so dedupe never leaks another agent's data.
+   * the import must not create a second lead for it. Only the contact values come
+   * back — never the owning lead — so dedupe never leaks another agent's data.
+   * Emails come back lower-cased.
    */
-  async existingPhones(phones: string[]): Promise<Set<string>> {
-    const found = new Set<string>();
+  async existingContacts(
+    phones: string[],
+    emails: string[],
+    includeArchived: boolean,
+  ): Promise<{ phones: Set<string>; emails: Set<string> }> {
+    const archived = includeArchived ? {} : { deletedAt: null };
+    const found = { phones: new Set<string>(), emails: new Set<string>() };
+
     for (let start = 0; start < phones.length; start += LOOKUP_CHUNK) {
       const chunk = phones.slice(start, start + LOOKUP_CHUNK);
       const rows = await this.prisma.lead.findMany({
-        where: { deletedAt: null, primaryPhone: { in: chunk } },
-        select: { primaryPhone: true },
+        where: {
+          ...archived,
+          OR: [
+            { primaryPhone: { in: chunk } },
+            { secondaryPhone: { in: chunk } },
+          ],
+        },
+        select: { primaryPhone: true, secondaryPhone: true },
       });
-      for (const row of rows) found.add(row.primaryPhone);
+      for (const row of rows) {
+        found.phones.add(row.primaryPhone);
+        if (row.secondaryPhone) found.phones.add(row.secondaryPhone);
+      }
     }
+
+    for (let start = 0; start < emails.length; start += LOOKUP_CHUNK) {
+      const chunk = emails.slice(start, start + LOOKUP_CHUNK);
+      const rows = await this.prisma.lead.findMany({
+        where: { ...archived, email: { in: chunk, mode: 'insensitive' } },
+        select: { email: true },
+      });
+      for (const row of rows) {
+        if (row.email) found.emails.add(row.email.toLowerCase());
+      }
+    }
+
     return found;
   }
 
