@@ -9,6 +9,6 @@ export class LookupsController {
 
   @Get(':type')
   byType(@Param('type') type: string): Promise<LookupOption[]> {
-    return this.lookups.byType(type);
+    return this.lookups.offered(type);
   }
 }

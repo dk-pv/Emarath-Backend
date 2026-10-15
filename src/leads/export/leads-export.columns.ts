@@ -1,4 +1,4 @@
-import { Prisma } from '../../generated/prisma/client';
+import { LeadCustomFieldType, Prisma } from '../../generated/prisma/client';
 
 /**
  * The columns available to an export, and how each renders to a cell.
@@ -8,6 +8,11 @@ import { Prisma } from '../../generated/prisma/client';
  * keys in order and this catalog resolves them. "All Fields" is the whole catalog.
  * The select below is wider than the list's — All Fields exposes the address,
  * product and outreach fields the table does not column by default.
+ *
+ * Custom columns (`cf_<slug>`, LEAD-05.1) are not in this static catalog: they are
+ * defined at runtime, so the service passes the active custom fields to
+ * `resolveExportColumns`, which adds them — to a "My Default" export where the user's
+ * layout names them, and to "All Fields" after the standard columns.
  */
 export const LEAD_EXPORT_SELECT = {
   name: true,
@@ -49,9 +54,27 @@ export const LEAD_EXPORT_SELECT = {
   tags: { select: { tag: { select: { name: true } } } },
 } satisfies Prisma.LeadSelect;
 
+/**
+ * The custom-column values, read only when the export names a custom column — the same
+ * projection the list uses (the field's `key` names the value), narrowed to the keys asked for.
+ */
+export function leadExportCustomSelect(keys: string[]) {
+  return {
+    customFieldValues: {
+      where: { customField: { key: { in: keys }, deletedAt: null } },
+      select: { value: true, customField: { select: { key: true } } },
+    },
+  } satisfies Prisma.LeadSelect;
+}
+
 export type LeadExportRow = Prisma.LeadGetPayload<{
   select: typeof LEAD_EXPORT_SELECT;
-}>;
+}> &
+  Partial<
+    Prisma.LeadGetPayload<{
+      select: ReturnType<typeof leadExportCustomSelect>;
+    }>
+  >;
 
 export interface ExportColumn {
   key: string;
@@ -194,6 +217,58 @@ export const EXPORT_COLUMNS: ExportColumn[] = [
   { key: 'assignedDate', header: 'Assigned Date', value: assignedDate },
 ];
 
+/**
+ * A custom field as the export needs it — what `LeadCustomFieldsService.list()` returns, so
+ * the columns an export can name are exactly the custom columns the Leads table shows.
+ */
+export interface ExportCustomField {
+  key: string;
+  name: string;
+  type: LeadCustomFieldType;
+}
+
+const PLAIN_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const PLAIN_DATE_TIME =
+  /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$/;
+
+/**
+ * A stored custom value as a cell. A DATE or DATETIME is stored as typed, with no zone, so
+ * it is written as typed — `13-10-2026`, `13-10-2026, 03:00 PM` — and not shifted through UTC
+ * the way a lead's own timestamps are. A value in any other shape is written as stored rather
+ * than guessed at; a lead with no value gets an empty cell.
+ */
+export function formatCustomValue(
+  type: LeadCustomFieldType,
+  raw: string | undefined,
+): string {
+  if (raw === undefined) return '';
+  if (type !== 'DATE' && type !== 'DATETIME') return raw;
+
+  const date = PLAIN_DATE.exec(raw);
+  if (date) return `${date[3]}-${date[2]}-${date[1]}`;
+  const dateTime = type === 'DATETIME' ? PLAIN_DATE_TIME.exec(raw) : null;
+  if (!dateTime) return raw;
+
+  const hour24 = Number(dateTime[4]);
+  const meridiem = hour24 >= 12 ? 'PM' : 'AM';
+  const hour = pad(hour24 % 12 || 12);
+  return `${dateTime[3]}-${dateTime[2]}-${dateTime[1]}, ${hour}:${dateTime[5]} ${meridiem}`;
+}
+
+/** One custom field as an export column: the field's name over its value for each lead. */
+export function customColumn(field: ExportCustomField): ExportColumn {
+  return {
+    key: field.key,
+    header: field.name,
+    value: (row) =>
+      formatCustomValue(
+        field.type,
+        row.customFieldValues?.find((v) => v.customField.key === field.key)
+          ?.value,
+      ),
+  };
+}
+
 const COLUMN_BY_KEY = new Map(
   EXPORT_COLUMNS.map((column) => [column.key, column]),
 );
@@ -205,21 +280,28 @@ const DEFAULT_COLUMNS = DEFAULT_KEYS.map((key) => COLUMN_BY_KEY.get(key)!);
 /**
  * Resolves which columns an export writes.
  *
- * `all` → the whole catalog. `default` → the columns the client named (its visible
- * set, in its order), unknown keys dropped so a stale layout can never break the
- * file; if nothing usable remains it falls back to the default visible columns.
+ * `all` → the whole catalog, then every active custom field in its display order.
+ * `default` → the columns the client named (its visible set, in its order — a custom
+ * column sits wherever the user placed it), unknown keys dropped so a stale layout can
+ * never break the file; if nothing usable remains it falls back to the default visible
+ * columns. A key is unknown when it is neither a standard column nor one of
+ * `customFields` — e.g. a custom field deactivated since the layout was saved.
  */
 export function resolveExportColumns(
   scope: 'default' | 'all',
   columns: string | undefined,
+  customFields: readonly ExportCustomField[] = [],
 ): ExportColumn[] {
-  if (scope === 'all') return EXPORT_COLUMNS;
+  const custom = new Map(
+    customFields.map((field) => [field.key, customColumn(field)]),
+  );
+  if (scope === 'all') return [...EXPORT_COLUMNS, ...custom.values()];
 
   const requested = (columns ?? '')
     .split(',')
     .map((key) => key.trim())
     .filter((key) => key.length > 0)
-    .map((key) => COLUMN_BY_KEY.get(key))
+    .map((key) => COLUMN_BY_KEY.get(key) ?? custom.get(key))
     .filter((column): column is ExportColumn => Boolean(column));
 
   return requested.length > 0 ? requested : DEFAULT_COLUMNS;

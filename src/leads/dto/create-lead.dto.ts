@@ -24,7 +24,8 @@ import { CustomFieldValueDto } from './custom-field-value.dto';
  * imported/real Workpex rows leave them blank, so "required" is a rule about *this create form*
  * (see the Lead model's comment). Verified against a live Workpex tenant, only **Name** and
  * **Primary Phone** are hard-required; **Status** and **Pipeline** are effectively required but
- * carry server defaults ("New" / "Lead Pipeline"), so an omitted value is filled, not rejected.
+ * carry server defaults (the pipeline's first stage / "Lead Pipeline"), so on create an omitted
+ * value is filled, not rejected; on update it keeps the lead's own (see each field).
  * Everything else — Product, Language, Call Status/Attempts, Country, Amounts, Payment Method — is
  * optional. Amounts and quantities arrive as numeric strings and reach Prisma unchanged,
  * preserving Decimal precision. Empty optional strings are normalised to undefined so a blank
@@ -82,14 +83,20 @@ export class CreateLeadDto {
   @IsOptional()
   assignedAgentIds?: string[];
 
-  /** Defaults to "New" (LEAD-06.1 AC3/AC4). */
+  /**
+   * Must be a stage of `pipeline` (checked in the service). Omitted: on create the
+   * pipeline's first stage (LEAD-06.1 AC3/AC4); on update the lead keeps its own.
+   */
   @Transform(emptyToUndefined)
   @IsString()
   @MaxLength(64)
   @IsOptional()
   status?: string;
 
-  /** Defaults to "Lead Pipeline" (ADR-0005). */
+  /**
+   * Must be an existing pipeline. Omitted: on create "Lead Pipeline" (ADR-0005); on update
+   * the lead keeps its own.
+   */
   @Transform(emptyToUndefined)
   @IsString()
   @MaxLength(64)

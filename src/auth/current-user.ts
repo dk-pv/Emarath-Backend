@@ -12,11 +12,18 @@ import { UserRole } from '../generated/prisma/client';
  * so resolving it costs no DB read; `null` when the user has no team. Optional
  * so the many `{ id, role }` literals in tests still type-check — production
  * requests always set it (value or null) via the guard.
+ *
+ * `deniedPipelines` are the pipelines closed to the caller (ADR-0093). Unlike `team` they are
+ * never a token claim: `CurrentUserService.resolve()` reads them from the grants on each
+ * request. Absent means none is closed, which is true of the admin and of every caller while
+ * all pipelines are All users, so code that builds a CurrentUser for anyone else (a follow-up
+ * assignee) must attach them with `withPipelineAccess`.
  */
 export interface CurrentUser {
   id: string;
   role: UserRole;
   team?: string | null;
+  deniedPipelines?: readonly string[];
 }
 
 /**

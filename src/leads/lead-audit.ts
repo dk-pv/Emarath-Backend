@@ -12,6 +12,7 @@ import {
   becameConverted,
   convertLeadsToOrders,
 } from '../logistics/logistics-conversion';
+import { LEAD_LIST_SELECT, LeadRow } from './dto/lead-response.dto';
 
 /**
  * Lead history capture (ADR-0083).
@@ -386,6 +387,29 @@ export function auditLeadChanges<T>(
   return prisma.$transaction((tx) =>
     applyLeadChanges(tx, leadIds, context, change, options),
   );
+}
+
+/**
+ * The lead row a write returns, carrying the Logistics order that same write created.
+ *
+ * A write reads its row back inside the change, but the order is created after that — after
+ * `change` returns (`applyLeadChanges`) or after the insert (`recordLeadsCreated`) — so a lead
+ * that has just become WON comes back with `logisticsOrder: null`, and the screens would keep
+ * offering what the server now refuses. Only that row (WON, no order) is read again; every
+ * other response is returned as it is. A WON lead from before ADR-0085 has no order, so its
+ * second read changes nothing. `client` is the transaction for a create, or the client once a
+ * change has committed.
+ */
+export async function withLogisticsOrder(
+  client: Pick<Prisma.TransactionClient, 'lead'>,
+  row: LeadRow,
+): Promise<LeadRow> {
+  if (row.status !== CONVERTED_STATUS || row.logisticsOrder) return row;
+  const fresh = await client.lead.findUnique({
+    where: { id: row.id },
+    select: LEAD_LIST_SELECT,
+  });
+  return fresh ?? row;
 }
 
 /**

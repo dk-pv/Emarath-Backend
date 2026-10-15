@@ -27,8 +27,6 @@ import {
 } from './dto/sales-crm-general.dto';
 import {
   DUPLICATE_LOG_LIMIT,
-  DUPLICATE_MODES,
-  DuplicateMode,
   DuplicateSettingsLogEntry,
   SALES_CRM_DUPLICATE_DEFAULTS,
   SALES_CRM_DUPLICATE_KEY,
@@ -511,10 +509,8 @@ export class SettingsService {
   /**
    * Replaces the payload, keeping the change log.
    *
-   * Every dependent value is stored whatever the mode: the reference hides the warn
-   * toggle in block mode and the two block toggles in warn mode, and clearing what is
-   * merely hidden would silently discard a choice the user made — switching modes and
-   * back would lose it.
+   * Only the two settings that remain are stored: a legacy `mode` or `displayAssigneeInfo`
+   * in the old row is not carried over, which is what retires a stored Block configuration.
    *
    * The log is appended here rather than in a separate audit system: the project keeps
    * no audit table, and one entry per *actual* change keeps the row bounded and quiet —
@@ -539,9 +535,7 @@ export class SettingsService {
           )?.name ?? null);
 
     const settings: SalesCrmDuplicateSettings = {
-      mode: dto.mode,
       allowDuplicateSearch: dto.allowDuplicateSearch,
-      displayAssigneeInfo: dto.displayAssigneeInfo,
       checkArchivedLeads: dto.checkArchivedLeads,
       log:
         changes.length === 0
@@ -1051,6 +1045,9 @@ function toFieldNames(value: unknown): CustomFieldNames {
  * Reads a stored duplicate payload defensively, as the general settings are read: every
  * field falls back to its shipped default individually, so a row written before a field
  * existed costs that one value rather than the whole screen.
+ *
+ * A legacy `mode` (including `BLOCK_HARD_STOP`) and `displayAssigneeInfo` are never read: there
+ * is no mode any more, so a row that once said Block behaves exactly like one that said Warn.
  */
 function toSalesCrmDuplicate(value: unknown): SalesCrmDuplicateSettings {
   const raw = (value ?? {}) as Record<string, unknown>;
@@ -1058,10 +1055,6 @@ function toSalesCrmDuplicate(value: unknown): SalesCrmDuplicateSettings {
     typeof raw[key] === 'boolean'
       ? raw[key]
       : (SALES_CRM_DUPLICATE_DEFAULTS[key] as boolean);
-
-  const mode = DUPLICATE_MODES.includes(raw.mode as DuplicateMode)
-    ? (raw.mode as DuplicateMode)
-    : SALES_CRM_DUPLICATE_DEFAULTS.mode;
 
   const log = Array.isArray(raw.log)
     ? (raw.log as unknown[])
@@ -1076,18 +1069,11 @@ function toSalesCrmDuplicate(value: unknown): SalesCrmDuplicateSettings {
     : [];
 
   return {
-    mode,
     allowDuplicateSearch: bool('allowDuplicateSearch'),
-    displayAssigneeInfo: bool('displayAssigneeInfo'),
     checkArchivedLeads: bool('checkArchivedLeads'),
     log,
   };
 }
-
-const MODE_LABELS: Record<DuplicateMode, string> = {
-  WARN_ALLOW_SAVE: 'Warn, allow save',
-  BLOCK_HARD_STOP: 'Block, hard stop',
-};
 
 /** One sentence per field that actually changed; an unchanged save records nothing. */
 function describeDuplicateChanges(
@@ -1095,19 +1081,13 @@ function describeDuplicateChanges(
   after: UpdateSalesCrmDuplicateDto,
 ): string[] {
   const changes: string[] = [];
-  if (before.mode !== after.mode) {
-    changes.push(
-      `Duplicate handling changed from “${MODE_LABELS[before.mode]}” to “${MODE_LABELS[after.mode]}”`,
-    );
-  }
   const toggles: [keyof UpdateSalesCrmDuplicateDto, string][] = [
     ['allowDuplicateSearch', 'Ability to search and view Duplicate leads'],
-    ['displayAssigneeInfo', 'Display Assignee Information for Duplicate Leads'],
     ['checkArchivedLeads', 'Check archived leads for duplicates'],
   ];
   for (const [key, label] of toggles) {
-    const was = before[key as keyof SalesCrmDuplicateSettings] as boolean;
-    const now = after[key] as boolean;
+    const was = before[key];
+    const now = after[key];
     if (was !== now) changes.push(`${label} turned ${now ? 'on' : 'off'}`);
   }
   return changes;

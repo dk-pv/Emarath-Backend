@@ -66,6 +66,31 @@ describe('buildLeadsByStatusWhere', () => {
     expect(json).not.toContain('createdAt');
   });
 
+  it('applies a time-precise By Date window on creation or on the status change (client request 2026-10-13)', () => {
+    // Custom From 10:00 AM → To 3:00 PM on 13 Oct, UAE time; the To edge is one minute
+    // past 3:00 PM so that whole minute is inside.
+    const from = '2026-10-13T06:00:00.000Z';
+    const to = '2026-10-13T11:01:00.000Z';
+
+    // Creation: the reused leads where compares createdAt [gte from, lt to).
+    const created = buildLeadsByStatusWhere(admin, { from, to });
+    expect(created.AND ?? [created]).toContainEqual({
+      createdAt: { gte: new Date(from), lt: new Date(to) },
+    });
+
+    // Status change: the same instants on statusChangedAt, ANDed with the scope.
+    const changed = buildLeadsByStatusWhere(agent, {
+      from,
+      to,
+      dateField: 'statusChanged',
+    });
+    expect(changed.AND).toContainEqual({
+      statusChangedAt: { gte: new Date(from), lt: new Date(to) },
+    });
+    // An agent stays inside their own leads while the window narrows further.
+    expect(JSON.stringify(changed)).toContain('"userId":"agent-1"');
+  });
+
   it('threads the condition builder payload into the reused leads where', () => {
     const conditions = JSON.stringify([
       { field: 'source', operator: 'is', values: ['Facebook'] },

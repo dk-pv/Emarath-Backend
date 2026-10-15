@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, UserRole } from '../generated/prisma/client';
+import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { ASSIGNABLE_USER_WHERE } from '../auth/role-groups';
 import { LEAD_EDIT_SELECT, LEAD_LIST_SELECT } from './dto/lead-response.dto';
 import { LeadSortColumn } from './dto/list-leads-query.dto';
 import { pinnedPageSlice } from './pinned-page';
@@ -92,6 +93,18 @@ export class LeadsRepository {
     },
     tx: Prisma.TransactionClient,
   ) {
+    // A set replaces only the values it could hold — the active fields `prepareValues`
+    // accepts — so an inactive or deleted field's value is never touched by an edit and is
+    // still there if the field is reactivated (ADR-0072).
+    const activeFieldIds = customFieldValues
+      ? (
+          await tx.leadCustomField.findMany({
+            where: { isActive: true, deletedAt: null },
+            select: { id: true },
+          })
+        ).map((field) => field.id)
+      : [];
+
     const lead = await tx.lead.update({
       where: { id },
       data: {
@@ -114,7 +127,7 @@ export class LeadsRepository {
         // as "clear them all".
         ...(customFieldValues && {
           customFieldValues: {
-            deleteMany: {},
+            deleteMany: { customFieldId: { in: activeFieldIds } },
             create: customFieldValues.map((v) => ({
               customField: { connect: { id: v.customFieldId } },
               value: v.value,
@@ -339,6 +352,33 @@ export class LeadsRepository {
   }
 
   /**
+   * A lead's status moves for its detail timeline, read from the audit log (ADR-0083) the
+   * change itself wrote in its own transaction — newest first. `CONVERTED` is a move to WON
+   * (it also created the Logistics order); `STATUS_CHANGED` is every other move. Only the
+   * lead's own events: the Logistics order's share the journey but are not status moves of
+   * the lead. Capped so a long-lived lead can't make the feed unbounded. Scope is verified
+   * by the caller, as with the other timeline reads.
+   */
+  async statusChangesForTimeline(leadId: string) {
+    return this.prisma.auditEvent.findMany({
+      where: {
+        leadId,
+        entityType: 'LEAD',
+        action: { in: ['STATUS_CHANGED', 'CONVERTED'] },
+      },
+      select: {
+        id: true,
+        createdAt: true,
+        before: true,
+        after: true,
+        actor: { select: { name: true } },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: 200,
+    });
+  }
+
+  /**
    * A lead's notes for its detail timeline (LEAD-10.2, ADR-0035): author, body and
    * when, newest first, excluding soft-deleted. Scope is verified by the caller.
    */
@@ -391,15 +431,14 @@ export class LeadsRepository {
   }
 
   /**
-   * Active users a lead can be assigned to (LEAD-06.2). Returns id and name only —
-   * never email, role or team — so the assignment directory carries no profile
-   * data. Scoped to the lead-handling roles, not the whole user table.
+   * Active users a lead can be assigned to (LEAD-06.2) — the same rule every write
+   * applies (`ASSIGNABLE_USER_WHERE`), so the form never offers someone the save would
+   * refuse. Returns id and name only — never email, role or team — so the assignment
+   * directory carries no profile data.
    */
-  async assignableUsers(
-    roles: UserRole[],
-  ): Promise<{ id: string; name: string }[]> {
+  async assignableUsers(): Promise<{ id: string; name: string }[]> {
     return this.prisma.user.findMany({
-      where: { deletedAt: null, role: { in: roles } },
+      where: ASSIGNABLE_USER_WHERE,
       select: { id: true, name: true },
       orderBy: { name: 'asc' },
     });

@@ -46,6 +46,9 @@ function makeDescriptor(stages: Record<string, string[]> = {}) {
   return { descriptor, insertLeads, existingContacts, getSalesCrmDuplicate };
 }
 
+/** Who runs the import; nothing is closed to them unless a test says so (ADR-0093). */
+const importer = { id: 'user-1', role: UserRole.SALES_AGENT };
+
 const context = (role: UserRole) => ({
   pipeline: 'Lead Pipeline',
   defaultStatus: 'New',
@@ -56,7 +59,7 @@ const context = (role: UserRole) => ({
 describe('LeadsImportDescriptor.sampleRows', () => {
   it('builds a template that imports as written, as CSV and as XLSX', async () => {
     const { descriptor } = makeDescriptor({ 'Lead Pipeline': ['New', 'HOT'] });
-    const run = await descriptor.prepare('Lead Pipeline');
+    const run = await descriptor.prepare('Lead Pipeline', importer);
     const rows = await descriptor.sampleRows();
 
     for (const format of ['csv', 'xlsx'] as const) {
@@ -93,7 +96,7 @@ describe('LeadsImportDescriptor.sampleRows', () => {
 describe('LeadsImportDescriptor.prepare', () => {
   it('fills each dropdown field with the values the New Lead form offers', async () => {
     const { descriptor } = makeDescriptor({ 'Lead Pipeline': ['New', 'HOT'] });
-    const run = await descriptor.prepare('Lead Pipeline');
+    const run = await descriptor.prepare('Lead Pipeline', importer);
 
     const options = (value: string) =>
       run.fields.find((field) => field.value === value)?.options;
@@ -107,14 +110,44 @@ describe('LeadsImportDescriptor.prepare', () => {
 
   it('refuses a pipeline that does not exist', async () => {
     const { descriptor } = makeDescriptor({ Ghost: ['New'] });
-    await expect(descriptor.prepare('Ghost')).rejects.toThrow(
+    await expect(descriptor.prepare('Ghost', importer)).rejects.toThrow(
       'Pipeline "Ghost" does not exist.',
     );
   });
 
+  it('refuses a pipeline closed to the importer before reading anything about it (ADR-0093)', async () => {
+    const byType = jest.fn();
+    const list = jest.fn();
+    const descriptor = new LeadsImportDescriptor(
+      {} as unknown as LeadsImportRepository,
+      { byType } as unknown as LookupsService,
+      { list } as unknown as StagesService,
+      {} as unknown as SettingsService,
+    );
+
+    await expect(
+      descriptor.prepare('Complaints', {
+        ...importer,
+        deniedPipelines: ['Complaints'],
+      }),
+    ).rejects.toThrow('You don\'t have access to the "Complaints" pipeline.');
+    expect(byType).not.toHaveBeenCalled();
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it('lets the admin import into any pipeline, closed list or not (B1)', async () => {
+    const { descriptor } = makeDescriptor({ Complaints: ['Intake'] });
+    const run = await descriptor.prepare('Complaints', {
+      id: 'admin',
+      role: UserRole.SUPERADMIN,
+      deniedPipelines: ['Complaints'],
+    });
+    expect(run.defaultStatus).toBe('Intake');
+  });
+
   it('refuses a pipeline with no stages — its leads would sit in no Kanban column', async () => {
     const { descriptor } = makeDescriptor();
-    await expect(descriptor.prepare('Complaints')).rejects.toThrow(
+    await expect(descriptor.prepare('Complaints', importer)).rejects.toThrow(
       'The "Complaints" pipeline has no stages yet.',
     );
   });
@@ -212,10 +245,82 @@ describe('LeadsImportDescriptor.persistBatch — audit (ADR-0083)', () => {
       user: { id: 'agent-1', role: UserRole.SALES_AGENT },
     });
 
-    expect(insertLeads).toHaveBeenCalledWith(records, {
-      actor: { type: 'USER', id: 'agent-1' },
-      source: 'leads.import',
-      metadata: { importJobId: 'job-1' },
+    expect(insertLeads).toHaveBeenCalledWith(
+      records,
+      {
+        actor: { type: 'USER', id: 'agent-1' },
+        source: 'leads.import',
+        metadata: { importJobId: 'job-1' },
+      },
+      false,
+    );
+  });
+
+  it('tells the writer whether archived leads count as the original of a duplicate', async () => {
+    const { descriptor, insertLeads, getSalesCrmDuplicate } = makeDescriptor();
+    getSalesCrmDuplicate.mockResolvedValue({ checkArchivedLeads: true });
+
+    await descriptor.persistBatch(
+      [{ data: { id: 'lead-1' } }] as unknown as PreparedLead[],
+      context(UserRole.SUPERADMIN),
+    );
+
+    expect((insertLeads.mock.calls[0] as unknown[])[2]).toBe(true);
+  });
+});
+
+describe('LeadsImportDescriptor — duplicates (ADR-0092)', () => {
+  it('opts in to writing duplicate rows instead of skipping them', () => {
+    expect(makeDescriptor().descriptor.importsDuplicates).toBe(true);
+  });
+});
+
+describe('LeadsImportDescriptor — a legacy Block setting cannot stop duplicates being imported (ADR-0092)', () => {
+  const rows = [{ data: { id: 'lead-1' } }] as unknown as PreparedLead[];
+
+  it.each([
+    [
+      'Block, hard stop',
+      { mode: 'BLOCK_HARD_STOP', displayAssigneeInfo: true },
+    ],
+    ['Warn', { mode: 'WARN_ALLOW_SAVE' }],
+  ])(
+    'writes the batch whatever a stored %s row says',
+    async (_label, legacy) => {
+      const { descriptor, insertLeads, getSalesCrmDuplicate } =
+        makeDescriptor();
+      getSalesCrmDuplicate.mockResolvedValue({
+        checkArchivedLeads: false,
+        ...legacy,
+      });
+
+      await expect(
+        descriptor.persistBatch(rows, context(UserRole.SUPERADMIN)),
+      ).resolves.toBeUndefined();
+
+      expect(insertLeads).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('classifies duplicates from the fixed rule only — the legacy mode is not read', async () => {
+    const { descriptor, existingContacts, getSalesCrmDuplicate } =
+      makeDescriptor();
+    getSalesCrmDuplicate.mockResolvedValue({
+      checkArchivedLeads: false,
+      mode: 'BLOCK_HARD_STOP',
     });
+    existingContacts.mockResolvedValue({
+      phones: new Set(['971501234567']),
+      emails: new Set<string>(),
+    });
+
+    const found = await descriptor.findExistingDuplicates([
+      'phone 971501234567',
+    ]);
+
+    // Still reported (so the preview can warn); whether the row is written is the engine's
+    // `importsDuplicates` decision, which the descriptor makes unconditionally.
+    expect(found).toEqual(new Set(['phone 971501234567']));
+    expect(descriptor.importsDuplicates).toBe(true);
   });
 });

@@ -3,8 +3,10 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '../generated/prisma/client';
+import { Prisma, UserRole } from '../generated/prisma/client';
+import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import { TagAccessService } from '../tag-access/tag-access.service';
 import { CreateTagDto, TagNode, UpdateTagDto } from './dto/tag.dto';
 
 /**
@@ -40,7 +42,11 @@ type TagRow = Prisma.TagGetPayload<{ select: typeof TAG_SELECT }>;
  */
 @Injectable()
 export class TagsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly currentUser: CurrentUserService,
+    private readonly access: TagAccessService,
+  ) {}
 
   /** The catalogue in name order — the order the reference table lists. */
   async list(): Promise<TagNode[]> {
@@ -52,13 +58,34 @@ export class TagsService {
     return rows.map(toNode);
   }
 
+  /**
+   * An administrator creates exactly as before. Anyone else needs the Admin to have allowed
+   * their team or them personally to create tags (ADR-0091), and gets a plain active
+   * tag — the Active switch is a catalogue-management control, not theirs — which they can
+   * select straight away (`grantToCreator`). The tag and that grant commit together.
+   */
   async create(dto: CreateTagDto): Promise<TagNode> {
+    const user = await this.currentUser.resolve();
     const name = dto.name.trim();
-    await this.assertNameFree(name);
 
-    const created = await this.prisma.tag.create({
-      data: { name, isActive: dto.isActive ?? true },
-      select: TAG_SELECT,
+    if (user.role === UserRole.SUPERADMIN) {
+      await this.assertNameFree(name);
+      const created = await this.prisma.tag.create({
+        data: { name, isActive: dto.isActive ?? true },
+        select: TAG_SELECT,
+      });
+      return toNode(created);
+    }
+
+    await this.access.assertMayCreate(user);
+    await this.assertNameFree(name);
+    const created = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.tag.create({
+        data: { name, isActive: true },
+        select: TAG_SELECT,
+      });
+      await this.access.grantToCreator(tx, user, row.id);
+      return row;
     });
     return toNode(created);
   }

@@ -23,7 +23,11 @@ function auditRow(id: string, overrides: Record<string, unknown> = {}) {
 
 type FindManyArgs = { where: { id: { in: string[] }; OR?: unknown } };
 
-function makeService(role: UserRole = UserRole.SUPERADMIN) {
+function makeService(
+  role: UserRole = UserRole.SUPERADMIN,
+  // The pipelines closed to the caller (ADR-0093); none unless a test says so.
+  deniedPipelines?: string[],
+) {
   const userFindFirst = jest.fn();
   const leadFindMany = jest.fn();
   const assignmentDeleteMany = jest.fn();
@@ -108,7 +112,11 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
   } as unknown as PrismaService;
 
   const currentUser = {
-    resolve: jest.fn().mockResolvedValue({ id: 'u1', role }),
+    resolve: jest.fn().mockResolvedValue({
+      id: 'u1',
+      role,
+      ...(deniedPipelines ? { deniedPipelines } : {}),
+    }),
   } as unknown as CurrentUserService;
 
   const service = new LeadsBulkService(prisma, currentUser);
@@ -158,6 +166,33 @@ describe('LeadsBulkService.reassign', () => {
     await expect(
       service.reassign({ ids: ['a'], agentId: 'agent' }),
     ).rejects.toBeInstanceOf(BadRequestException);
+    expect(leadFindMany).not.toHaveBeenCalled();
+  });
+
+  // Phase 2A: the target must be active as well — the one rule every assignment shares (the
+  // row Reassign delegates here). An inactive user is not found, so nothing is touched.
+  it('looks the target up as a live, active, assignable user only', async () => {
+    const { service, userFindFirst, leadFindMany } = makeService();
+    userFindFirst.mockResolvedValue(null);
+
+    await expect(
+      service.reassign({ ids: ['a'], agentId: 'inactive-agent' }),
+    ).rejects.toThrow('Target agent not found or not assignable.');
+    expect(userFindFirst).toHaveBeenCalledWith({
+      where: {
+        id: 'inactive-agent',
+        deletedAt: null,
+        isActive: true,
+        role: {
+          in: [
+            UserRole.SALES_AGENT,
+            UserRole.SALES_MANAGER,
+            UserRole.CUSTOMER_SERVICE_AGENT,
+          ],
+        },
+      },
+      select: { id: true },
+    });
     expect(leadFindMany).not.toHaveBeenCalled();
   });
 
@@ -510,5 +545,40 @@ describe('LeadsBulkService.delete', () => {
     await expect(service.delete({ ids: ['a'] })).rejects.toBeInstanceOf(
       ConflictException,
     );
+  });
+});
+
+// ADR-0093 B2: a lead the caller sees but may not change is not actionable in a bulk call.
+describe('LeadsBulkService — pipeline access (ADR-0093)', () => {
+  it('leaves leads in pipelines closed to the caller out of what it may act on', async () => {
+    const { service, leadFindMany } = makeService(UserRole.SALES_AGENT, [
+      'VIP',
+    ]);
+    leadFindMany.mockResolvedValue([]);
+
+    const res = await service.delete({ ids: ['a'] });
+
+    expect(res.results[0]).toEqual({
+      id: 'a',
+      status: 'failed',
+      reason: 'Lead not found or not permitted.',
+    });
+    const [query] = leadFindMany.mock.calls[0] as [
+      { where: { AND: unknown[] } },
+    ];
+    expect(query.where.AND).toContainEqual({ pipeline: { notIn: ['VIP'] } });
+  });
+
+  it('adds no pipeline condition while nothing is closed (All users)', async () => {
+    const { service, leadFindMany } = makeService(UserRole.SALES_AGENT, []);
+    leadFindMany.mockResolvedValue([]);
+
+    await service.delete({ ids: ['a'] });
+
+    const [query] = leadFindMany.mock.calls[0] as [
+      { where: { AND: unknown[] } },
+    ];
+    expect(query.where.AND).toContainEqual({});
+    expect(JSON.stringify(query.where)).not.toContain('notIn');
   });
 });

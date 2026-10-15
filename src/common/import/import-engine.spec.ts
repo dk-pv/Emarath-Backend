@@ -126,3 +126,102 @@ describe('ImportEngineService.persistValid', () => {
     expect(progress).toEqual([1]);
   });
 });
+
+describe('ImportEngineService — a descriptor that imports duplicates (ADR-0092)', () => {
+  const engine = new ImportEngineService();
+
+  const importing = (existing: string[] = []) => {
+    const { descriptor, batches } = makeDescriptor(existing);
+    return {
+      descriptor: { ...descriptor, importsDuplicates: true },
+      batches,
+    };
+  };
+
+  it('still classifies a duplicate row as a duplicate, so the preview can say so', async () => {
+    const { descriptor } = importing(['777']);
+    const { rows, summary } = await engine.evaluate(SHEET, MAPPING, descriptor);
+
+    expect(summary).toEqual({ total: 5, valid: 1, invalid: 2, duplicates: 2 });
+    expect(rows[2].status).toBe('duplicate');
+    expect(rows[4].status).toBe('duplicate');
+  });
+
+  it('writes the duplicate rows along with the valid ones, in file order', async () => {
+    const { descriptor, batches } = importing(['777']);
+    const { rows } = await engine.evaluate(SHEET, MAPPING, descriptor);
+
+    const imported = await engine.persistValid(
+      rows,
+      descriptor,
+      undefined,
+      () => Promise.resolve(),
+    );
+
+    // Alice (valid), Bob (in-file duplicate) and Dave (existing duplicate); the two
+    // genuinely invalid rows are still left out.
+    expect(imported).toBe(3);
+    expect(batches[0].map((record) => record.name)).toEqual([
+      'Alice',
+      'Bob',
+      'Dave',
+    ]);
+  });
+
+  it('lists the rows it will write, and only those', async () => {
+    const { descriptor } = importing(['777']);
+    const { rows } = await engine.evaluate(SHEET, MAPPING, descriptor);
+
+    expect(engine.writable(rows, descriptor).map((r) => r.rowNumber)).toEqual([
+      2, 4, 7,
+    ]);
+  });
+
+  it('keeps skipping duplicates for a descriptor that does not opt in', async () => {
+    const { descriptor } = makeDescriptor(['777']);
+    const { rows } = await engine.evaluate(SHEET, MAPPING, descriptor);
+
+    expect(engine.writable(rows, descriptor).map((r) => r.rowNumber)).toEqual([
+      2,
+    ]);
+  });
+
+  it('lets a later row duplicate a duplicate that is being written', async () => {
+    const sheet: ParsedSheet = {
+      headers: ['Name', 'Phone', 'Amount'],
+      rows: [
+        { rowNumber: 2, cells: ['Alice', '111', ''] },
+        { rowNumber: 3, cells: ['Alice', '222', ''] }, // duplicate of row 2, by name
+        { rowNumber: 4, cells: ['Carol', '222', ''] }, // shares row 3's phone only
+      ],
+    };
+    const keys = (mapped: Record<string, string>) => [
+      `name ${mapped.name}`,
+      `phone ${mapped.phone}`,
+    ];
+    const base = makeDescriptor().descriptor;
+
+    // Skipping: row 3 is never written, so row 4 has nothing to duplicate.
+    const skipping = await engine.evaluate(sheet, MAPPING, {
+      ...base,
+      dedupeKeys: keys,
+    });
+    expect(skipping.rows.map((r) => r.status)).toEqual([
+      'valid',
+      'duplicate',
+      'valid',
+    ]);
+
+    // Importing: row 3 will exist, so row 4 duplicates it.
+    const importingRun = await engine.evaluate(sheet, MAPPING, {
+      ...base,
+      dedupeKeys: keys,
+      importsDuplicates: true,
+    });
+    expect(importingRun.rows.map((r) => r.status)).toEqual([
+      'valid',
+      'duplicate',
+      'duplicate',
+    ]);
+  });
+});

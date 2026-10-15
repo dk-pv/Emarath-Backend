@@ -11,10 +11,12 @@ import {
 } from '../lead-where';
 import { LeadSortColumn } from '../dto/list-leads-query.dto';
 import { ExportLeadsQueryDto } from './dto/export-leads-query.dto';
+import { LeadCustomFieldsService } from '../../lead-custom-fields/lead-custom-fields.service';
 import {
   csvCell,
   ExportColumn,
   LEAD_EXPORT_SELECT,
+  leadExportCustomSelect,
   LeadExportRow,
   resolveExportColumns,
 } from './leads-export.columns';
@@ -39,6 +41,7 @@ export class LeadsExportService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
+    private readonly customFields: LeadCustomFieldsService,
   ) {}
 
   async export(query: ExportLeadsQueryDto, res: Response): Promise<void> {
@@ -49,12 +52,22 @@ export class LeadsExportService {
       buildLeadWhere(user, query),
       (scope) => duplicatePhones(this.prisma, scope),
     );
-    const columns = resolveExportColumns(query.scope, query.columns);
+    // The same active custom fields the Leads table shows as columns, so a column the user
+    // sees and selects in Manage Columns is a column the export can write.
+    const customFields = await this.customFields.list();
+    const columns = resolveExportColumns(
+      query.scope,
+      query.columns,
+      customFields,
+    );
+    const customKeys = customFields
+      .filter((field) => columns.some((column) => column.key === field.key))
+      .map((field) => field.key);
     const filename = exportFilename(query.format);
 
     // The first page is read before any status or header goes out, so a query that
     // fails up front is an ordinary error response — never a 200 file with no rows.
-    const pages = this.batches(where, query.sort, query.direction);
+    const pages = this.batches(where, query.sort, query.direction, customKeys);
     const first = await pages.next();
     async function* rows(): AsyncGenerator<LeadExportRow[]> {
       if (!first.done) yield first.value;
@@ -80,12 +93,18 @@ export class LeadsExportService {
     where: Prisma.LeadWhereInput,
     sort: LeadSortColumn,
     direction: 'asc' | 'desc',
+    customKeys: string[],
   ): AsyncGenerator<LeadExportRow[]> {
+    // Custom values are read only when a custom column is being written.
+    const select =
+      customKeys.length > 0
+        ? { ...LEAD_EXPORT_SELECT, ...leadExportCustomSelect(customKeys) }
+        : LEAD_EXPORT_SELECT;
     let skip = 0;
     while (skip < MAX_EXPORT_ROWS) {
       const rows = await this.prisma.lead.findMany({
         where,
-        select: LEAD_EXPORT_SELECT,
+        select,
         // id breaks ties so a row never repeats or vanishes across batches, the
         // same tie-break the paged list uses.
         orderBy: [{ [sort]: direction }, { id: 'asc' }],

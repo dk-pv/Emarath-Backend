@@ -9,6 +9,7 @@ import { UserRole } from '../../generated/prisma/client';
 import { CurrentUserService } from '../../auth/current-user';
 import { MailerService } from '../../auth/mailer.service';
 import { PrismaService } from '../../prisma/prisma.service';
+import { TagAccessService } from '../../tag-access/tag-access.service';
 import { LeadsBulkService } from '../bulk/leads-bulk.service';
 import { BulkActionResponse } from '../bulk/dto/bulk-actions.dto';
 import { CreateLeadNoteDto } from './dto/row-actions.dto';
@@ -71,7 +72,11 @@ function auditRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function makeService(role: UserRole = UserRole.SUPERADMIN) {
+function makeService(
+  role: UserRole = UserRole.SUPERADMIN,
+  // The pipelines closed to the caller (ADR-0093); none unless a test says so.
+  deniedPipelines?: string[],
+) {
   const leadFindFirst = jest.fn();
   const leadFindUnique = jest.fn();
   const leadCreate = jest.fn();
@@ -84,9 +89,16 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
 
   /** Which leads already carry an order — what the converted-lead guards read. */
   const orderFindMany = jest.fn().mockResolvedValue([]);
+  // A copy created straight into WON is re-read inside its transaction (`withLogisticsOrder`).
+  const txLeadFindUnique = jest.fn().mockResolvedValue(null);
   const tx = {
     $queryRaw: jest.fn().mockResolvedValue([]),
-    lead: { create: leadCreate, update: leadUpdate, findMany: auditFindMany },
+    lead: {
+      create: leadCreate,
+      update: leadUpdate,
+      findMany: auditFindMany,
+      findUnique: txLeadFindUnique,
+    },
     auditEvent: { createMany: auditCreateMany },
     // The conversion hook (ADR-0085): `createManyAndReturn` echoes what it was asked to
     // insert, so a lead that becomes WON gets an order id on its CONVERTED event.
@@ -104,6 +116,15 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
       ),
     },
   };
+  // The status check (`stageOfPipeline`): every pipeline and stage exists unless a test says
+  // otherwise.
+  const pipelineFindUnique = jest.fn().mockResolvedValue({ id: 'pipeline-1' });
+  const stageFindUnique = jest.fn().mockResolvedValue({ id: 'stage-1' });
+  // The copy's assignees (`ASSIGNABLE_USER_WHERE`): every requested user is assignable unless a
+  // test says otherwise.
+  const userFindMany = jest.fn((args: { where: { id: { in: string[] } } }) =>
+    Promise.resolve(args.where.id.in.map((id) => ({ id }))),
+  );
   // Writes exist only on the transaction: one that escaped it would throw.
   const prisma = {
     lead: {
@@ -113,14 +134,20 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     leadNote: {
       create: leadNoteCreate,
     },
-    stage: { findFirst: stageFindFirst },
+    pipeline: { findUnique: pipelineFindUnique },
+    stage: { findFirst: stageFindFirst, findUnique: stageFindUnique },
+    user: { findMany: userFindMany },
     $transaction: jest.fn((run: (client: typeof tx) => Promise<unknown>) =>
       run(tx),
     ),
   } as unknown as PrismaService;
 
   const currentUser = {
-    resolve: jest.fn().mockResolvedValue({ id: 'u1', role }),
+    resolve: jest.fn().mockResolvedValue({
+      id: 'u1',
+      role,
+      ...(deniedPipelines ? { deniedPipelines } : {}),
+    }),
   } as unknown as CurrentUserService;
 
   const bulkReassign = jest.fn();
@@ -133,11 +160,27 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
   const sendMail = jest.fn().mockResolvedValue(undefined);
   const mailer = { sendMail } as unknown as MailerService;
 
-  const service = new LeadRowActionsService(prisma, currentUser, bulk, mailer);
+  // Tag Permissions (ADR-0091) have their own suite; by default the caller may use every tag.
+  const handleable = jest
+    .fn()
+    .mockImplementation((_user: unknown, tagIds: string[]) =>
+      Promise.resolve(tagIds),
+    );
+  const tagAccess = { handleable } as unknown as TagAccessService;
+
+  const service = new LeadRowActionsService(
+    prisma,
+    currentUser,
+    bulk,
+    mailer,
+    tagAccess,
+  );
   return {
+    handleable,
     service,
     leadFindFirst,
     leadFindUnique,
+    txLeadFindUnique,
     leadCreate,
     leadUpdate,
     leadNoteCreate,
@@ -145,6 +188,9 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     bulkDelete,
     sendMail,
     stageFindFirst,
+    pipelineFindUnique,
+    stageFindUnique,
+    userFindMany,
     auditFindMany,
     auditCreateMany,
     orderFindMany,
@@ -175,6 +221,8 @@ describe('LeadRowActionsService.duplicate', () => {
   it('copies fields, assignments and tags into a new record', async () => {
     const { service, leadFindFirst, leadCreate } = makeService();
     leadFindFirst.mockResolvedValue({
+      id: LEAD_ID,
+      duplicateOfId: null,
       name: 'Acme',
       firstName: null,
       primaryPhone: '900',
@@ -213,8 +261,13 @@ describe('LeadRowActionsService.duplicate', () => {
     };
     // scalars carried over, id/timestamps not
     expect(data.data.name).toBe('Acme');
-    expect(data.data.status).toBe('HOT');
+    // …but the status is the new-lead default, not the source's HOT (ADR-0092).
+    expect(data.data.status).toBe('New');
     expect(data.data).not.toHaveProperty('id');
+    // The copy shares the source's phone, so it is recorded as a duplicate of it (ADR-0092),
+    // and the source's own id and link are not copied onto it as scalars.
+    expect(data.data.duplicateOf).toEqual({ connect: { id: LEAD_ID } });
+    expect(data.data).not.toHaveProperty('duplicateOfId');
     // assignments + tags cloned as nested creates
     expect(data.data.assignments).toEqual({
       create: [{ user: { connect: { id: AGENT_ID } } }],
@@ -222,6 +275,76 @@ describe('LeadRowActionsService.duplicate', () => {
     expect(data.data.tags).toEqual({
       create: [{ tag: { connect: { id: 'tag-1' } } }],
     });
+  });
+
+  it('records a copy of a duplicate against the source’s original, not the source', async () => {
+    const { service, leadFindFirst, leadCreate } = makeService();
+    leadFindFirst.mockResolvedValue({
+      id: LEAD_ID,
+      duplicateOfId: 'the-original',
+      assignments: [],
+      tags: [],
+    });
+    leadCreate.mockResolvedValue(listRow({ id: 'new-id' }));
+
+    await service.duplicate(LEAD_ID);
+
+    const created = (
+      leadCreate.mock.calls[0] as [{ data: Record<string, unknown> }]
+    )[0];
+    // One star around the original, not a chain through the lead that was copied.
+    expect(created.data.duplicateOf).toEqual({
+      connect: { id: 'the-original' },
+    });
+  });
+
+  it('copies only the tags the caller may select (Tag Permissions, ADR-0091)', async () => {
+    const { service, leadFindFirst, leadCreate, handleable } = makeService(
+      UserRole.SALES_AGENT,
+    );
+    leadFindFirst.mockResolvedValue({
+      id: LEAD_ID,
+      duplicateOfId: null,
+      assignments: [],
+      tags: [{ tagId: 'allowed' }, { tagId: 'forbidden' }],
+    });
+    handleable.mockResolvedValue(['allowed']);
+    leadCreate.mockResolvedValue(listRow({ id: 'new-id' }));
+
+    await service.duplicate(LEAD_ID);
+
+    expect(handleable).toHaveBeenCalledWith(
+      { id: 'u1', role: UserRole.SALES_AGENT },
+      ['allowed', 'forbidden'],
+    );
+    const created = (
+      leadCreate.mock.calls[0] as [{ data: { tags?: unknown } }]
+    )[0];
+    // The copy must not hand the caller a tag they could not have added themselves.
+    expect(created.data.tags).toEqual({
+      create: [{ tag: { connect: { id: 'allowed' } } }],
+    });
+  });
+
+  it('copies no tags at all when none of them is permitted', async () => {
+    const { service, leadFindFirst, leadCreate, handleable } = makeService(
+      UserRole.SALES_AGENT,
+    );
+    leadFindFirst.mockResolvedValue({
+      id: LEAD_ID,
+      duplicateOfId: null,
+      assignments: [],
+      tags: [{ tagId: 'forbidden' }],
+    });
+    handleable.mockResolvedValue([]);
+    leadCreate.mockResolvedValue(listRow({ id: 'new-id' }));
+
+    await service.duplicate(LEAD_ID);
+
+    const created = (
+      leadCreate.mock.calls[0] as [{ data: { tags?: unknown } }]
+    )[0];
+    expect(created.data.tags).toBeUndefined();
   });
 
   it('404s when the source is outside the caller scope', async () => {
@@ -263,41 +386,224 @@ describe('LeadRowActionsService.duplicate', () => {
   });
 
   /*
-    Current behaviour, pinned here because a Logistics order will hang off conversion
-    (ADR-0085 B8): the copy carries the source's status verbatim, so duplicating a WON lead
-    makes a second WON lead — recorded as CREATED, never as CONVERTED.
+    A copy is a new lead, so it starts where every new lead starts (ADR-0092): the first stage of
+    its pipeline, else 'New'. It never inherits the stage the source reached.
   */
-  it('copies a WON status into the new lead and converts the copy', async () => {
-    const {
-      service,
-      leadFindFirst,
-      leadCreate,
-      auditFindMany,
-      auditCreateMany,
-    } = makeService();
-    leadFindFirst.mockResolvedValue({
-      status: 'WON',
-      assignments: [],
-      tags: [],
+  describe('the copy’s status', () => {
+    const copyOf = async (
+      status: string,
+      stage: { name: string } | null = { name: 'New' },
+      pipeline = 'Lead Pipeline',
+    ) => {
+      const kit = makeService();
+      kit.leadFindFirst.mockResolvedValue({
+        id: LEAD_ID,
+        duplicateOfId: null,
+        status,
+        pipeline,
+        lostReason: 'Too expensive',
+        assignments: [],
+        tags: [],
+      });
+      kit.stageFindFirst.mockResolvedValue(stage);
+      kit.leadCreate.mockResolvedValue(listRow({ id: 'new-id' }));
+      kit.auditFindMany.mockResolvedValue([auditRow({ id: 'new-id' })]);
+      await kit.service.duplicate(LEAD_ID);
+      const created = (
+        kit.leadCreate.mock.calls[0] as [{ data: Record<string, unknown> }]
+      )[0].data;
+      return { kit, created };
+    };
+
+    it.each(['LOST', 'WON', 'HOT', 'Cold', 'SUPER HOT'])(
+      'starts as New when the source is %s',
+      async (status) => {
+        const { created } = await copyOf(status);
+        expect(created.status).toBe('New');
+      },
+    );
+
+    it('uses the first stage of the SOURCE’s pipeline, which is not always New', async () => {
+      const { kit, created } = await copyOf(
+        'LOST',
+        { name: 'Intake' },
+        'Complaints',
+      );
+
+      expect(created.status).toBe('Intake');
+      expect(created.pipeline).toBe('Complaints');
+      const [query] = kit.stageFindFirst.mock.calls[0] as [
+        { where: { pipeline: string } },
+      ];
+      expect(query.where.pipeline).toBe('Complaints');
     });
-    leadCreate.mockResolvedValue(listRow({ id: 'new-id', status: 'WON' }));
-    auditFindMany.mockResolvedValue([
-      auditRow({ id: 'new-id', status: 'WON' }),
-    ]);
 
-    await service.duplicate(LEAD_ID);
+    it('falls back to New for a pipeline with no stages', async () => {
+      const { created } = await copyOf('WON', null);
+      expect(created.status).toBe('New');
+    });
 
-    const created = (
-      leadCreate.mock.calls[0] as [{ data: { status?: string } }]
-    )[0];
-    expect(created.data.status).toBe('WON');
-    const events = recorded(auditCreateMany);
-    // The duplicate is its own lead, so it gets its own order (ADR-0085 A2 path 6).
-    expect(events).toMatchObject([
-      { action: 'CREATED', after: { status: 'WON' } },
-      { action: 'CONVERTED', metadata: { orderId: 'order-1' } },
-      { entityType: 'LOGISTICS_ORDER', action: 'CREATED', leadId: 'new-id' },
-    ]);
+    it('never reads the source’s status, lost reason or status timestamp, so none can be copied', async () => {
+      const { kit } = await copyOf('LOST');
+
+      const [query] = kit.leadFindFirst.mock.calls[0] as [
+        { select: Record<string, unknown> },
+      ];
+      // The copy's field list is the whole of what crosses over; progress is not on it.
+      for (const progress of [
+        'status',
+        'lostReason',
+        'statusChangedAt',
+        'deletedAt',
+      ]) {
+        expect(query.select).not.toHaveProperty(progress);
+      }
+      expect(query.select).toHaveProperty('pipeline');
+    });
+
+    it('leaves the original untouched: it is only read, never updated', async () => {
+      const { kit } = await copyOf('LOST');
+
+      expect(kit.leadUpdate).not.toHaveBeenCalled();
+      expect(kit.leadFindFirst).toHaveBeenCalledTimes(1);
+      // The one lead write is the create of the copy.
+      expect(kit.leadCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not make a second converted lead from a WON source: no CONVERTED event, no order', async () => {
+      const { kit } = await copyOf('WON');
+
+      const events = recorded(kit.auditCreateMany);
+      expect(events.map((event) => event.action)).toEqual(['CREATED']);
+      expect(
+        events.some((event) => event.entityType === 'LOGISTICS_ORDER'),
+      ).toBe(false);
+    });
+
+    // A reordered board can put WON first, so the copy itself converts (ADR-0085 B8); its
+    // response must then carry the order its own create made.
+    it('returns a copy that starts in WON with the order its create made', async () => {
+      const kit = makeService();
+      kit.leadFindFirst.mockResolvedValue({
+        id: LEAD_ID,
+        duplicateOfId: null,
+        pipeline: 'Lead Pipeline',
+        assignments: [],
+        tags: [],
+      });
+      kit.stageFindFirst.mockResolvedValue({ name: 'WON' });
+      kit.leadCreate.mockResolvedValue(
+        listRow({ id: 'new-id', status: 'WON', logisticsOrder: null }),
+      );
+      kit.txLeadFindUnique.mockResolvedValue(
+        listRow({
+          id: 'new-id',
+          status: 'WON',
+          logisticsOrder: { orderNumber: 1000, status: 'INITIAL' },
+        }),
+      );
+      kit.auditFindMany.mockResolvedValue([
+        auditRow({ id: 'new-id', status: 'WON' }),
+      ]);
+
+      const item = await kit.service.duplicate(LEAD_ID);
+
+      expect(kit.txLeadFindUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'new-id' } }),
+      );
+      expect(item.logisticsOrder).toEqual({
+        orderNumber: 1000,
+        status: 'INITIAL',
+      });
+    });
+
+    it('is recorded as created from its source, as a duplicate of it, in its own status', async () => {
+      const { kit } = await copyOf('LOST');
+
+      expect(recorded(kit.auditCreateMany)).toMatchObject([
+        {
+          action: 'CREATED',
+          entityId: 'new-id',
+          source: 'leads.duplicate',
+          metadata: { duplicatedFrom: LEAD_ID },
+          after: { status: 'New' },
+        },
+      ]);
+    });
+  });
+});
+
+/*
+  Phase 2A: a copy is a new lead, so its assignees are new assignments — the create rule
+  (only a manager or an administrator chooses them) and the active-user rule both apply.
+  Regression: the copy cloned every assignee of the source, whoever asked and whatever their state.
+*/
+describe('LeadRowActionsService.duplicate — assignees', () => {
+  const source = (userIds: string[]) => ({
+    id: LEAD_ID,
+    duplicateOfId: null,
+    pipeline: 'Lead Pipeline',
+    assignments: userIds.map((userId) => ({ userId })),
+    tags: [],
+  });
+  const copiedIds = (kit: ReturnType<typeof makeService>) => {
+    const [args] = kit.leadCreate.mock.calls[0] as [
+      {
+        data: {
+          assignments?: { create: { user: { connect: { id: string } } }[] };
+        };
+      },
+    ];
+    return args.data.assignments?.create.map((c) => c.user.connect.id) ?? [];
+  };
+
+  it('a manager or administrator copies only live, active, assignable assignees', async () => {
+    const kit = makeService(UserRole.SALES_MANAGER);
+    kit.leadFindFirst.mockResolvedValue(source([AGENT_ID, 'inactive-1']));
+    kit.userFindMany.mockResolvedValue([{ id: AGENT_ID }]);
+    kit.leadCreate.mockResolvedValue(listRow({ id: 'new-id' }));
+
+    await kit.service.duplicate(LEAD_ID);
+
+    expect(kit.userFindMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: [AGENT_ID, 'inactive-1'] },
+        deletedAt: null,
+        isActive: true,
+        role: {
+          in: [
+            UserRole.SALES_AGENT,
+            UserRole.SALES_MANAGER,
+            UserRole.CUSTOMER_SERVICE_AGENT,
+          ],
+        },
+      },
+      select: { id: true },
+    });
+    expect(copiedIds(kit)).toEqual([AGENT_ID]);
+    // The source keeps every assignee it had: it is only read.
+    expect(kit.leadUpdate).not.toHaveBeenCalled();
+  });
+
+  it('a sales agent’s copy is assigned to the agent alone', async () => {
+    const kit = makeService(UserRole.SALES_AGENT);
+    kit.leadFindFirst.mockResolvedValue(source(['u1', AGENT_ID]));
+    kit.leadCreate.mockResolvedValue(listRow({ id: 'new-id' }));
+
+    await kit.service.duplicate(LEAD_ID);
+
+    expect(copiedIds(kit)).toEqual(['u1']);
+  });
+
+  it('a customer service agent who is not on the source makes an unassigned copy', async () => {
+    const kit = makeService(UserRole.CUSTOMER_SERVICE_AGENT);
+    kit.leadFindFirst.mockResolvedValue(source([AGENT_ID]));
+    kit.leadCreate.mockResolvedValue(listRow({ id: 'new-id' }));
+
+    await kit.service.duplicate(LEAD_ID);
+
+    expect(copiedIds(kit)).toEqual([]);
+    expect(kit.userFindMany).not.toHaveBeenCalled();
   });
 });
 
@@ -394,6 +700,47 @@ describe('LeadRowActionsService.setStatus', () => {
     ]);
   });
 
+  // Regression: Convert answered with `logisticsOrder: null` — the row was read before the
+  // order existed — so the list kept offering Delete and the status menu until a reload.
+  it('returns a converted lead with the order the conversion created', async () => {
+    const { service, leadFindFirst, leadUpdate, leadFindUnique } =
+      makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    leadUpdate.mockResolvedValue(
+      listRow({ status: 'WON', logisticsOrder: null }),
+    );
+    leadFindUnique.mockResolvedValue(
+      listRow({
+        status: 'WON',
+        logisticsOrder: { orderNumber: 1000, status: 'INITIAL' },
+      }),
+    );
+
+    const item = await service.setStatus(LEAD_ID, { status: 'WON' });
+
+    expect(leadFindUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: LEAD_ID } }),
+    );
+    expect(item.logisticsOrder).toEqual({
+      orderNumber: 1000,
+      status: 'INITIAL',
+    });
+  });
+
+  it('does not re-read a lead set to an ordinary status', async () => {
+    const { service, leadFindFirst, leadUpdate, leadFindUnique } =
+      makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    leadUpdate.mockResolvedValue(
+      listRow({ status: 'HOT', logisticsOrder: null }),
+    );
+
+    const item = await service.setStatus(LEAD_ID, { status: 'HOT' });
+
+    expect(leadFindUnique).not.toHaveBeenCalled();
+    expect(item.logisticsOrder).toBeNull();
+  });
+
   it('writes no event when the status update fails', async () => {
     const {
       service,
@@ -410,6 +757,90 @@ describe('LeadRowActionsService.setStatus', () => {
       'connection lost',
     );
     expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+});
+
+/*
+  Phase 2A: POST /leads/:id/status took any string. A changed status must now be a stage of the
+  lead's own pipeline — the rule create, edit and the Kanban move already applied.
+*/
+describe('LeadRowActionsService.setStatus — stage validation', () => {
+  const lead = (status: string, pipeline = 'Lead Pipeline') => ({
+    id: LEAD_ID,
+    status,
+    pipeline,
+  });
+
+  it('refuses a status that is no stage (400) and writes nothing', async () => {
+    const kit = makeService();
+    kit.leadFindFirst.mockResolvedValue(lead('New'));
+    kit.stageFindUnique.mockResolvedValue(null);
+
+    await expect(
+      kit.service.setStatus(LEAD_ID, { status: 'Bogus' }),
+    ).rejects.toThrow(
+      '"Bogus" is not a stage of the "Lead Pipeline" pipeline.',
+    );
+    expect(kit.leadUpdate).not.toHaveBeenCalled();
+    expect(kit.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('checks the status against the lead’s OWN pipeline, not the default one', async () => {
+    const kit = makeService();
+    kit.leadFindFirst.mockResolvedValue(lead('Intake', 'Complaints'));
+    kit.stageFindUnique.mockResolvedValue(null);
+
+    await expect(
+      kit.service.setStatus(LEAD_ID, { status: 'HOT' }),
+    ).rejects.toThrow('"HOT" is not a stage of the "Complaints" pipeline.');
+    expect(kit.stageFindUnique).toHaveBeenCalledWith({
+      where: { pipeline_name: { pipeline: 'Complaints', name: 'HOT' } },
+      select: { id: true },
+    });
+    expect(kit.leadUpdate).not.toHaveBeenCalled();
+  });
+
+  it('does not query stages for an unchanged status (a new LOST reason)', async () => {
+    const kit = makeService();
+    kit.leadFindFirst.mockResolvedValue(lead('LOST'));
+    kit.leadUpdate.mockResolvedValue(listRow({ status: 'LOST' }));
+
+    await kit.service.setStatus(LEAD_ID, {
+      status: 'LOST',
+      lostReason: 'Price',
+    });
+
+    expect(kit.pipelineFindUnique).not.toHaveBeenCalled();
+    expect(kit.stageFindUnique).not.toHaveBeenCalled();
+    expect(kit.leadUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses Convert on a pipeline that has no WON stage, creating no order', async () => {
+    const kit = makeService();
+    kit.leadFindFirst.mockResolvedValue(lead('Intake', 'Complaints'));
+    kit.stageFindUnique.mockResolvedValue(null);
+
+    await expect(
+      kit.service.setStatus(LEAD_ID, { status: 'WON' }),
+    ).rejects.toThrow('"WON" is not a stage of the "Complaints" pipeline.');
+    expect(kit.leadUpdate).not.toHaveBeenCalled();
+    expect(kit.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('accepts a stage of the lead’s pipeline', async () => {
+    const kit = makeService();
+    kit.leadFindFirst.mockResolvedValue(lead('Intake', 'Complaints'));
+    kit.leadUpdate.mockResolvedValue(
+      listRow({ status: 'Resolved', pipeline: 'Complaints' }),
+    );
+
+    const item = await kit.service.setStatus(LEAD_ID, { status: 'Resolved' });
+
+    expect(item.status).toBe('Resolved');
+    expect(kit.stageFindUnique).toHaveBeenCalledWith({
+      where: { pipeline_name: { pipeline: 'Complaints', name: 'Resolved' } },
+      select: { id: true },
+    });
   });
 });
 
@@ -480,6 +911,37 @@ describe('LeadRowActionsService.changePipeline', () => {
       { action: 'PIPELINE_CHANGED', after: { pipeline: 'Fulfilment' } },
       { entityType: 'LOGISTICS_ORDER', action: 'CREATED' },
     ]);
+  });
+
+  it('returns a lead moved onto a WON first stage with the order the move created', async () => {
+    const {
+      service,
+      leadFindFirst,
+      leadUpdate,
+      leadFindUnique,
+      stageFindFirst,
+    } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    stageFindFirst.mockResolvedValue({ name: 'WON' });
+    leadUpdate.mockResolvedValue(
+      listRow({ status: 'WON', pipeline: 'Fulfilment', logisticsOrder: null }),
+    );
+    leadFindUnique.mockResolvedValue(
+      listRow({
+        status: 'WON',
+        pipeline: 'Fulfilment',
+        logisticsOrder: { orderNumber: 1001, status: 'INITIAL' },
+      }),
+    );
+
+    const item = await service.changePipeline(LEAD_ID, {
+      pipeline: 'Fulfilment',
+    });
+
+    expect(item.logisticsOrder).toEqual({
+      orderNumber: 1001,
+      status: 'INITIAL',
+    });
   });
 });
 
@@ -667,5 +1129,108 @@ describe('LeadRowActionsService.delete', () => {
     await expect(service.delete(LEAD_ID)).rejects.toBeInstanceOf(
       ConflictException,
     );
+  });
+});
+
+// ADR-0093: a lead a sales agent sees only because it is assigned to them, in a pipeline
+// closed to them, is theirs to view — every row action that changes it is refused.
+describe('LeadRowActionsService — pipeline access (ADR-0093)', () => {
+  const VIEW_ONLY =
+    'This lead is in the "VIP" pipeline, which you don\'t have access to. You can view it, but not change it.';
+  const agentKit = () => {
+    const kit = makeService(UserRole.SALES_AGENT, ['VIP']);
+    kit.leadFindFirst.mockResolvedValue({
+      id: LEAD_ID,
+      status: 'New',
+      pipeline: 'VIP',
+      assignments: [{ userId: 'u1' }],
+      tags: [],
+      duplicateOfId: null,
+    });
+    return kit;
+  };
+
+  it('Duplicate: refuses a copy into the closed pipeline (B9)', async () => {
+    const kit = agentKit();
+    await expect(kit.service.duplicate(LEAD_ID)).rejects.toThrow(
+      `You don't have access to the "VIP" pipeline.`,
+    );
+    expect(kit.leadCreate).not.toHaveBeenCalled();
+  });
+
+  it('status: refused, nothing written', async () => {
+    const kit = agentKit();
+    await expect(
+      kit.service.setStatus(LEAD_ID, { status: 'HOT' }),
+    ).rejects.toThrow(VIEW_ONLY);
+    expect(kit.leadUpdate).not.toHaveBeenCalled();
+  });
+
+  it('archive and unarchive: refused, nothing written', async () => {
+    const kit = agentKit();
+    await expect(kit.service.archive(LEAD_ID)).rejects.toThrow(VIEW_ONLY);
+    await expect(kit.service.unarchive(LEAD_ID)).rejects.toThrow(VIEW_ONLY);
+    expect(kit.leadUpdate).not.toHaveBeenCalled();
+  });
+
+  it('note and email: refused, nothing written or sent', async () => {
+    const kit = agentKit();
+    await expect(kit.service.addNote(LEAD_ID, { body: 'x' })).rejects.toThrow(
+      VIEW_ONLY,
+    );
+    await expect(
+      kit.service.sendEmail(LEAD_ID, { to: ['a@b.co'] }),
+    ).rejects.toThrow(VIEW_ONLY);
+    expect(kit.leadNoteCreate).not.toHaveBeenCalled();
+    expect(kit.sendMail).not.toHaveBeenCalled();
+  });
+
+  it('delete: refused with the reason, before the bulk path runs', async () => {
+    const kit = agentKit();
+    await expect(kit.service.delete(LEAD_ID)).rejects.toThrow(VIEW_ONLY);
+    expect(kit.bulkDelete).not.toHaveBeenCalled();
+  });
+
+  it('delete: a lead outside the caller’s scope still goes to the bulk path (its 404)', async () => {
+    const kit = makeService(UserRole.SALES_AGENT, ['VIP']);
+    kit.leadFindFirst.mockResolvedValue(null);
+    kit.bulkDelete.mockResolvedValue(oneResult('failed'));
+    await expect(kit.service.delete(LEAD_ID)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(kit.bulkDelete).toHaveBeenCalledTimes(1);
+  });
+
+  describe('Change Pipeline (B5)', () => {
+    it('refuses a manager’s move into a pipeline closed to them, before reading its stages', async () => {
+      const kit = makeService(UserRole.SALES_MANAGER, ['VIP']);
+      kit.leadFindFirst.mockResolvedValue({
+        id: LEAD_ID,
+        pipeline: 'Lead Pipeline',
+      });
+      await expect(
+        kit.service.changePipeline(LEAD_ID, { pipeline: 'VIP' }),
+      ).rejects.toThrow(`You don't have access to the "VIP" pipeline.`);
+      expect(kit.stageFindFirst).not.toHaveBeenCalled();
+      expect(kit.leadUpdate).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      UserRole.SALES_AGENT,
+      UserRole.CUSTOMER_SERVICE_AGENT,
+      UserRole.MARKETING_ANALYST,
+    ])('refuses %s in the service too, not only at the route', async (role) => {
+      const kit = makeService(role);
+      kit.leadFindFirst.mockResolvedValue({
+        id: LEAD_ID,
+        pipeline: 'Lead Pipeline',
+      });
+      await expect(
+        kit.service.changePipeline(LEAD_ID, { pipeline: 'Complaints' }),
+      ).rejects.toThrow(
+        'Only a manager or an administrator can move a lead to another pipeline.',
+      );
+      expect(kit.leadUpdate).not.toHaveBeenCalled();
+    });
   });
 });

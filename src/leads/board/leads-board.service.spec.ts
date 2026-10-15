@@ -64,10 +64,16 @@ function auditRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function makeService(role: UserRole = UserRole.SUPERADMIN) {
+function makeService(
+  role: UserRole = UserRole.SUPERADMIN,
+  // The pipelines closed to the caller (ADR-0093); none unless a test says so.
+  deniedPipelines?: string[],
+) {
   const groupBy = jest.fn();
   const aggregate = jest.fn();
   const findFirst = jest.fn();
+  // The re-read of a lead that has just become WON (`withLogisticsOrder`); none by default.
+  const findUnique = jest.fn().mockResolvedValue(null);
   const update = jest.fn();
   // The audit reads (before/after the move) and the audit write (ADR-0083).
   const auditFindMany = jest.fn().mockResolvedValue([]);
@@ -94,13 +100,17 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
   };
   // `update` exists only on `tx`: a move that escaped the audit transaction would throw.
   const prisma = {
-    lead: { groupBy, aggregate, findFirst },
+    lead: { groupBy, aggregate, findFirst, findUnique },
     $transaction: jest.fn((run: (client: typeof tx) => Promise<unknown>) =>
       run(tx),
     ),
   } as unknown as PrismaService;
   const currentUser = {
-    resolve: jest.fn().mockResolvedValue({ id: 'u1', role }),
+    resolve: jest.fn().mockResolvedValue({
+      id: 'u1',
+      role,
+      ...(deniedPipelines ? { deniedPipelines } : {}),
+    }),
   } as unknown as CurrentUserService;
   // A move validates its target against the canonical catalogue; valid by default.
   const exists = jest.fn().mockResolvedValue(true);
@@ -111,6 +121,7 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     groupBy,
     aggregate,
     findFirst,
+    findUnique,
     update,
     exists,
     auditFindMany,
@@ -385,6 +396,46 @@ describe('LeadsBoardService.moveStage', () => {
     is the one path that checks the target against the stage catalogue first (ADR-0085 A2
     path 4). Pinned because a Logistics order will follow this event.
   */
+  // Regression: the response row was read before the order existed, so the card kept being
+  // draggable (and its menu enabled) until the board reloaded.
+  it('returns the dragged-to-WON lead with the order the drag created', async () => {
+    const { service, findFirst, findUnique, update, groupBy } = makeService();
+    findFirst.mockResolvedValue({ status: 'HOT', pipeline: 'Lead Pipeline' });
+    update.mockResolvedValue(
+      listRow({ status: 'WON', logisticsOrder: null, duplicateOfId: null }),
+    );
+    findUnique.mockResolvedValue(
+      listRow({
+        status: 'WON',
+        logisticsOrder: { orderNumber: 1000, status: 'INITIAL' },
+        duplicateOfId: null,
+      }),
+    );
+    groupBy.mockResolvedValue([]);
+
+    const result = await service.moveStage(LEAD_ID, { stage: 'WON' });
+
+    expect(findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: LEAD_ID } }),
+    );
+    expect(result.lead.logisticsOrder).toEqual({
+      orderNumber: 1000,
+      status: 'INITIAL',
+    });
+  });
+
+  it('does not re-read a lead moved to an ordinary stage', async () => {
+    const { service, findFirst, findUnique, update, groupBy } = makeService();
+    findFirst.mockResolvedValue({ status: 'New', pipeline: 'Lead Pipeline' });
+    update.mockResolvedValue(listRow({ status: 'HOT', logisticsOrder: null }));
+    groupBy.mockResolvedValue([]);
+
+    const result = await service.moveStage(LEAD_ID, { stage: 'HOT' });
+
+    expect(findUnique).not.toHaveBeenCalled();
+    expect(result.lead.logisticsOrder).toBeNull();
+  });
+
   it('records a drag onto WON as CONVERTED (ADR-0083)', async () => {
     const {
       service,
@@ -433,5 +484,22 @@ describe('LeadsBoardService.moveStage', () => {
       service.moveStage(LEAD_ID, { stage: 'Nope' }),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+});
+
+// ADR-0093 B2: an agent sees an assigned lead in a pipeline closed to them, but may not move it.
+describe('LeadsBoardService.moveStage — pipeline access (ADR-0093)', () => {
+  it('refuses moving a lead the agent may only see, writing nothing', async () => {
+    const { service, findFirst, update, exists } = makeService(
+      UserRole.SALES_AGENT,
+      ['VIP'],
+    );
+    findFirst.mockResolvedValue({ status: 'New', pipeline: 'VIP' });
+
+    await expect(service.moveStage(LEAD_ID, { stage: 'HOT' })).rejects.toThrow(
+      'This lead is in the "VIP" pipeline, which you don\'t have access to. You can view it, but not change it.',
+    );
+    expect(exists).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
   });
 });

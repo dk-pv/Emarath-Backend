@@ -14,7 +14,9 @@ import {
   leadDeletedEvent,
   recordLeadsCreated,
   toLeadAuditState,
+  withLogisticsOrder,
 } from './lead-audit';
+import { LEAD_LIST_SELECT, LeadRow } from './dto/lead-response.dto';
 
 const LEAD = '11111111-1111-1111-1111-111111111111';
 const context: LeadAuditContext = {
@@ -445,6 +447,50 @@ describe('recordLeadsCreated', () => {
       { action: 'CREATED', source: 'leads.create' },
       { action: 'ASSIGNED', after: { assigneeIds: ['a'] } },
     ]);
+  });
+});
+
+describe('withLogisticsOrder', () => {
+  const row = (status: string, logisticsOrder: unknown) =>
+    ({ id: LEAD, status, logisticsOrder }) as unknown as LeadRow;
+  const clientReturning = (found: unknown) => {
+    const findUnique = jest.fn().mockResolvedValue(found);
+    return {
+      findUnique,
+      client: { lead: { findUnique } } as unknown as Pick<
+        Prisma.TransactionClient,
+        'lead'
+      >,
+    };
+  };
+  const order = { orderNumber: 1000, status: 'INITIAL' };
+
+  it('re-reads a WON row that came back without its order, by id, with the list select', async () => {
+    const fresh = row('WON', order);
+    const { client, findUnique } = clientReturning(fresh);
+
+    expect(await withLogisticsOrder(client, row('WON', null))).toBe(fresh);
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { id: LEAD },
+      select: LEAD_LIST_SELECT,
+    });
+  });
+
+  it('leaves a row that already carries its order, or is not WON, unread', async () => {
+    const { client, findUnique } = clientReturning(null);
+    const withOrder = row('WON', order);
+    const ordinary = row('HOT', null);
+
+    expect(await withLogisticsOrder(client, withOrder)).toBe(withOrder);
+    expect(await withLogisticsOrder(client, ordinary)).toBe(ordinary);
+    expect(findUnique).not.toHaveBeenCalled();
+  });
+
+  it('keeps the row it was given when the re-read finds nothing', async () => {
+    const { client } = clientReturning(null);
+    const legacy = row('WON', null);
+
+    expect(await withLogisticsOrder(client, legacy)).toBe(legacy);
   });
 });
 

@@ -48,7 +48,10 @@ function evalResult(rows: Partial<EvaluatedRow>[]): EvaluationResult {
   };
 }
 
-function makeService(role: UserRole = UserRole.SUPERADMIN) {
+function makeService(
+  role: UserRole = UserRole.SUPERADMIN,
+  importsDuplicates = false,
+) {
   // Held as locals (not read off the mocks) so the assertions never reference an
   // unbound class method — the pattern leads.service.spec uses.
   const evaluate = jest.fn();
@@ -61,10 +64,18 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     .fn()
     .mockResolvedValue({ fields: runFields, defaultStatus: 'New' });
 
-  const engine = { evaluate, persistValid } as unknown as ImportEngineService;
+  // The row-selection rule is the real one; only evaluation and the write are stubbed.
+  const realEngine = new ImportEngineService();
+  const engine = {
+    evaluate,
+    persistValid,
+    writable: (rows: EvaluatedRow[], target: { importsDuplicates?: boolean }) =>
+      realEngine.writable(rows, target),
+  } as unknown as ImportEngineService;
 
   const descriptor = {
     module: 'leads',
+    importsDuplicates,
     fields: LEADS_IMPORT_FIELDS,
     prepare,
     sampleRows: jest
@@ -189,8 +200,37 @@ A,1,2,COD`),
       body(VALID_MAPPING, 'Complaints'),
     );
 
-    expect(prepare).toHaveBeenCalledWith('Complaints');
+    expect(prepare).toHaveBeenCalledWith('Complaints', {
+      id: 'u1',
+      role: 'SUPERADMIN',
+    });
     expect((evaluate.mock.calls[0] as unknown[])[3]).toBe(runFields);
+  });
+
+  // ADR-0093: validate and the import each check the pipeline themselves, as the importer.
+  it('hands prepare the importer, on validate and on the import alike', async () => {
+    const { service, evaluate, prepare } = makeService();
+    evaluate.mockResolvedValue(evalResult([{ status: 'valid' }]));
+    prepare.mockRejectedValue(new Error('closed'));
+
+    await expect(
+      service.validate(csv(`${HEADER}\nA,1,2,COD`), body(VALID_MAPPING, 'VIP')),
+    ).rejects.toThrow('closed');
+    await expect(
+      service.startImport(
+        csv(`${HEADER}\nA,1,2,COD`),
+        body(VALID_MAPPING, 'VIP'),
+      ),
+    ).rejects.toThrow('closed');
+
+    for (const call of [1, 2]) {
+      expect(prepare).toHaveBeenNthCalledWith(
+        call,
+        'VIP',
+        expect.objectContaining({ id: 'u1' }),
+      );
+    }
+    expect(evaluate).not.toHaveBeenCalled();
   });
 });
 
@@ -394,5 +434,119 @@ describe('toImportJobResponse', () => {
     expect(toImportJobResponse(row('COMPLETED', 60), now).status).toBe(
       'COMPLETED',
     );
+  });
+});
+
+describe('LeadsImportService — a duplicate row is imported, not skipped (ADR-0092)', () => {
+  const rows = () =>
+    evalResult([
+      { status: 'valid' },
+      {
+        status: 'duplicate',
+        error: { reason: 'dup', errorCode: 'DUPLICATE_EXISTING' },
+      },
+      {
+        status: 'invalid',
+        error: { reason: 'bad', errorCode: 'INVALID_PHONE' },
+      },
+    ]);
+  const file = () => csv(`${HEADER}\nA,1,2,COD\nB,1,2,COD\nC,x,2,COD`);
+
+  it('counts nothing as skipped and settles only the invalid row up front', async () => {
+    const { service, evaluate, create } = makeService(
+      UserRole.SUPERADMIN,
+      true,
+    );
+    evaluate.mockResolvedValue(rows());
+
+    await service.startImport(file(), body(VALID_MAPPING));
+
+    const created = (create.mock.calls as unknown[][])[0][0] as {
+      skippedCount: number;
+      failedCount: number;
+      processedRows: number;
+      totalRows: number;
+    };
+    expect(created.skippedCount).toBe(0);
+    expect(created.failedCount).toBe(1);
+    expect(created.processedRows).toBe(1);
+    expect(created.totalRows).toBe(3);
+  });
+
+  it('leaves the imported duplicate out of the failed/skipped report, listing only the invalid row', async () => {
+    const { service, evaluate, create } = makeService(
+      UserRole.SUPERADMIN,
+      true,
+    );
+    evaluate.mockResolvedValue(rows());
+
+    await service.startImport(file(), body(VALID_MAPPING));
+
+    const created = (create.mock.calls as unknown[][])[0][0] as {
+      errors: { rowNumber: number; errorCode: string }[];
+    };
+    expect(created.errors.map((e) => [e.rowNumber, e.errorCode])).toEqual([
+      [4, 'INVALID_PHONE'],
+    ]);
+  });
+
+  it('still skips and reports duplicates for a descriptor that does not import them', async () => {
+    const { service, evaluate, create } = makeService(
+      UserRole.SUPERADMIN,
+      false,
+    );
+    evaluate.mockResolvedValue(rows());
+
+    await service.startImport(file(), body(VALID_MAPPING));
+
+    const created = (create.mock.calls as unknown[][])[0][0] as {
+      skippedCount: number;
+      errors: { errorCode: string }[];
+    };
+    expect(created.skippedCount).toBe(1);
+    expect(created.errors.map((e) => e.errorCode)).toEqual([
+      'DUPLICATE_EXISTING',
+      'INVALID_PHONE',
+    ]);
+  });
+
+  it('reconciles a failed run over the rows it meant to write, duplicates included', async () => {
+    const { service, evaluate, persistValid, update } = makeService(
+      UserRole.SUPERADMIN,
+      true,
+    );
+    evaluate.mockResolvedValue(rows());
+    persistValid.mockImplementation(
+      async (
+        _rows: unknown,
+        _descriptor: unknown,
+        _context: unknown,
+        onProgress: (n: number) => Promise<void>,
+      ) => {
+        await onProgress(1);
+        return 1;
+      },
+    );
+    update.mockRejectedValueOnce(new Error('connection dropped'));
+
+    await service.startImport(file(), body(VALID_MAPPING));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const failed = (update.mock.calls as unknown[][]).at(-1)?.[1] as {
+      status: string;
+      importedCount: number;
+      failedCount: number;
+      errors: { rowNumber: number; errorCode: string }[];
+    };
+    expect(failed).toMatchObject({
+      status: 'FAILED',
+      importedCount: 1,
+      // The invalid row plus the one writable row (the duplicate) that never landed.
+      failedCount: 2,
+    });
+    expect(failed.errors.map((e) => [e.rowNumber, e.errorCode])).toEqual([
+      [4, 'INVALID_PHONE'],
+      [3, 'NOT_IMPORTED'],
+    ]);
   });
 });

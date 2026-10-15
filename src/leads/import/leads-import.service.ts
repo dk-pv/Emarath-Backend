@@ -98,11 +98,11 @@ export class LeadsImportService {
     file: UploadedFile,
     dto: ImportBodyDto,
   ): Promise<ValidateResult> {
-    await this.currentUser.resolve();
+    const user = await this.currentUser.resolve();
     const sheet = await parseSpreadsheet(file);
     const mapping = this.parseMapping(dto.mapping);
     this.assertMapping(mapping);
-    const run = await this.descriptor.prepare(dto.pipeline);
+    const run = await this.descriptor.prepare(dto.pipeline, user);
 
     const { rows, summary } = await this.engine.evaluate(
       sheet,
@@ -136,7 +136,7 @@ export class LeadsImportService {
     const sheet = await parseSpreadsheet(file);
     const mapping = this.parseMapping(dto.mapping);
     this.assertMapping(mapping);
-    const run = await this.descriptor.prepare(dto.pipeline);
+    const run = await this.descriptor.prepare(dto.pipeline, user);
 
     const { rows, summary } = await this.engine.evaluate(
       sheet,
@@ -146,6 +146,8 @@ export class LeadsImportService {
     );
 
     const errors = this.collectErrors(rows);
+    // A duplicate is written as its own lead (ADR-0092), so nothing is skipped.
+    const skipped = this.descriptor.importsDuplicates ? 0 : summary.duplicates;
 
     const job = await this.jobs.create({
       module: this.descriptor.module,
@@ -154,9 +156,9 @@ export class LeadsImportService {
       pipeline: dto.pipeline,
       mapping: mapping,
       totalRows: summary.total,
-      // Invalid and duplicate rows are settled up front; only valid rows still process.
-      processedRows: summary.invalid + summary.duplicates,
-      skippedCount: summary.duplicates,
+      // Rows that are not written are settled up front; only the writable ones still process.
+      processedRows: summary.invalid + skipped,
+      skippedCount: skipped,
       failedCount: summary.invalid,
       errors: errors.length
         ? (errors as unknown as Prisma.InputJsonValue)
@@ -181,7 +183,8 @@ export class LeadsImportService {
     rows: EvaluatedRow[],
     context: LeadsImportContext,
   ): Promise<void> {
-    const settledCount = rows.filter((row) => row.status !== 'valid').length;
+    const writable = this.engine.writable(rows, this.descriptor);
+    const settledCount = rows.length - writable.length;
     // Set before the progress write, so it stays right even when that write fails.
     let landed = 0;
 
@@ -211,16 +214,13 @@ export class LeadsImportService {
       );
       // Valid rows after the failed batch were never written. They count as failed and
       // join the error report, so the totals add up and the report lists what to retry.
-      const unwritten = rows
-        .filter((row) => row.status === 'valid')
-        .slice(landed)
-        .map((row): RowError => ({
-          rowNumber: row.rowNumber,
-          values: row.values,
-          reason:
-            'Not imported: the import stopped before this row was written. Import the file again to add it.',
-          errorCode: 'NOT_IMPORTED',
-        }));
+      const unwritten = writable.slice(landed).map((row): RowError => ({
+        rowNumber: row.rowNumber,
+        values: row.values,
+        reason:
+          'Not imported: the import stopped before this row was written. Import the file again to add it.',
+        errorCode: 'NOT_IMPORTED',
+      }));
       const errors = [...this.collectErrors(rows), ...unwritten];
       await this.jobs
         .update(jobId, {
@@ -264,10 +264,12 @@ export class LeadsImportService {
     return { jobs: rows.map((row) => toImportJobResponse(row)) };
   }
 
+  /** The rows the report lists: invalid ones, plus duplicates when they are skipped, not written. */
   private collectErrors(rows: EvaluatedRow[]): RowError[] {
+    const written = new Set(this.engine.writable(rows, this.descriptor));
     const errors: RowError[] = [];
     for (const row of rows) {
-      if (row.status !== 'valid' && row.error) {
+      if (row.status !== 'valid' && !written.has(row) && row.error) {
         errors.push({
           rowNumber: row.rowNumber,
           values: row.values,

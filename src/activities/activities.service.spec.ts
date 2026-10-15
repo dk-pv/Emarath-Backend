@@ -51,15 +51,19 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
   // unless a test says otherwise.
   const userFindMany = jest.fn((args: { where: { id: { in: string[] } } }) =>
     Promise.resolve(
-      args.where.id.in.map((id) => ({
-        id,
-        name: `User ${id}`,
-        role: UserRole.SALES_AGENT,
-        team: null,
-      })),
+      args.where.id.in.map(
+        (id): { id: string; name: string; role: UserRole; team: null } => ({
+          id,
+          name: `User ${id}`,
+          role: UserRole.SALES_AGENT,
+          team: null,
+        }),
+      ),
     ),
   );
   const leadCount = jest.fn().mockResolvedValue(1);
+  // Pipeline access (ADR-0093): nothing is closed to anyone unless a test says otherwise.
+  const pipelineFindMany = jest.fn().mockResolvedValue([]);
   // $transaction runs the ops array and resolves to the ops' return values —
   // exactly what the real client does, so the mocked findMany/count values flow
   // straight through.
@@ -68,6 +72,7 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
   const prisma = {
     lead: { findFirst: leadFindFirst, count: leadCount },
     user: { findMany: userFindMany },
+    pipeline: { findMany: pipelineFindMany },
     activity: {
       create: activityCreate,
       findMany: activityFindMany,
@@ -106,6 +111,7 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     activityUpdate,
     userFindMany,
     leadCount,
+    pipelineFindMany,
   };
 }
 
@@ -281,6 +287,87 @@ describe('ActivitiesService.create', () => {
         ],
       },
     });
+  });
+
+  it('checks an assignee with the pipelines closed to them, not the caller’s (ADR-0093)', async () => {
+    const {
+      service,
+      leadFindFirst,
+      activityCreate,
+      leadCount,
+      userFindMany,
+      pipelineFindMany,
+    } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID, name: 'Acme' });
+    activityCreate.mockResolvedValue(activityRow());
+    userFindMany.mockResolvedValue([
+      {
+        id: AGENT_ID,
+        name: 'Cara',
+        role: UserRole.CUSTOMER_SERVICE_AGENT,
+        team: null,
+      },
+    ]);
+    pipelineFindMany.mockResolvedValue([{ name: 'VIP' }]);
+
+    await service.create(makeDto());
+
+    const grants = JSON.stringify(pipelineFindMany.mock.calls[0]);
+    expect(grants).toContain(AGENT_ID);
+    expect(leadCount).toHaveBeenCalledWith({
+      where: {
+        AND: [
+          { deletedAt: null, pipeline: { notIn: ['VIP'] } },
+          { id: LEAD_ID },
+        ],
+      },
+    });
+  });
+
+  it('refuses an assignee the lead’s pipeline is closed to (ADR-0093)', async () => {
+    const {
+      service,
+      leadFindFirst,
+      activityCreate,
+      leadCount,
+      userFindMany,
+      pipelineFindMany,
+    } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID, name: 'Acme' });
+    userFindMany.mockResolvedValue([
+      {
+        id: AGENT_ID,
+        name: 'Cara',
+        role: UserRole.CUSTOMER_SERVICE_AGENT,
+        team: null,
+      },
+    ]);
+    pipelineFindMany.mockResolvedValue([{ name: 'VIP' }]);
+    leadCount.mockResolvedValue(0);
+
+    await expect(service.create(makeDto())).rejects.toThrow(
+      "Cara can't be assigned this follow-up: the lead is outside their access.",
+    );
+    expect(activityCreate).not.toHaveBeenCalled();
+  });
+
+  it('reads no grants for an admin assignee, who opens every pipeline (B1)', async () => {
+    const {
+      service,
+      leadFindFirst,
+      activityCreate,
+      userFindMany,
+      pipelineFindMany,
+    } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID, name: 'Acme' });
+    activityCreate.mockResolvedValue(activityRow());
+    userFindMany.mockResolvedValue([
+      { id: AGENT_ID, name: 'Admin', role: UserRole.SUPERADMIN, team: null },
+    ]);
+
+    await service.create(makeDto());
+
+    expect(pipelineFindMany).not.toHaveBeenCalled();
   });
 
   it('refuses an assignee id that is not a live user', async () => {
@@ -642,6 +729,50 @@ describe('ActivitiesService.duplicate', () => {
     await expect(service.duplicate(ACT_ID)).rejects.toBeInstanceOf(
       NotFoundException,
     );
+    expect(activityCreate).not.toHaveBeenCalled();
+  });
+
+  // ADR-0093: the copy assigns its assignees afresh, so each must still be able to open the
+  // lead — a pipeline closed to one of them since the original was made refuses the copy.
+  it('checks every copied assignee against the lead with their own access', async () => {
+    const {
+      service,
+      activityFindFirst,
+      activityCreate,
+      leadCount,
+      userFindMany,
+      pipelineFindMany,
+    } = makeService();
+    activityFindFirst.mockResolvedValue({
+      type: ActivityType.CALL,
+      description: 'call them',
+      dueAt: new Date(DUE),
+      endAt: null,
+      lead: { id: LEAD_ID, name: 'Acme' },
+      assignees: [{ userId: AGENT_ID }],
+    });
+    userFindMany.mockResolvedValue([
+      {
+        id: AGENT_ID,
+        name: 'Cara',
+        role: UserRole.CUSTOMER_SERVICE_AGENT,
+        team: null,
+      },
+    ]);
+    pipelineFindMany.mockResolvedValue([{ name: 'VIP' }]);
+    leadCount.mockResolvedValue(0);
+
+    await expect(service.duplicate(ACT_ID)).rejects.toThrow(
+      "Cara can't be assigned this follow-up: the lead is outside their access.",
+    );
+    expect(leadCount).toHaveBeenCalledWith({
+      where: {
+        AND: [
+          { deletedAt: null, pipeline: { notIn: ['VIP'] } },
+          { id: LEAD_ID },
+        ],
+      },
+    });
     expect(activityCreate).not.toHaveBeenCalled();
   });
 });

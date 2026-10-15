@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { LeadRowActionsService } from './leads-row-actions.service';
 import { Roles } from '../../auth/roles.decorator';
-import { UserRole } from '../../generated/prisma/client';
+import { PIPELINE_MOVE_ROLES, REASSIGN_ROLES } from '../../auth/role-groups';
 import { LeadListItem } from '../dto/lead-response.dto';
 import {
   AddLeadNoteResponse,
@@ -48,7 +48,7 @@ export class LeadRowActionsController {
    * Managers-and-admins only (AUTH-02.2), the server block behind the hidden row control.
    */
   @Post(':id/reassign')
-  @Roles(UserRole.SUPERADMIN, UserRole.SALES_MANAGER)
+  @Roles(...REASSIGN_ROLES)
   @HttpCode(200)
   reassign(
     @Param('id', ParseUUIDPipe) id: string,
@@ -98,8 +98,10 @@ export class LeadRowActionsController {
    * POST /api/leads/:id/pipeline — move this lead to another pipeline (KAN-03.1 card
    * menu). Lands it on the target pipeline's first stage; a pipeline with no stages is
    * a 400. Two-segment path, so it never collides with the single-segment routes.
+   * Managers-and-admins only (ADR-0093 B5), the server block behind the hidden control.
    */
   @Post(':id/pipeline')
+  @Roles(...PIPELINE_MOVE_ROLES)
   @HttpCode(200)
   changePipeline(
     @Param('id', ParseUUIDPipe) id: string,

@@ -10,6 +10,7 @@ import {
 import { LookupsService } from '../../lookups/lookups.service';
 import { SettingsService } from '../../settings/settings.service';
 import { StagesService } from '../../stages/stages.service';
+import { assertPipelineOpen } from '../../pipelines/pipeline-access';
 import { LEADS_IMPORT_FIELDS } from './leads-import.fields';
 import { LeadsImportRepository, PreparedLead } from './leads-import.repository';
 
@@ -68,6 +69,9 @@ export class LeadsImportDescriptor implements ImportDescriptor<
 > {
   readonly module = 'leads';
   readonly fields = LEADS_IMPORT_FIELDS;
+  // A duplicate row is imported as its own lead and linked to the lead it duplicates
+  // (ADR-0092) — the same rule as the New Lead form — rather than skipped.
+  readonly importsDuplicates = true;
 
   constructor(
     private readonly repository: LeadsImportRepository,
@@ -77,10 +81,13 @@ export class LeadsImportDescriptor implements ImportDescriptor<
   ) {}
 
   /**
-   * The run's fields for `pipeline`. Refuses a pipeline that does not exist or has no
-   * stages: its leads would sit in no Kanban column.
+   * The run's fields for `pipeline`. Refuses a pipeline closed to the importer (ADR-0093),
+   * before anything about it is read, and one that does not exist or has no stages: its
+   * leads would sit in no Kanban column. Validate and the import each call this, so each
+   * checks the pipeline on its own.
    */
-  async prepare(pipeline: string): Promise<LeadsImportRun> {
+  async prepare(pipeline: string, user: CurrentUser): Promise<LeadsImportRun> {
+    assertPipelineOpen(user, pipeline);
     const [pipelines, options] = await Promise.all([
       this.lookups.byType('pipelines'),
       this.optionsFor(pipeline),
@@ -219,15 +226,20 @@ export class LeadsImportDescriptor implements ImportDescriptor<
 
   // The pipeline was already baked into each record by buildRecord; the context here
   // only says who ran the import and which run it was, for the audit events.
-  persistBatch(
+  async persistBatch(
     records: PreparedLead[],
     context: LeadsImportContext,
   ): Promise<void> {
-    return this.repository.insertLeads(records, {
-      actor: userActor(context.user),
-      source: 'leads.import',
-      metadata: { importJobId: context.jobId },
-    });
+    const { checkArchivedLeads } = await this.settings.getSalesCrmDuplicate();
+    return this.repository.insertLeads(
+      records,
+      {
+        actor: userActor(context.user),
+        source: 'leads.import',
+        metadata: { importJobId: context.jobId },
+      },
+      checkArchivedLeads,
+    );
   }
 
   /** Field value → its allowed values: the pipeline's stages and the form's lookups. */

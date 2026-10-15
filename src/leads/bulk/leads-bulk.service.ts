@@ -3,8 +3,9 @@ import {
   ConflictException,
   Injectable,
 } from '@nestjs/common';
-import { Prisma, UserRole } from '../../generated/prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../../auth/current-user';
+import { ASSIGNABLE_USER_WHERE } from '../../auth/role-groups';
 import { PrismaService } from '../../prisma/prisma.service';
 import { recordAuditEvents, userActor } from '../../audit/audit-events';
 import {
@@ -17,19 +18,13 @@ import {
 } from '../lead-audit';
 import { retainedLeads } from '../lead-retention';
 import { leadScopeWhere } from '../lead-scope';
+import { openPipelinesWhere } from '../../pipelines/pipeline-access';
 import {
   BulkActionResponse,
   BulkDeleteDto,
   BulkReassignDto,
   bulkResponse,
 } from './dto/bulk-actions.dto';
-
-/** A reassignment target must be one of the lead-handling roles (as LEAD-06.2). */
-const ASSIGNABLE_ROLES = [
-  UserRole.SALES_AGENT,
-  UserRole.SALES_MANAGER,
-  UserRole.CUSTOMER_SERVICE_AGENT,
-];
 
 /**
  * Bulk actions over a set of selected leads (LEAD-09.1): reassign and delete.
@@ -62,12 +57,9 @@ export class LeadsBulkService {
   ): Promise<BulkActionResponse> {
     const user = await this.currentUser.resolve();
 
+    // The target must be a live, active user in a lead-handling role (as LEAD-06.2).
     const agent = await this.prisma.user.findFirst({
-      where: {
-        id: dto.agentId,
-        deletedAt: null,
-        role: { in: ASSIGNABLE_ROLES },
-      },
+      where: { id: dto.agentId, ...ASSIGNABLE_USER_WHERE },
       select: { id: true },
     });
     if (!agent) {
@@ -181,7 +173,9 @@ export class LeadsBulkService {
   /**
    * The subset of the requested ids the caller may act on: leads that are both in
    * the request and inside the caller's scope. Reuses `leadScopeWhere`, so a sales
-   * agent can never reach another agent's lead through a bulk call.
+   * agent can never reach another agent's lead through a bulk call. A lead in a pipeline
+   * closed to the caller is left out too: an agent sees an assigned one, but may not change
+   * it (ADR-0093 B2), so it is reported as not permitted.
    */
   private async actionableIds(
     user: CurrentUser,
@@ -189,7 +183,13 @@ export class LeadsBulkService {
   ): Promise<Set<string>> {
     if (ids.length === 0) return new Set();
     const rows = await this.prisma.lead.findMany({
-      where: { AND: [leadScopeWhere(user), { id: { in: ids } }] },
+      where: {
+        AND: [
+          leadScopeWhere(user),
+          openPipelinesWhere(user),
+          { id: { in: ids } },
+        ],
+      },
       select: { id: true },
     });
     return new Set(rows.map((row) => row.id));

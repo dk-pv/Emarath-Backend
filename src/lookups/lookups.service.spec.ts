@@ -1,4 +1,6 @@
 import { NotFoundException } from '@nestjs/common';
+import { UserRole } from '../generated/prisma/client';
+import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { LookupsService } from './lookups.service';
 
@@ -11,12 +13,62 @@ describe('LookupsService', () => {
     pipeline: { findMany: pipelineFindMany },
     leadSource: { findMany: leadSourceFindMany },
   } as unknown as PrismaService;
-  const service = new LookupsService(prisma);
+  const resolve = jest.fn<Promise<CurrentUser>, []>();
+  const currentUser: CurrentUserService = { resolve };
+  const service = new LookupsService(prisma, currentUser);
 
   beforeEach(() => {
     findMany.mockReset();
     pipelineFindMany.mockReset();
     leadSourceFindMany.mockReset();
+    resolve.mockReset();
+  });
+
+  // ADR-0093: no picker offers a pipeline closed to the caller.
+  describe('offered (GET /lookups/:type)', () => {
+    beforeEach(() =>
+      pipelineFindMany.mockResolvedValue([
+        { name: 'Lead Pipeline' },
+        { name: 'VIP' },
+        { name: 'Complaints' },
+      ]),
+    );
+
+    it('leaves out the pipelines closed to the caller', async () => {
+      resolve.mockResolvedValue({
+        id: 'u1',
+        role: UserRole.CUSTOMER_SERVICE_AGENT,
+        deniedPipelines: ['VIP'],
+      });
+
+      const offered = await service.offered('pipelines');
+
+      expect(offered.map((option) => option.value)).toEqual([
+        'Lead Pipeline',
+        'Complaints',
+      ]);
+    });
+
+    it('offers every pipeline when none is closed (the admin, All users)', async () => {
+      resolve.mockResolvedValue({ id: 'u1', role: UserRole.SUPERADMIN });
+
+      const offered = await service.offered('pipelines');
+
+      expect(offered).toHaveLength(3);
+    });
+
+    it('serves every other lookup without asking who the caller is', async () => {
+      await service.offered('languages');
+
+      expect(resolve).not.toHaveBeenCalled();
+    });
+
+    it('keeps byType the whole catalogue for the server’s own checks', async () => {
+      const all = await service.byType('pipelines');
+
+      expect(all).toHaveLength(3);
+      expect(resolve).not.toHaveBeenCalled();
+    });
   });
 
   it('returns a config list as {value,label} pairs', async () => {

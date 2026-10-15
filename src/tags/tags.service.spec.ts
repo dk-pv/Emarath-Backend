@@ -1,5 +1,15 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
+import { UserRole } from '../generated/prisma/client';
+import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  TAG_CREATE_NOT_PERMITTED,
+  TagAccessService,
+} from '../tag-access/tag-access.service';
 import { TagsService } from './tags.service';
 
 interface DataCall {
@@ -15,7 +25,7 @@ interface FindCall {
   select?: Record<string, unknown>;
 }
 
-function makeService() {
+function makeService(role: UserRole = UserRole.SUPERADMIN) {
   const findMany = jest.fn().mockResolvedValue([]);
   const findFirst = jest.fn().mockResolvedValue(null);
   const create = jest.fn();
@@ -23,13 +33,32 @@ function makeService() {
   const remove = jest.fn();
   const leadTagDeleteMany = jest.fn();
 
+  // A non-admin's create runs in a transaction so the tag and the creator's grant commit
+  // together: the writes exist on `tx` only, and a write that escaped it would throw.
+  const txCreate = jest.fn();
+  const tx = { tag: { create: txCreate } };
   const prisma = {
     tag: { findMany, findFirst, create, update, delete: remove },
     leadTag: { deleteMany: leadTagDeleteMany },
+    $transaction: jest.fn((run: (client: typeof tx) => Promise<unknown>) =>
+      run(tx),
+    ),
   } as unknown as PrismaService;
+  const currentUser = {
+    resolve: jest.fn().mockResolvedValue({ id: 'u1', role }),
+  } as unknown as CurrentUserService;
+  const assertMayCreate = jest.fn().mockResolvedValue(undefined);
+  const grantToCreator = jest.fn().mockResolvedValue(undefined);
+  const access = {
+    assertMayCreate,
+    grantToCreator,
+  } as unknown as TagAccessService;
 
   return {
-    service: new TagsService(prisma),
+    txCreate,
+    assertMayCreate,
+    grantToCreator,
+    service: new TagsService(prisma, currentUser, access),
     findMany,
     findFirst,
     create,
@@ -115,6 +144,64 @@ describe('TagsService.create', () => {
     const [call] = findFirst.mock.calls[0] as [FindCall];
     expect(call.where.name?.mode).toBe('insensitive');
     expect(call.where.deletedAt).toBeNull();
+  });
+});
+
+describe('TagsService.create — Tag Permissions (ADR-0091)', () => {
+  it('lets an administrator create without consulting the policy', async () => {
+    const { service, create, assertMayCreate, txCreate } = makeService();
+    create.mockResolvedValue(row({ name: 'NEW' }));
+
+    await service.create({ name: 'NEW' });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(assertMayCreate).not.toHaveBeenCalled();
+    expect(txCreate).not.toHaveBeenCalled();
+  });
+
+  it('refuses a user the Admin has not allowed to create tags, writing nothing', async () => {
+    const { service, create, txCreate, assertMayCreate } = makeService(
+      UserRole.SALES_AGENT,
+    );
+    assertMayCreate.mockRejectedValue(
+      new ForbiddenException(TAG_CREATE_NOT_PERMITTED),
+    );
+
+    await expect(service.create({ name: 'SNEAKY' })).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(txCreate).not.toHaveBeenCalled();
+  });
+
+  it('creates an active tag for an allowed user and grants it to them in the same transaction', async () => {
+    const { service, txCreate, create, grantToCreator, assertMayCreate } =
+      makeService(UserRole.SALES_AGENT);
+    txCreate.mockResolvedValue(row({ id: 'new-tag', name: 'MINE' }));
+
+    const created = await service.create({ name: ' MINE ', isActive: false });
+
+    expect(assertMayCreate).toHaveBeenCalledTimes(1);
+    const [call] = txCreate.mock.calls[0] as [DataCall];
+    // The Active switch is catalogue management, not theirs: always active, trimmed name.
+    expect(call.data).toEqual({ name: 'MINE', isActive: true });
+    expect(create).not.toHaveBeenCalled();
+    expect(grantToCreator).toHaveBeenCalledWith(
+      expect.anything(),
+      { id: 'u1', role: UserRole.SALES_AGENT },
+      'new-tag',
+    );
+    expect(created.name).toBe('MINE');
+  });
+
+  it('still refuses a duplicate name for an allowed user', async () => {
+    const { service, findFirst, txCreate } = makeService(UserRole.SALES_AGENT);
+    findFirst.mockResolvedValue({ id: 'existing' });
+
+    await expect(service.create({ name: 'bde risk' })).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(txCreate).not.toHaveBeenCalled();
   });
 });
 

@@ -77,3 +77,34 @@ export function matchedField(
   }
   return 'email';
 }
+
+/** A lead the duplicate rule matched, as far as choosing the original needs to know. */
+export interface DuplicateMatchCandidate {
+  id: string;
+  createdAt: Date;
+  /** Set when the candidate is itself recorded as a duplicate of an earlier lead. */
+  duplicateOfId: string | null;
+}
+
+/**
+ * Which matched lead a new duplicate is recorded against (ADR-0092): the OLDEST match that is
+ * not itself a duplicate, falling back to the oldest match overall.
+ *
+ * Preferring a lead that is not already a duplicate keeps one customer's leads in a star —
+ * every duplicate points at the same original — instead of a chain where the third lead
+ * points at the second and the second at the first. Leads created in one import batch share a
+ * creation time, so the id breaks the tie and the choice never depends on read order.
+ *
+ * Returns `null` when nothing matched.
+ */
+export function pickOriginal(
+  matches: readonly DuplicateMatchCandidate[],
+): string | null {
+  const ranked = [...matches].sort(
+    (a, b) =>
+      Number(a.duplicateOfId !== null) - Number(b.duplicateOfId !== null) ||
+      a.createdAt.getTime() - b.createdAt.getTime() ||
+      a.id.localeCompare(b.id),
+  );
+  return ranked[0]?.id ?? null;
+}

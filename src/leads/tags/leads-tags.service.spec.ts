@@ -1,11 +1,16 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, UserRole } from '../../generated/prisma/client';
 import { CurrentUserService } from '../../auth/current-user';
 import { PrismaService } from '../../prisma/prisma.service';
+import {
+  TAG_NOT_PERMITTED,
+  TagAccessService,
+} from '../../tag-access/tag-access.service';
 import { LeadTagsService } from './leads-tags.service';
 
 const LEAD_ID = '11111111-1111-1111-1111-111111111111';
@@ -63,7 +68,11 @@ function auditRow(tagIds: string[]) {
   };
 }
 
-function makeService(role: UserRole = UserRole.SUPERADMIN) {
+function makeService(
+  role: UserRole = UserRole.SUPERADMIN,
+  // The pipelines closed to the caller (ADR-0093); none unless a test says so.
+  deniedPipelines?: string[],
+) {
   const leadFindFirst = jest.fn();
   const leadFindUnique = jest.fn();
   const leadTagCreate = jest.fn();
@@ -87,11 +96,21 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
   } as unknown as PrismaService;
 
   const currentUser = {
-    resolve: jest.fn().mockResolvedValue({ id: 'u1', role }),
+    resolve: jest.fn().mockResolvedValue({
+      id: 'u1',
+      role,
+      ...(deniedPipelines ? { deniedPipelines } : {}),
+    }),
   } as unknown as CurrentUserService;
 
-  const service = new LeadTagsService(prisma, currentUser);
+  // Tag Permissions (ADR-0091) have their own suite; here the caller may use any tag unless
+  // a test says otherwise.
+  const assertMayHandle = jest.fn().mockResolvedValue(undefined);
+  const access = { assertMayHandle } as unknown as TagAccessService;
+
+  const service = new LeadTagsService(prisma, currentUser, access);
   return {
+    assertMayHandle,
     service,
     leadFindFirst,
     leadFindUnique,
@@ -290,5 +309,85 @@ describe('LeadTagsService — audit (ADR-0083)', () => {
     await service.remove(LEAD_ID, TAG_ID);
 
     expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('LeadTagsService — Tag Permissions (ADR-0091)', () => {
+  it('asks the policy about the tag being added, for the caller, after the scope gate', async () => {
+    const {
+      service,
+      leadFindFirst,
+      leadTagCreate,
+      leadFindUnique,
+      assertMayHandle,
+    } = makeService(UserRole.SALES_AGENT);
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    leadTagCreate.mockResolvedValue({});
+    leadFindUnique.mockResolvedValue(listRow());
+
+    await service.add(LEAD_ID, { tagId: TAG_ID });
+
+    expect(assertMayHandle).toHaveBeenCalledWith(
+      { id: 'u1', role: UserRole.SALES_AGENT },
+      [TAG_ID],
+    );
+  });
+
+  it('refuses to add a tag the caller may not select, and writes nothing', async () => {
+    const { service, leadFindFirst, leadTagCreate, assertMayHandle } =
+      makeService(UserRole.SALES_AGENT);
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    assertMayHandle.mockRejectedValue(
+      new ForbiddenException(TAG_NOT_PERMITTED),
+    );
+
+    await expect(
+      service.add(LEAD_ID, { tagId: TAG_ID }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(leadTagCreate).not.toHaveBeenCalled();
+  });
+
+  it('refuses to remove a tag the caller may not select, and writes nothing', async () => {
+    const { service, leadFindFirst, leadTagDeleteMany, assertMayHandle } =
+      makeService(UserRole.SALES_AGENT);
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    assertMayHandle.mockRejectedValue(
+      new ForbiddenException(TAG_NOT_PERMITTED),
+    );
+
+    await expect(service.remove(LEAD_ID, TAG_ID)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(leadTagDeleteMany).not.toHaveBeenCalled();
+  });
+
+  it('answers 404 for an out-of-scope lead before the policy is even asked', async () => {
+    const { service, leadFindFirst, assertMayHandle } = makeService(
+      UserRole.SALES_AGENT,
+    );
+    leadFindFirst.mockResolvedValue(null);
+
+    await expect(
+      service.add(LEAD_ID, { tagId: TAG_ID }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(assertMayHandle).not.toHaveBeenCalled();
+  });
+});
+
+// ADR-0093 B2: tagging changes the lead, so a lead the agent may only see cannot be tagged.
+describe('LeadTagsService — pipeline access (ADR-0093)', () => {
+  it('refuses adding and removing a tag on a lead the agent may only see', async () => {
+    const { service, leadFindFirst, leadTagCreate, leadTagDeleteMany } =
+      makeService(UserRole.SALES_AGENT, ['VIP']);
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID, pipeline: 'VIP' });
+    const VIEW_ONLY =
+      'This lead is in the "VIP" pipeline, which you don\'t have access to. You can view it, but not change it.';
+
+    await expect(service.add(LEAD_ID, { tagId: TAG_ID })).rejects.toThrow(
+      VIEW_ONLY,
+    );
+    await expect(service.remove(LEAD_ID, TAG_ID)).rejects.toThrow(VIEW_ONLY);
+    expect(leadTagCreate).not.toHaveBeenCalled();
+    expect(leadTagDeleteMany).not.toHaveBeenCalled();
   });
 });

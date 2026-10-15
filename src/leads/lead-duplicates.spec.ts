@@ -1,4 +1,4 @@
-import { duplicateWhere, matchedField } from './lead-duplicates';
+import { duplicateWhere, matchedField, pickOriginal } from './lead-duplicates';
 
 describe('duplicateWhere', () => {
   it('matches either phone against either of a lead’s phones, and the email', () => {
@@ -70,5 +70,63 @@ describe('matchedField', () => {
         lead,
       ),
     ).toBe('email');
+  });
+});
+
+describe('pickOriginal (ADR-0092)', () => {
+  const lead = (
+    id: string,
+    day: number,
+    duplicateOfId: string | null = null,
+  ) => ({
+    id,
+    createdAt: new Date(Date.UTC(2026, 0, day)),
+    duplicateOfId,
+  });
+
+  it('has no original when nothing matched', () => {
+    expect(pickOriginal([])).toBeNull();
+  });
+
+  it('picks the only match', () => {
+    expect(pickOriginal([lead('a', 5)])).toBe('a');
+  });
+
+  it('picks the oldest match', () => {
+    expect(pickOriginal([lead('new', 9), lead('old', 2), lead('mid', 5)])).toBe(
+      'old',
+    );
+  });
+
+  it('prefers a match that is not itself a duplicate, even over an older one that is', () => {
+    // "dup" is older but is recorded as a duplicate of something else; "root" is the original.
+    expect(pickOriginal([lead('dup', 1, 'somebody'), lead('root', 8)])).toBe(
+      'root',
+    );
+  });
+
+  it('keeps one customer’s leads in a star: later arrivals point at the first, not the latest', () => {
+    const first = lead('first', 1);
+    const second = lead('second', 2, 'first');
+    const third = lead('third', 3, 'first');
+    expect(pickOriginal([third, second, first])).toBe('first');
+  });
+
+  it('falls back to the oldest match when every match is itself a duplicate', () => {
+    expect(
+      pickOriginal([lead('b', 4, 'x'), lead('a', 2, 'y'), lead('c', 6, 'z')]),
+    ).toBe('a');
+  });
+
+  it('breaks a tie on creation time by id, so read order never changes the answer', () => {
+    // Leads written by one import batch share a timestamp.
+    expect(pickOriginal([lead('b', 3), lead('a', 3)])).toBe('a');
+    expect(pickOriginal([lead('a', 3), lead('b', 3)])).toBe('a');
+  });
+
+  it('does not mutate the list it is given', () => {
+    const matches = [lead('b', 3), lead('a', 1)];
+    pickOriginal(matches);
+    expect(matches.map((m) => m.id)).toEqual(['b', 'a']);
   });
 });

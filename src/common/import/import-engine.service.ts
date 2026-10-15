@@ -68,7 +68,22 @@ export class ImportEngineService {
   }
 
   /**
-   * Persists the valid rows in transactional batches, invoking `onProgress` with
+   * The rows an import writes, in file order: the valid ones, plus the duplicates when the
+   * descriptor creates them rather than skipping them.
+   */
+  writable(
+    rows: EvaluatedRow[],
+    descriptor: Pick<ImportDescriptor<unknown, unknown>, 'importsDuplicates'>,
+  ): EvaluatedRow[] {
+    return rows.filter(
+      (row) =>
+        row.status === 'valid' ||
+        (row.status === 'duplicate' && descriptor.importsDuplicates === true),
+    );
+  }
+
+  /**
+   * Persists the writable rows in transactional batches, invoking `onProgress` with
    * the running imported count after each batch. A batch is one transaction, so a
    * failure rolls back only its own batch; earlier batches stay committed and the
    * error surfaces to the caller (which marks the job failed).
@@ -79,7 +94,7 @@ export class ImportEngineService {
     context: TContext,
     onProgress: (importedSoFar: number) => Promise<void>,
   ): Promise<number> {
-    const valid = rows.filter((row) => row.status === 'valid');
+    const valid = this.writable(rows, descriptor);
     let imported = 0;
 
     for (let start = 0; start < valid.length; start += BATCH_SIZE) {
@@ -198,13 +213,17 @@ export class ImportEngineService {
     });
 
     const inFile = keys.find((key) => seenInFile.has(key));
+    const known = keys.find((key) => existing.has(key));
+    // A duplicate that is going to be written is a row later ones can duplicate in turn.
+    if ((inFile || known) && descriptor.importsDuplicates) {
+      keys.forEach((key) => seenInFile.add(key));
+    }
     if (inFile) {
       return duplicate(
         'DUPLICATE_IN_FILE',
         `A row earlier in the file has the same ${inFile}`,
       );
     }
-    const known = keys.find((key) => existing.has(key));
     if (known) {
       return duplicate(
         'DUPLICATE_EXISTING',

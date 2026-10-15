@@ -3,17 +3,10 @@ import {
   AssignmentApplyTo,
   AssignmentRuleStatus,
   AssignmentTarget,
-  UserRole,
 } from '../generated/prisma/client';
+import { ASSIGNABLE_USER_WHERE } from '../auth/role-groups';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
-
-/** The same three roles the New Lead form offers as assignees (LEAD-06.2). */
-const ASSIGNABLE_ROLES: UserRole[] = [
-  UserRole.SALES_AGENT,
-  UserRole.SALES_MANAGER,
-  UserRole.CUSTOMER_SERVICE_AGENT,
-];
 
 /**
  * Automatic lead assignment — the thing Settings → Assignment actually switches on.
@@ -85,15 +78,14 @@ export class LeadAssignmentEngine {
    * The eligible user whose most recent assignment is oldest.
    *
    * Inactive and deleted accounts are never eligible — a lead handed to a disabled account
-   * is a lead nobody works. When the setting asks, accounts that have never signed in are
-   * excluded too, which is what "Check if User has Logged in Before Assigning" means.
+   * is a lead nobody works — the same rule as every other assignment (`ASSIGNABLE_USER_WHERE`).
+   * When the setting asks, accounts that have never signed in are excluded too, which is what
+   * "Check if User has Logged in Before Assigning" means.
    */
   private async nextInRotation(requireLogin: boolean): Promise<string | null> {
     const candidates = await this.prisma.user.findMany({
       where: {
-        deletedAt: null,
-        isActive: true,
-        role: { in: ASSIGNABLE_ROLES },
+        ...ASSIGNABLE_USER_WHERE,
         ...(requireLogin ? { lastLoginAt: { not: null } } : {}),
       },
       select: {

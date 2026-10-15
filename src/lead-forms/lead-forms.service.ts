@@ -188,6 +188,12 @@ export class LeadFormsService {
     const name = dto.name.trim();
     await this.assertNameFree(name, null);
 
+    // As on update: an inactive default would clear the current one and then be skipped by
+    // `defaultForm`, leaving the Lead drawer on its shipped order.
+    if (dto.isDefault && !dto.isActive) {
+      throw new BadRequestException('The default form must stay Active.');
+    }
+
     const count = await this.prisma.leadForm.count({
       where: { deletedAt: null },
     });

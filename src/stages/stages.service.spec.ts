@@ -20,7 +20,10 @@ function stageRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function makeService() {
+function makeService(
+  // Who manages the stages; the admin unless a test says otherwise (ADR-0093).
+  user: object = { id: 'admin-1', role: 'SUPERADMIN' },
+) {
   const findMany = jest.fn();
   const findUnique = jest.fn();
   const findFirst = jest.fn();
@@ -40,7 +43,7 @@ function makeService() {
   } as unknown as PrismaService;
 
   const currentUser = {
-    resolve: jest.fn().mockResolvedValue({ id: 'admin-1', role: 'SUPERADMIN' }),
+    resolve: jest.fn().mockResolvedValue(user),
   } as unknown as CurrentUserService;
 
   const service = new StagesService(prisma, currentUser);
@@ -391,5 +394,66 @@ describe('StagesService.remove — reserved stages', () => {
     // Refused before the emptiness check, so an empty reserved stage is protected too.
     expect(leadCount).not.toHaveBeenCalled();
     expect(del).not.toHaveBeenCalled();
+  });
+});
+
+// ADR-0093 B10: stage management needs access to the pipeline; @Roles still decides who.
+describe('StagesService — pipeline access (ADR-0093)', () => {
+  const manager = {
+    id: 'mgr-1',
+    role: 'SALES_MANAGER',
+    deniedPipelines: ['VIP'],
+  };
+  const CLOSED = `You don't have access to the "VIP" pipeline.`;
+
+  it('refuses a manager adding, renaming, reordering or deleting stages of a closed pipeline', async () => {
+    const { service, findUnique, findMany, create, update, del } =
+      makeService(manager);
+    findUnique.mockResolvedValue({ id: 's1', pipeline: 'VIP', name: 'Intake' });
+
+    await expect(
+      service.create({ pipeline: 'VIP', name: 'Intake', color: 'cyan' }),
+    ).rejects.toThrow(CLOSED);
+    await expect(service.update('s1', { name: 'Renamed' })).rejects.toThrow(
+      CLOSED,
+    );
+    await expect(
+      service.reorder({ pipeline: 'VIP', orderedIds: ['s1'] }),
+    ).rejects.toThrow(CLOSED);
+    await expect(service.remove('s1')).rejects.toThrow(CLOSED);
+
+    expect(findMany).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it('lets that manager manage the stages of a pipeline open to them', async () => {
+    const { service, findUnique, findFirst, create } = makeService(manager);
+    findUnique.mockResolvedValue(null);
+    findFirst.mockResolvedValue(null);
+    create.mockResolvedValue({ id: 's2' });
+
+    await service.create({
+      pipeline: 'Complaints',
+      name: 'Intake',
+      color: 'cyan',
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the admin manage the stages of any pipeline (B1)', async () => {
+    const { service, findUnique, findFirst, create } = makeService({
+      ...manager,
+      role: 'SUPERADMIN',
+    });
+    findUnique.mockResolvedValue(null);
+    findFirst.mockResolvedValue(null);
+    create.mockResolvedValue({ id: 's3' });
+
+    await service.create({ pipeline: 'VIP', name: 'Intake', color: 'cyan' });
+
+    expect(create).toHaveBeenCalledTimes(1);
   });
 });

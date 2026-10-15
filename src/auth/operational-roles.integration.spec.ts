@@ -111,12 +111,21 @@ const ADMIN_ONLY_CONTROLLERS = new Set([
   'PipelinesController',
   'RolesController',
   'SettingsController',
+  'TagAccessController',
   'TagsController',
   'UsersController',
 ]);
 const OPEN_ON_ADMIN_CONTROLLERS = new Set([
   'GET /api/lead-forms/default',
   'GET /api/settings/activity-reminders/workflow',
+  /*
+    Tag Permissions (ADR-0091), the one deliberate widening of an admin-only controller: every
+    sales role reads what it may do with tags, and may attempt a tag create. The role gate
+    admits nobody the Admin has not allowed — TagsService.create refuses the rest with a 403
+    (pinned in tags.service.spec.ts) — so the permission lives in the service, not here.
+  */
+  'GET /api/tag-access/me',
+  'POST /api/tags',
 ]);
 const ADMIN_ONLY_ROUTES = new Set([
   'PATCH /api/integrations/:id',
@@ -127,6 +136,8 @@ const ADMIN_ONLY_ROUTES = new Set([
 const MANAGER_AND_ADMIN_ROUTES = new Set([
   'POST /api/leads/bulk/reassign',
   'POST /api/leads/:id/reassign',
+  // Moving a lead between pipelines (ADR-0093 B5).
+  'POST /api/leads/:id/pipeline',
   'POST /api/stages',
   'PATCH /api/stages/reorder',
   'PATCH /api/stages/:id',
@@ -238,6 +249,10 @@ describe('Operational roles across every route (ADR-0084)', () => {
       'POST /api/leads/bulk/delete',
       'POST /api/leads/import',
       'GET /api/leads/export',
+      'GET /api/leads/duplicate-check',
+      'GET /api/leads/:id/duplicates',
+      'GET /api/tag-access/me',
+      'PUT /api/tag-access/teams',
       'GET /api/activities',
       'GET /api/calls/log',
       'GET /api/reports/leads/by-ownership',
@@ -314,4 +329,17 @@ describe('Operational roles across every route (ADR-0084)', () => {
       expect(moved).toEqual([]);
     });
   });
+
+  // The assignee rules live in LeadsService (create/update); an operational role never gets
+  // that far — the routes themselves refuse it, as before.
+  it.each(OPERATIONAL_ROLES)(
+    'refuses %s on lead create and edit, whatever the assignees',
+    (role) => {
+      for (const label of ['POST /api/leads', 'PUT /api/leads/:id']) {
+        const route = ROUTES.find((each) => each.label === label);
+        expect(route).toBeDefined();
+        expect(admits(route!, role)).toBe(false);
+      }
+    },
+  );
 });

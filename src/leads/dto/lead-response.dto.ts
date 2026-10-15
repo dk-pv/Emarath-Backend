@@ -1,4 +1,23 @@
-import { CallDirection, Prisma } from '../../generated/prisma/client';
+import {
+  CallDirection,
+  LogisticsStatus,
+  Prisma,
+} from '../../generated/prisma/client';
+
+/**
+ * The Logistics order a lead converted into (ADR-0085), as a lead response carries it. Once it
+ * exists the lead's status and pipeline belong to the Logistics workflow and the lead can't be
+ * deleted (`guardConvertedLeads`, `retainedLeads`), so the lead screens read this to stop
+ * offering those actions. `orderNumber` is the order's own sequence value, unformatted.
+ */
+export interface LeadLogisticsOrder {
+  orderNumber: number;
+  status: LogisticsStatus;
+}
+
+const LEAD_LOGISTICS_ORDER_SELECT = {
+  select: { orderNumber: true, status: true },
+} satisfies Prisma.Lead$logisticsOrderArgs;
 
 /**
  * The shape the list endpoint returns for one lead.
@@ -62,6 +81,15 @@ export interface LeadListItem {
    * status/tag/reassign responses) need no change.
    */
   isPinned: boolean;
+  /**
+   * Whether this lead was received as a duplicate of an earlier one (ADR-0092). A yes/no, not
+   * the other lead's id: the original may be a lead the caller is not allowed to open, and
+   * nothing about it — not even its id — rides along on this one. The related leads come from
+   * `GET /leads/:id/duplicates`, which applies the caller's scope.
+   */
+  isDuplicate: boolean;
+  /** The lead's Logistics order, or null — no lead converted before ADR-0085 has one. */
+  logisticsOrder: LeadLogisticsOrder | null;
 }
 
 /** Page plus total (CLAUDE.md §8) — mirrors the frontend's `ListResult`. */
@@ -113,6 +141,9 @@ export const LEAD_LIST_SELECT = {
   product2Qty: true,
   paymentMethod: true,
   nationalCode: true,
+  duplicateOfId: true,
+  /** At most one per lead (`lead_id` is unique on the order), read in the same query. */
+  logisticsOrder: LEAD_LOGISTICS_ORDER_SELECT,
   /** The latest open complaint only — one nested row per lead, so the page stays bounded. */
   complaints: {
     where: { deletedAt: null },
@@ -148,7 +179,9 @@ export const LEAD_LIST_SELECT = {
   },
 } satisfies Prisma.LeadSelect;
 
-type LeadRow = Prisma.LeadGetPayload<{ select: typeof LEAD_LIST_SELECT }>;
+export type LeadRow = Prisma.LeadGetPayload<{
+  select: typeof LEAD_LIST_SELECT;
+}>;
 
 /**
  * Everything the Edit Lead form needs to prefill — a superset of the list
@@ -201,6 +234,8 @@ export const LEAD_EDIT_SELECT = {
     where: { customField: { deletedAt: null } },
     select: { value: true, customField: { select: { key: true } } },
   },
+  /** So the form can lock Status and Pipeline, which the order owns (ADR-0085). */
+  logisticsOrder: LEAD_LOGISTICS_ORDER_SELECT,
 } satisfies Prisma.LeadSelect;
 
 type LeadEditRow = Prisma.LeadGetPayload<{ select: typeof LEAD_EDIT_SELECT }>;
@@ -245,6 +280,8 @@ export interface LeadEditData {
   complaintReason: string | null;
   /** LEAD-05.1 (ADR-0051): custom values keyed by field key, so Edit prefills them. */
   customFields: Record<string, string>;
+  /** As on `LeadListItem`. */
+  logisticsOrder: LeadLogisticsOrder | null;
 }
 
 /** Date-only in the database; keep it date-only on the wire. */
@@ -287,19 +324,30 @@ export function toLeadEditData(row: LeadEditRow): LeadEditData {
     customFields: Object.fromEntries(
       row.customFieldValues.map((v) => [v.customField.key, v.value]),
     ),
+    logisticsOrder: row.logisticsOrder ?? null,
   };
 }
 
 /**
  * One entry in the Lead Detail timeline (Lead Detail drawer). Built by aggregating
  * data the system actually records — the lead's own `createdAt`, its assignment
- * rows, its notes and its calls — never a fabricated event. Email sends and the actor
- * who created/assigned a lead are not tracked today, so those are deliberately absent
- * rather than invented (partial-but-honest timeline).
+ * rows, its notes, its calls and the status moves in the audit log (ADR-0083) — never
+ * a fabricated event. Email sends and the actor who created/assigned a lead are not
+ * tracked today, so those are deliberately absent rather than invented
+ * (partial-but-honest timeline).
  */
 export type LeadTimelineEvent =
   | { id: string; type: 'created'; at: string }
   | { id: string; type: 'assigned'; at: string; assigneeName: string }
+  | {
+      id: string;
+      type: 'status';
+      at: string;
+      from: string;
+      to: string;
+      /** The user who made the change; null for an automation or an unknown user. */
+      actorName: string | null;
+    }
   | { id: string; type: 'note'; at: string; authorName: string; body: string }
   | {
       id: string;
@@ -310,8 +358,50 @@ export type LeadTimelineEvent =
     };
 
 /**
- * Merges a lead's created/assigned/note facts into one newest-first feed. Pure, so
- * it is unit-tested directly. ISO timestamps sort lexicographically in time order.
+ * A status move as the audit log holds it (`STATUS_CHANGED` / `CONVERTED`): the event's
+ * before/after JSON and the user behind it. Read by `LeadsRepository`.
+ */
+export interface LeadStatusChangeRow {
+  id: string;
+  createdAt: Date;
+  before: unknown;
+  after: unknown;
+  actor: { name: string } | null;
+}
+
+/** The `status` the log recorded in one side of an event, if it recorded one. */
+function recordedStatus(side: unknown): string | null {
+  if (side === null || typeof side !== 'object') return null;
+  const status = (side as { status?: unknown }).status;
+  return typeof status === 'string' && status !== '' ? status : null;
+}
+
+/**
+ * The status moves worth a timeline entry. An event with no status on either side, or the
+ * same status on both (the log also files a lost-reason edit under a status event), is not a
+ * move — and a lead created straight into WON has no "from" — so none of those is shown.
+ */
+function statusEntries(rows: LeadStatusChangeRow[]): LeadTimelineEvent[] {
+  return rows.flatMap((row): LeadTimelineEvent[] => {
+    const from = recordedStatus(row.before);
+    const to = recordedStatus(row.after);
+    if (from === null || to === null || from === to) return [];
+    return [
+      {
+        id: `status:${row.id}`,
+        type: 'status',
+        at: row.createdAt.toISOString(),
+        from,
+        to,
+        actorName: row.actor?.name ?? null,
+      },
+    ];
+  });
+}
+
+/**
+ * Merges a lead's created/assigned/note/call/status facts into one newest-first feed.
+ * Pure, so it is unit-tested directly. ISO timestamps sort lexicographically in time order.
  */
 export function buildLeadTimeline(
   leadId: string,
@@ -329,6 +419,7 @@ export function buildLeadTimeline(
     direction: CallDirection;
     agent: { name: string };
   }[] = [],
+  statusChanges: LeadStatusChangeRow[] = [],
 ): LeadTimelineEvent[] {
   const events: LeadTimelineEvent[] = [
     { id: `created:${leadId}`, type: 'created', at: createdAt.toISOString() },
@@ -352,6 +443,7 @@ export function buildLeadTimeline(
       direction: c.direction,
       agentName: c.agent.name,
     })),
+    ...statusEntries(statusChanges),
   ];
   return events.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
 }
@@ -443,5 +535,7 @@ export function toLeadListItem(row: LeadRow, isPinned = false): LeadListItem {
     ),
     hasActivity: row._count.activities > 0 || row._count.calls > 0,
     isPinned,
+    isDuplicate: row.duplicateOfId !== null,
+    logisticsOrder: row.logisticsOrder ?? null,
   };
 }

@@ -8,8 +8,10 @@ import { Prisma } from '../../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../../auth/current-user';
 import { PrismaService } from '../../prisma/prisma.service';
 import { userActor } from '../../audit/audit-events';
+import { TagAccessService } from '../../tag-access/tag-access.service';
 import { auditLeadChanges } from '../lead-audit';
 import { leadScopeWhere } from '../lead-scope';
+import { assertMayChangeLead } from '../../pipelines/pipeline-access';
 import {
   LeadListItem,
   LEAD_LIST_SELECT,
@@ -30,12 +32,17 @@ import { AddLeadTagDto } from './dto/lead-tag.dto';
  * Tags are applied, not created: the picker offers only existing tags, and
  * creating tags is FND-04.2's reference-data concern. A tag id that does not
  * exist fails the foreign key and is reported as a 400, not a 500.
+ *
+ * Tag Permissions (ADR-0091) are checked after the scope gate and before any write: a
+ * caller who may see the lead but may not select that tag gets a 403, for adding and for
+ * removing alike — a tag the Admin keeps out of someone's hands is not theirs to strip off.
  */
 @Injectable()
 export class LeadTagsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
+    private readonly access: TagAccessService,
   ) {}
 
   /**
@@ -45,6 +52,7 @@ export class LeadTagsService {
    */
   async add(leadId: string, dto: AddLeadTagDto): Promise<LeadListItem> {
     const user = await this.assertInScope(leadId);
+    await this.access.assertMayHandle(user, [dto.tagId]);
 
     try {
       await auditLeadChanges(
@@ -83,6 +91,7 @@ export class LeadTagsService {
    */
   async remove(leadId: string, tagId: string): Promise<LeadListItem> {
     const user = await this.assertInScope(leadId);
+    await this.access.assertMayHandle(user, [tagId]);
     await auditLeadChanges(
       this.prisma,
       [leadId],
@@ -92,14 +101,18 @@ export class LeadTagsService {
     return this.loadById(leadId);
   }
 
-  /** 404s unless the caller may see this lead — the write's scope gate. */
+  /**
+   * 404s unless the caller may see this lead — the write's scope gate — and 403s when they
+   * may only see it, in a pipeline closed to them (ADR-0093 B2).
+   */
   private async assertInScope(leadId: string): Promise<CurrentUser> {
     const user = await this.currentUser.resolve();
     const lead = await this.prisma.lead.findFirst({
       where: { AND: [leadScopeWhere(user), { id: leadId }] },
-      select: { id: true },
+      select: { id: true, pipeline: true },
     });
     if (!lead) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+    assertMayChangeLead(user, lead);
     return user;
   }
 

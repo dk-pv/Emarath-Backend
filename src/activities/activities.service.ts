@@ -8,6 +8,7 @@ import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { leadScopeWhere } from '../leads/lead-scope';
+import { withPipelineAccess } from '../pipelines/pipeline-access';
 import { activityScopeWhere } from './activity-scope';
 import {
   activityBucketWhere,
@@ -282,7 +283,9 @@ export class ActivitiesService {
    * fresh, incomplete follow-up: every field is carried over (type, lead,
    * description, times, the assignee set) except completion, which
    * starts clear. Reuses the create nested-write shape; the source assignees came
-   * from a row already in scope, so no foreign key can be invalid.
+   * from a row already in scope, so no foreign key can be invalid. The copy assigns
+   * them afresh, so each must still be able to open the lead — the check create and
+   * edit make (ADR-0093): a pipeline closed to one of them since refuses the copy.
    */
   async duplicate(id: string): Promise<ActivityItem> {
     const user = await this.currentUser.resolve();
@@ -299,6 +302,10 @@ export class ActivitiesService {
       },
     });
     if (!source) throw new NotFoundException(ACTIVITY_OUT_OF_SCOPE);
+    await this.assertAssigneesCanAccess(
+      source.lead.id,
+      new Set(source.assignees.map((a) => a.userId)),
+    );
 
     const created = await this.prisma.activity.create({
       data: {
@@ -324,7 +331,8 @@ export class ActivitiesService {
    * an assignee outside the lead's scope — or in an operational role, which sees no
    * lead at all — would hold a task they can never see. Refused with a 400 naming
    * them; handing a lead's work to someone else is a lead reassignment. Each check
-   * reuses `leadScopeWhere` as that assignee, so it is the same rule the worklist
+   * reuses `leadScopeWhere` as that assignee, with the pipelines closed to them read
+   * the same way the caller's are (ADR-0093), so it is the same rule the worklist
    * applies to them.
    */
   private async assertAssigneesCanAccess(
@@ -340,9 +348,14 @@ export class ActivitiesService {
     }
 
     const reachable = await Promise.all(
-      users.map((assignee) =>
+      users.map(async (assignee) =>
         this.prisma.lead.count({
-          where: { AND: [leadScopeWhere(assignee), { id: leadId }] },
+          where: {
+            AND: [
+              leadScopeWhere(await withPipelineAccess(this.prisma, assignee)),
+              { id: leadId },
+            ],
+          },
         }),
       ),
     );

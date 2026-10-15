@@ -16,7 +16,9 @@ import { escapeLike } from './lead-search';
  *   enum    — is/isnt/isEmpty/isNotEmpty
  *   user    — is/isnt/isEmpty/isNotEmpty  (through the assignment join)
  *   tags    — is/isnt/isEmpty/isNotEmpty  (through the lead-tag join)
- * Date operators receive ISO instants the client computed in its own timezone.
+ * Date operators receive ISO instants the client computed in its own timezone — day
+ * edges, or minute-precise edges when the user picked a time. The engine only compares
+ * instants (`>=` start, `<` end), so it never sees, and needs no rule for, a time zone.
  *
  * Text values are matched literally (`%` and `_` are escaped, as search does). A negative
  * operator (isn't, doesn't contain, not equals, not between) keeps the leads whose field is
@@ -198,6 +200,24 @@ const MAX_INT = 2_147_483_647;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * A date the filter can compare. `Date.parse` alone rolls an impossible day over —
+ * `2026-02-30` becomes 2 March — which would silently move the window, so an
+ * ISO-shaped value must also name a real calendar day.
+ */
+function isValidInstant(value: string): boolean {
+  if (Number.isNaN(Date.parse(value))) return false;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  if (!iso) return true;
+  const [year, month, day] = [Number(iso[1]), Number(iso[2]), Number(iso[3])];
+  const real = new Date(Date.UTC(year, month - 1, day));
+  return (
+    real.getUTCFullYear() === year &&
+    real.getUTCMonth() === month - 1 &&
+    real.getUTCDate() === day
+  );
+}
+
+/**
  * Parses + validates the JSON `conditions` param. Bad JSON, an unknown field, an
  * operator the field's kind doesn't allow, or a value-count mismatch is a 400.
  */
@@ -264,11 +284,17 @@ export function parseLeadConditions(raw: string | undefined): LeadCondition[] {
         }
       }
     }
-    if (
-      spec.kind === 'date' &&
-      cleaned.some((v) => Number.isNaN(Date.parse(v)))
-    ) {
-      throw new BadRequestException(`${String(field)} needs a valid date`);
+    if (spec.kind === 'date') {
+      if (cleaned.some((v) => !isValidInstant(v))) {
+        throw new BadRequestException(`${String(field)} needs a valid date`);
+      }
+      // The client's boundaries are half-open `[start, end)`, so a window whose end is
+      // not after its start matches nothing; say so rather than return an empty list.
+      if (RANGE.has(op) && Date.parse(cleaned[1]) <= Date.parse(cleaned[0])) {
+        throw new BadRequestException(
+          `${String(field)} ${op} needs an end after its start`,
+        );
+      }
     }
     if (
       (spec.kind === 'user' || spec.kind === 'tags') &&

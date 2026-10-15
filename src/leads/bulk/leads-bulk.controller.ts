@@ -1,7 +1,7 @@
 import { Body, Controller, HttpCode, Post } from '@nestjs/common';
 import { LeadsBulkService } from './leads-bulk.service';
 import { Roles } from '../../auth/roles.decorator';
-import { UserRole } from '../../generated/prisma/client';
+import { REASSIGN_ROLES } from '../../auth/role-groups';
 import {
   BulkActionResponse,
   BulkDeleteDto,
@@ -25,7 +25,7 @@ export class LeadsBulkController {
    * matching the hidden UI control.
    */
   @Post('reassign')
-  @Roles(UserRole.SUPERADMIN, UserRole.SALES_MANAGER)
+  @Roles(...REASSIGN_ROLES)
   @HttpCode(200)
   reassign(@Body() dto: BulkReassignDto): Promise<BulkActionResponse> {
     return this.service.reassign(dto);

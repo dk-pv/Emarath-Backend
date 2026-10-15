@@ -57,6 +57,8 @@ function makeRepository() {
     },
   };
   const prisma = {
+    // No existing lead matches: these tests are about the audit trail, not duplicates.
+    lead: { findMany: jest.fn().mockResolvedValue([]) },
     $transaction: jest.fn((run: (client: typeof tx) => Promise<unknown>) =>
       run(tx),
     ),
@@ -202,5 +204,228 @@ describe('LeadsImportRepository.existingContacts', () => {
     await repository.existingContacts(['971500000001'], [], true);
     const where = (findMany.mock.calls[0] as [{ where: object }])[0].where;
     expect(where).not.toHaveProperty('deletedAt');
+  });
+});
+
+describe('LeadsImportRepository.insertLeads — duplicate relationship (ADR-0092)', () => {
+  const day = (n: number) => new Date(Date.UTC(2026, 0, n));
+  const existingLead = (over: Record<string, unknown> = {}) => ({
+    id: 'orig-1',
+    createdAt: day(1),
+    duplicateOfId: null,
+    primaryPhone: '971500000001',
+    secondaryPhone: null,
+    email: null,
+    ...over,
+  });
+  const row = (
+    id: string,
+    over: Record<string, unknown> = {},
+  ): PreparedLead => ({
+    data: {
+      id,
+      name: 'Imported',
+      primaryPhone: '971599999999',
+      status: 'New',
+      pipeline: 'Lead Pipeline',
+      ...over,
+    },
+    assignToUserId: null,
+  });
+
+  /** A repository whose lookups answer from `existing`, and which records what it writes. */
+  function makeKit(existing: object[] = []) {
+    const leadFindMany = jest.fn().mockResolvedValue(existing);
+    const leadCreateMany = jest.fn().mockResolvedValue({ count: 0 });
+    const auditCreateMany = jest.fn().mockResolvedValue({ count: 0 });
+    const tx = {
+      lead: {
+        createMany: leadCreateMany,
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      leadAssignment: { createMany: jest.fn() },
+      auditEvent: { createMany: auditCreateMany },
+      logisticsOrder: {
+        findMany: jest.fn().mockResolvedValue([]),
+        createManyAndReturn: jest.fn().mockResolvedValue([]),
+      },
+    };
+    const prisma = {
+      lead: { findMany: leadFindMany },
+      $transaction: jest.fn((run: (client: typeof tx) => Promise<unknown>) =>
+        run(tx),
+      ),
+    } as unknown as PrismaService;
+    const repository = new LeadsImportRepository(prisma);
+    const written = () =>
+      Object.fromEntries(
+        (
+          leadCreateMany.mock.calls[0] as [
+            { data: { id: string; duplicateOfId: string | null }[] },
+          ]
+        )[0].data.map((lead) => [lead.id, lead.duplicateOfId]),
+      );
+    return { repository, leadFindMany, leadCreateMany, written };
+  }
+
+  it('writes a row that matches an existing lead, linked to it — never skipped', async () => {
+    const { repository, written } = makeKit([existingLead()]);
+
+    await repository.insertLeads(
+      [row('new-1', { primaryPhone: '971500000001' })],
+      audit,
+    );
+
+    expect(written()).toEqual({ 'new-1': 'orig-1' });
+  });
+
+  it('writes a row with no match unlinked', async () => {
+    const { repository, written } = makeKit([]);
+
+    await repository.insertLeads([row('new-1')], audit);
+
+    expect(written()).toEqual({ 'new-1': null });
+  });
+
+  it('matches across the two phone columns', async () => {
+    const { repository, written } = makeKit([
+      existingLead({
+        primaryPhone: '971500000009',
+        secondaryPhone: '971500000001',
+      }),
+    ]);
+
+    await repository.insertLeads(
+      [row('new-1', { primaryPhone: '971500000001' })],
+      audit,
+    );
+
+    expect(written()).toEqual({ 'new-1': 'orig-1' });
+  });
+
+  it('matches an email ignoring case', async () => {
+    const { repository, written } = makeKit([
+      existingLead({ primaryPhone: '971500000009', email: 'Ali@Example.com' }),
+    ]);
+
+    await repository.insertLeads(
+      [row('new-1', { email: 'ali@example.com' })],
+      audit,
+    );
+
+    expect(written()).toEqual({ 'new-1': 'orig-1' });
+  });
+
+  it('links a later row of the same batch to the earlier one it duplicates', async () => {
+    const { repository, written } = makeKit([]);
+
+    await repository.insertLeads(
+      [
+        row('first', { primaryPhone: '971500000005' }),
+        row('second', { primaryPhone: '971500000005' }),
+      ],
+      audit,
+    );
+
+    // The first row is the original; only the second is a duplicate. No self-link.
+    expect(written()).toEqual({ first: null, second: 'first' });
+  });
+
+  it('keeps one customer’s rows in a star around the first, not a chain', async () => {
+    const { repository, written } = makeKit([]);
+
+    await repository.insertLeads(
+      [
+        row('r1', { primaryPhone: '971500000005' }),
+        row('r2', { primaryPhone: '971500000005' }),
+        row('r3', { primaryPhone: '971500000005' }),
+      ],
+      audit,
+    );
+
+    expect(written()).toEqual({ r1: null, r2: 'r1', r3: 'r1' });
+  });
+
+  it('prefers an existing lead over an earlier row of the batch', async () => {
+    const { repository, written } = makeKit([existingLead()]);
+
+    await repository.insertLeads(
+      [
+        row('r1', { primaryPhone: '971500000001' }),
+        row('r2', { primaryPhone: '971500000001' }),
+      ],
+      audit,
+    );
+
+    expect(written()).toEqual({ r1: 'orig-1', r2: 'orig-1' });
+  });
+
+  it('chooses the oldest existing match that is not itself a duplicate', async () => {
+    const { repository, written } = makeKit([
+      existingLead({ id: 'dup', createdAt: day(1), duplicateOfId: 'other' }),
+      existingLead({ id: 'root-late', createdAt: day(9) }),
+      existingLead({ id: 'root-early', createdAt: day(4) }),
+    ]);
+
+    await repository.insertLeads(
+      [row('new-1', { primaryPhone: '971500000001' })],
+      audit,
+    );
+
+    expect(written()).toEqual({ 'new-1': 'root-early' });
+  });
+
+  it('matches through either of a row’s own phones', async () => {
+    const { repository, written } = makeKit([
+      existingLead({ primaryPhone: '971500000002' }),
+    ]);
+
+    await repository.insertLeads(
+      [
+        row('new-1', {
+          primaryPhone: '971500000099',
+          secondaryPhone: '971500000002',
+        }),
+      ],
+      audit,
+    );
+
+    expect(written()).toEqual({ 'new-1': 'orig-1' });
+  });
+
+  it('excludes archived leads from the lookup unless Duplicate Settings includes them', async () => {
+    const live = makeKit([]);
+    await live.repository.insertLeads([row('new-1')], audit, false);
+    const archivedIncluded = makeKit([]);
+    await archivedIncluded.repository.insertLeads([row('new-1')], audit, true);
+
+    const whereOf = (kit: ReturnType<typeof makeKit>) =>
+      (kit.leadFindMany.mock.calls[0] as [{ where: object }])[0].where;
+    expect(whereOf(live)).toHaveProperty('deletedAt', null);
+    expect(whereOf(archivedIncluded)).not.toHaveProperty('deletedAt');
+  });
+
+  it('writes every row of the batch, so the created count equals the rows given', async () => {
+    const { repository, leadCreateMany } = makeKit([existingLead()]);
+
+    await repository.insertLeads(
+      [
+        row('a', { primaryPhone: '971500000001' }),
+        row('b'),
+        row('c', { primaryPhone: '971500000001' }),
+      ],
+      audit,
+    );
+
+    const data = (leadCreateMany.mock.calls[0] as [{ data: unknown[] }])[0]
+      .data;
+    expect(data).toHaveLength(3);
+  });
+
+  it('does no lookup for an empty batch', async () => {
+    const { repository, leadFindMany, leadCreateMany } = makeKit([]);
+    await repository.insertLeads([], audit);
+    expect(leadFindMany).not.toHaveBeenCalled();
+    expect(leadCreateMany).not.toHaveBeenCalled();
   });
 });

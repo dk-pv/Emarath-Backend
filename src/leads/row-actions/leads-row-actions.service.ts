@@ -5,12 +5,23 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '../../generated/prisma/client';
-import { CurrentUserService } from '../../auth/current-user';
+import { CurrentUser, CurrentUserService } from '../../auth/current-user';
+import { ASSIGNABLE_USER_WHERE, REASSIGN_ROLES } from '../../auth/role-groups';
 import { MailerService } from '../../auth/mailer.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { userActor } from '../../audit/audit-events';
-import { auditLeadChanges, recordLeadsCreated } from '../lead-audit';
+import { TagAccessService } from '../../tag-access/tag-access.service';
+import {
+  auditLeadChanges,
+  recordLeadsCreated,
+  withLogisticsOrder,
+} from '../lead-audit';
 import { leadScopeWhere } from '../lead-scope';
+import {
+  assertMayChangeLead,
+  assertMayMoveLead,
+  assertPipelineOpen,
+} from '../../pipelines/pipeline-access';
 import {
   LeadListItem,
   LEAD_LIST_SELECT,
@@ -30,13 +41,18 @@ import {
   SetLeadStatusDto,
 } from './dto/row-actions.dto';
 import { LOST_STATUS } from '../lead-status.constants';
-import { firstStageName } from '../../stages/stages.service';
+import { firstStageName, stageOfPipeline } from '../../stages/stages.service';
 
 /**
  * The scalar and relation fields a duplicate copies (LEAD-10.1 AC2, decided
  * "fields + assignments + tags"). id/timestamps are deliberately absent — the
  * copy is a new record with its own identity. Assignments carry over so the copy
  * stays inside the same agents' scope as its source; tags carry over as chips.
+ *
+ * `status` is deliberately absent too: a copy is a new lead, so it starts in the new-lead
+ * default (the pipeline's first stage), never in whatever stage the source reached
+ * (ADR-0092). Nothing else about the source's progress is selected either — no lost reason,
+ * no status timestamp.
  */
 const LEAD_COPY_SELECT = {
   name: true,
@@ -47,7 +63,6 @@ const LEAD_COPY_SELECT = {
   language: true,
   country: true,
   source: true,
-  status: true,
   pipeline: true,
   product: true,
   productQty: true,
@@ -67,6 +82,9 @@ const LEAD_COPY_SELECT = {
   whatsappAttempts: true,
   assignments: { select: { userId: true } },
   tags: { select: { tagId: true } },
+  // The copy is a duplicate of the source's original, or of the source itself (ADR-0092).
+  id: true,
+  duplicateOfId: true,
 } satisfies Prisma.LeadSelect;
 
 /**
@@ -89,14 +107,19 @@ export class LeadRowActionsService {
     private readonly currentUser: CurrentUserService,
     private readonly bulk: LeadsBulkService,
     private readonly mailer: MailerService,
+    private readonly tagAccess: TagAccessService,
   ) {}
 
   /**
    * Duplicates one lead into a new record (AC2). The source is loaded through the
-   * caller's scope, so a lead they cannot see cannot be copied. Fields,
-   * assignments and tags are cloned in a single create; a sales agent who can see
-   * the source is necessarily one of its assignees, so the copy carries their
-   * assignment and stays visible to them without a special case.
+   * caller's scope, so a lead they cannot see cannot be copied. Fields, the assignees
+   * the caller may give it (`copyableAssignees`) and the tags they may select are written
+   * in a single create.
+   *
+   * The copy starts in the new-lead default status — the first stage of the source's
+   * pipeline, else 'New' — whatever the source's status (LOST, WON or anything else), exactly
+   * as a lead created from the form does (ADR-0092). The source is only read, never written,
+   * so it keeps its status, and a WON source does not make a second converted lead.
    */
   async duplicate(id: string): Promise<LeadListItem> {
     const user = await this.currentUser.resolve();
@@ -106,20 +129,46 @@ export class LeadRowActionsService {
       select: LEAD_COPY_SELECT,
     });
     if (!source) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+    // The copy lands in the source's pipeline, so the caller must be able to create there
+    // (ADR-0093 B9) — an agent copying an assigned lead from a pipeline closed to them cannot.
+    assertPipelineOpen(user, source.pipeline);
 
-    const { assignments, tags, ...scalars } = source;
+    const {
+      assignments,
+      tags,
+      id: sourceId,
+      duplicateOfId,
+      ...scalars
+    } = source;
+    // Tag Permissions (ADR-0091): a copy must not hand the caller a tag they may not select.
+    const permitted = new Set(
+      await this.tagAccess.handleable(
+        user,
+        tags.map((t) => t.tagId),
+      ),
+    );
+    const copiedTags = tags.filter((t) => permitted.has(t.tagId));
+    const copiedAssignees = await this.copyableAssignees(
+      user,
+      assignments.map((a) => a.userId),
+    );
     const data: Prisma.LeadCreateInput = {
       ...scalars,
-      assignments: assignments.length
+      status: (await firstStageName(this.prisma, source.pipeline)) ?? 'New',
+      // The copy shares the source's phone, so it duplicates the same original (ADR-0092).
+      duplicateOf: { connect: { id: duplicateOfId ?? sourceId } },
+      assignments: copiedAssignees.length
         ? {
-            create: assignments.map((a) => ({
-              user: { connect: { id: a.userId } },
+            create: copiedAssignees.map((userId) => ({
+              user: { connect: { id: userId } },
             })),
           }
         : undefined,
-      tags: tags.length
+      tags: copiedTags.length
         ? {
-            create: tags.map((t) => ({ tag: { connect: { id: t.tagId } } })),
+            create: copiedTags.map((t) => ({
+              tag: { connect: { id: t.tagId } },
+            })),
           }
         : undefined,
     };
@@ -131,9 +180,33 @@ export class LeadRowActionsService {
         source: 'leads.duplicate',
         metadata: { duplicatedFrom: id },
       });
-      return row;
+      // The copy starts in the first stage, which a reordered board can make WON.
+      return withLogisticsOrder(tx, row);
     });
     return toLeadListItem(created);
+  }
+
+  /**
+   * The copy's assignees. A copy is a new lead, so these are new assignments under the create
+   * rule (`LeadsService.assertMayAssign`): a manager or an administrator keeps the source's
+   * assignees; anyone else keeps only their own assignment — an agent who can see the source is
+   * always on it, so the copy stays visible to them. Either way only live, active, assignable
+   * users are carried over (`ASSIGNABLE_USER_WHERE`); the source's assignments are not touched.
+   */
+  private async copyableAssignees(
+    user: CurrentUser,
+    sourceAssignees: string[],
+  ): Promise<string[]> {
+    const wanted = REASSIGN_ROLES.includes(user.role)
+      ? sourceAssignees
+      : sourceAssignees.filter((userId) => userId === user.id);
+    if (wanted.length === 0) return [];
+    const assignable = await this.prisma.user.findMany({
+      where: { id: { in: wanted }, ...ASSIGNABLE_USER_WHERE },
+      select: { id: true },
+    });
+    const allowed = new Set(assignable.map((row) => row.id));
+    return wanted.filter((userId) => allowed.has(userId));
   }
 
   /**
@@ -163,9 +236,19 @@ export class LeadRowActionsService {
 
     const target = await this.prisma.lead.findFirst({
       where: { AND: [leadScopeWhere(user), { id }] },
-      select: { id: true },
+      select: { id: true, status: true, pipeline: true },
     });
     if (!target) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+    assertMayChangeLead(user, target);
+
+    // A changed status must be a stage of the lead's OWN pipeline — the rule create, edit and
+    // the Kanban move apply (400, nothing written). Convert sends WON, so on a pipeline with no
+    // WON stage it is refused rather than converting a lead no board column shows. An unchanged
+    // status (a repeated Convert, a new LOST reason) is not re-checked, so legacy rows still
+    // take it. Logistics write-backs do not come through here (ADR-0085).
+    if (dto.status !== target.status) {
+      await stageOfPipeline(this.prisma, target.pipeline, dto.status);
+    }
 
     const updated = await auditLeadChanges(
       this.prisma,
@@ -184,7 +267,7 @@ export class LeadRowActionsService {
           select: LEAD_LIST_SELECT,
         }),
     );
-    return toLeadListItem(updated);
+    return toLeadListItem(await withLogisticsOrder(this.prisma, updated));
   }
 
   /**
@@ -203,9 +286,10 @@ export class LeadRowActionsService {
 
     const lead = await this.prisma.lead.findFirst({
       where: { AND: [leadScopeWhere(user), { id }] },
-      select: { id: true },
+      select: { id: true, pipeline: true },
     });
     if (!lead) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+    assertMayChangeLead(user, lead);
 
     try {
       await this.mailer.sendMail({
@@ -241,9 +325,10 @@ export class LeadRowActionsService {
 
     const lead = await this.prisma.lead.findFirst({
       where: { AND: [leadScopeWhere(user), { id }] },
-      select: { id: true },
+      select: { id: true, pipeline: true },
     });
     if (!lead) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+    assertMayChangeLead(user, lead);
 
     const note = await this.prisma.leadNote.create({
       data: { leadId: id, authorId: user.id, body: dto.body },
@@ -259,6 +344,15 @@ export class LeadRowActionsService {
    * lead other records depend on is a 409 (ADR-0083).
    */
   async delete(id: string): Promise<RowDeleteResponse> {
+    // The bulk path counts a lead the caller may see but not change as not permitted; one lead
+    // gets the reason instead (ADR-0093 B2).
+    const user = await this.currentUser.resolve();
+    const visible = await this.prisma.lead.findFirst({
+      where: { AND: [leadScopeWhere(user), { id }] },
+      select: { pipeline: true },
+    });
+    if (visible) assertMayChangeLead(user, visible);
+
     const result = await this.bulk.delete({ ids: [id] }, 'leads.delete');
     if (result.results[0]?.status !== 'success') {
       throw new NotFoundException(OUT_OF_SCOPE_REASON);
@@ -281,9 +375,13 @@ export class LeadRowActionsService {
 
     const target = await this.prisma.lead.findFirst({
       where: { AND: [leadScopeWhere(user), { id }] },
-      select: { id: true },
+      select: { id: true, pipeline: true },
     });
     if (!target) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+    // Managers and administrators only (the route's @Roles), out of a pipeline they may change
+    // and into one open to them (ADR-0093 B5).
+    assertMayChangeLead(user, target);
+    assertMayMoveLead(user, dto.pipeline);
 
     const firstStage = await firstStageName(this.prisma, dto.pipeline);
     if (!firstStage) {
@@ -303,7 +401,7 @@ export class LeadRowActionsService {
           select: LEAD_LIST_SELECT,
         }),
     );
-    return toLeadListItem(updated);
+    return toLeadListItem(await withLogisticsOrder(this.prisma, updated));
   }
 
   /**
@@ -317,9 +415,10 @@ export class LeadRowActionsService {
 
     const target = await this.prisma.lead.findFirst({
       where: { AND: [leadScopeWhere(user), { id }] },
-      select: { id: true },
+      select: { id: true, pipeline: true },
     });
     if (!target) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+    assertMayChangeLead(user, target);
 
     await auditLeadChanges(
       this.prisma,
@@ -342,9 +441,10 @@ export class LeadRowActionsService {
 
     const target = await this.prisma.lead.findFirst({
       where: { AND: [leadScopeWhere(user, true), { id }] },
-      select: { id: true },
+      select: { id: true, pipeline: true },
     });
     if (!target) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+    assertMayChangeLead(user, target);
 
     const updated = await auditLeadChanges(
       this.prisma,

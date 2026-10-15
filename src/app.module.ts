@@ -37,6 +37,7 @@ import { PipelinesModule } from './pipelines/pipelines.module';
 import { LeadSourcesModule } from './lead-sources/lead-sources.module';
 import { AssignmentRulesModule } from './assignment-rules/assignment-rules.module';
 import { MessageTemplatesModule } from './message-templates/message-templates.module';
+import { TagAccessModule } from './tag-access/tag-access.module';
 import { TagsModule } from './tags/tags.module';
 import { SettingsModule } from './settings/settings.module';
 import { ViewPreferencesModule } from './view-preferences/view-preferences.module';
@@ -64,6 +65,7 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     AssignmentRulesModule,
     MessageTemplatesModule,
     TagsModule,
+    TagAccessModule,
     AuditModule,
     AuthModule,
     CallsModule,

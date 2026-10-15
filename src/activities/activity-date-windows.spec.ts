@@ -84,4 +84,24 @@ describe('activityDueRangeWhere', () => {
       dueAt: { gte: EDGES.todayStart, lt: EDGES.todayEnd },
     });
   });
+
+  it('keeps the minute a time-precise From/To range was picked at', () => {
+    // 10:00 AM → 3:00 PM on 13 Oct, UAE time; the To edge is one minute past 3:00 PM.
+    const from = new Date('2026-10-13T06:00:00.000Z');
+    const to = new Date('2026-10-13T11:01:00.000Z');
+    const range = activityDueRangeWhere(from, to) as {
+      dueAt: { gte: Date; lt: Date };
+    };
+    expect(range).toEqual({ dueAt: { gte: from, lt: to } });
+
+    // Half-open: the first included instant is 10:00:00, the first excluded is 3:01 PM.
+    const inside = (iso: string) => {
+      const t = Date.parse(iso);
+      return t >= range.dueAt.gte.getTime() && t < range.dueAt.lt.getTime();
+    };
+    expect(inside('2026-10-13T05:59:59.999Z')).toBe(false);
+    expect(inside('2026-10-13T06:00:00.000Z')).toBe(true);
+    expect(inside('2026-10-13T11:00:59.999Z')).toBe(true);
+    expect(inside('2026-10-13T11:01:00.000Z')).toBe(false);
+  });
 });

@@ -63,4 +63,51 @@ describe('buildLeadWhere', () => {
       deletedAt: null,
     });
   });
+
+  it('keeps an agent in their own leads when a time-precise Filter and the other filters are applied', () => {
+    // 10:00 AM → 3:00 PM on 13 Oct, UAE time, as the Filter builder sends it.
+    const from = '2026-10-13T06:00:00.000Z';
+    const to = '2026-10-13T11:01:00.000Z';
+    const conditions = JSON.stringify([
+      { field: 'createdAt', operator: 'between', values: [from, to] },
+    ]);
+
+    const where = buildLeadWhere(agent, {
+      conditions,
+      status: ['New'],
+      createdFrom: '2026-10-01T00:00:00.000Z',
+    });
+
+    const parts = where.AND as Record<string, unknown>[];
+    // Scope stays first and untouched; the window is one more AND, never a replacement.
+    expect(parts[0]).toEqual({
+      deletedAt: null,
+      assignments: { some: { userId: 'agent-1' } },
+    });
+    expect(parts).toContainEqual({
+      createdAt: { gte: new Date(from), lt: new Date(to) },
+    });
+    // The unrelated filters are still applied alongside it.
+    expect(parts).toContainEqual({ status: { in: ['New'] } });
+    expect(parts).toContainEqual({
+      createdAt: { gte: new Date('2026-10-01T00:00:00.000Z') },
+    });
+  });
+
+  it('applies the same time-precise window to an administrator without any agent scope', () => {
+    const from = '2026-10-13T06:00:00.000Z';
+    const to = '2026-10-13T11:01:00.000Z';
+    expect(
+      buildLeadWhere(admin, {
+        conditions: JSON.stringify([
+          { field: 'createdAt', operator: 'between', values: [from, to] },
+        ]),
+      }),
+    ).toEqual({
+      AND: [
+        { deletedAt: null },
+        { createdAt: { gte: new Date(from), lt: new Date(to) } },
+      ],
+    });
+  });
 });

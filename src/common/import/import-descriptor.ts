@@ -85,6 +85,13 @@ export interface ImportDescriptor<TPrepared, TContext> {
    * the database. Kept on the descriptor so dedupe stays a query, never a full scan.
    */
   findExistingDuplicates(keys: string[]): Promise<Set<string>>;
+  /**
+   * When true, a row classified as a duplicate is still written (and still reported as a
+   * duplicate in the preview) instead of being skipped — for a module whose rule is that a
+   * duplicate is created and flagged, not refused (Leads, ADR-0092). Omitted, duplicates are
+   * skipped and listed in the error report, which is every other module's behaviour.
+   */
+  readonly importsDuplicates?: boolean;
   /** Turn one validated, mapped row into a persistable record. */
   buildRecord(mapped: Record<string, string>, context: TContext): TPrepared;
   /** Persist a batch atomically (one transaction per batch). */

@@ -19,6 +19,11 @@ import {
 } from './dto/lead-response.dto';
 import { LeadFilterOptions } from './dto/lead-filter-options.dto';
 import { CreateLeadDto } from './dto/create-lead.dto';
+import {
+  DuplicateCheckQueryDto,
+  DuplicateCheckResponse,
+  LeadDuplicateLinks,
+} from './dto/lead-duplicates.dto';
 import { ListLeadsQueryDto } from './dto/list-leads-query.dto';
 
 /** Thin by design: validation is the DTO's job, scoping the service's. */
@@ -40,6 +45,17 @@ export class LeadsController {
   @Get('assignable-agents')
   assignableAgents(): Promise<{ id: string; name: string }[]> {
     return this.leads.assignableAgents();
+  }
+
+  /**
+   * GET /api/leads/duplicate-check — the existing leads a new enquiry would duplicate, for the
+   * New Lead form's warning (ADR-0092). Static segment, declared before every `:id` route.
+   */
+  @Get('duplicate-check')
+  duplicateCheck(
+    @Query() query: DuplicateCheckQueryDto,
+  ): Promise<DuplicateCheckResponse> {
+    return this.leads.checkDuplicates(query);
   }
 
   /** GET /api/leads — one scoped page plus the total (LEAD-02.1). */
@@ -96,7 +112,8 @@ export class LeadsController {
 
   /**
    * GET /api/leads/:id/timeline — the Lead Detail drawer's activity feed (created,
-   * assigned, notes), scoped like the detail read → 404 out of scope. Two-segment
+   * assigned, notes, calls, status moves), scoped like the detail read → 404 out of
+   * scope. Two-segment
    * path, declared before the single-segment `:id` so it is never taken as an id.
    */
   @Get(':id/timeline')
@@ -104,6 +121,18 @@ export class LeadsController {
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<LeadTimelineEvent[]> {
     return this.leads.getTimeline(id);
+  }
+
+  /**
+   * GET /api/leads/:id/duplicates — the lead it duplicates and the leads recorded as duplicates
+   * of it (ADR-0092), scoped like the detail read → 404 out of scope. Two-segment path,
+   * declared before the single-segment `:id`.
+   */
+  @Get(':id/duplicates')
+  duplicates(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<LeadDuplicateLinks> {
+    return this.leads.getDuplicateLinks(id);
   }
 
   /**

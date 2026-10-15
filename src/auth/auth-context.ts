@@ -4,6 +4,8 @@ import type { CurrentUser } from './current-user';
 /** Per-request store holding the authenticated caller (populated by JwtAuthGuard). */
 export interface AuthStore {
   user?: CurrentUser;
+  /** `user` with their pipeline access, looked up once per request (ADR-0093). */
+  resolved?: Promise<CurrentUser>;
 }
 
 /**

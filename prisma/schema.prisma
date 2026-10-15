@@ -172,6 +172,8 @@ model User {
   pipelineGrants        PipelinePermission[]   @relation("PipelinePermissionUser")
   leadForm              LeadForm?              @relation(fields: [leadFormId], references: [id], onDelete: Restrict)
   modulePermissions     UserModulePermission[]
+  /// This user's own Tag Permissions override, if the Admin set one (ADR-0091).
+  tagAccessPolicy       TagAccessPolicy?
   /// Changes this user made (ADR-0083).
   auditEvents           AuditEvent[]           @relation("AuditEventActor")
   /// Leads this user converted into Logistics orders (ADR-0085).
@@ -507,6 +509,17 @@ model Lead {
 
   statusChangedAt DateTime @default(now()) @map("status_changed_at")
 
+  /// The earlier lead this one was received as a duplicate of (ADR-0092): the OLDEST lead the
+  /// fixed duplicate rule matched when this one was created, imported or copied. Recorded once,
+  /// at receipt — the new lead stays a separate, independent record with its own status — and
+  /// not recomputed when either lead is edited later. Points only at an older lead (so the
+  /// links are acyclic), never at itself (a CHECK in the migration), and goes null if that lead
+  /// is ever hard-deleted; archiving (`deletedAt`) leaves the link in place.
+  duplicateOfId String? @map("duplicate_of_id") @db.Uuid
+  duplicateOf   Lead?   @relation("LeadDuplicateOf", fields: [duplicateOfId], references: [id], onDelete: SetNull)
+  /// The leads recorded as duplicates of this one.
+  duplicates    Lead[]  @relation("LeadDuplicateOf")
+
   assignments       LeadAssignment[]
   tags              LeadTag[]
   /// Duplicate enquiries refused because they matched this lead.
@@ -536,6 +549,8 @@ model Lead {
   @@index([source, deletedAt])
   @@index([pipeline, deletedAt])
   @@index([createdAt(sort: Desc)])
+  /// "The duplicates of this lead" reads from this side (ADR-0092).
+  @@index([duplicateOfId])
   /// LEAD-03.1: substring search on Customer Name and Primary Phone. `contains`
   /// compiles to ILIKE '%term%', whose leading wildcard a btree cannot use, so
   /// these are GIN trigram indexes (pg_trgm) — the index that makes an unanchored
@@ -611,7 +626,9 @@ model Tag {
   /// leaves those join rows untouched (ADR-0063).
   deletedAt DateTime? @map("deleted_at")
 
-  leads LeadTag[]
+  leads        LeadTag[]
+  /// Tag Permissions that list this tag (ADR-0091).
+  accessGrants TagAccessGrant[]
 
   @@map("tags")
 }
@@ -632,6 +649,63 @@ model LeadTag {
   /// LEAD-12.1 AC4: "leads tagged X" reads from this side.
   @@index([tagId])
   @@map("lead_tags")
+}
+
+/// How a policy limits the tags its holders may select (ADR-0091).
+enum TagAccessMode {
+  /// Every active tag, including ones created later.
+  ALL
+  /// Only the tags granted to the policy; a tag created later is not included.
+  LISTED
+}
+
+/// What a team or one user may do with tags (Settings → Sales & CRM → Tags → Tag
+/// Permissions, ADR-0091). No row means "as before": every active tag may be selected and only
+/// an administrator creates tags, so introducing the table changes nobody's access.
+///
+/// A team row keys on `User.team` — the only grouping label users carry — and a user row
+/// is that one person's override. Exactly one of the two is set, and a team row must be
+/// complete; both are CHECK constraints in the migration, which Prisma cannot express. On a user
+/// row a null field means "inherit the team's value", so an override can change one
+/// capability and leave the other alone.
+model TagAccessPolicy {
+  id String @id @default(uuid()) @db.Uuid
+
+  team String? @db.VarChar(120)
+  userId     String? @map("user_id") @db.Uuid
+
+  /// May the holder create tags. Null only on a user override: inherit.
+  canCreate Boolean?       @map("can_create")
+  /// Which tags the holder may select. Null only on a user override: inherit.
+  tagAccess TagAccessMode? @map("tag_access")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user   User?            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  grants TagAccessGrant[]
+
+  @@unique([team])
+  @@unique([userId])
+  @@map("tag_access_policies")
+}
+
+/// One tag a `LISTED` policy lets its holders select. Cascades from both sides: removing a
+/// policy removes its grants, and a tag that is ever hard-deleted leaves no dangling grant
+/// (the Tags catalogue soft-deletes, so this is a backstop, ADR-0063).
+model TagAccessGrant {
+  id        String   @id @default(uuid()) @db.Uuid
+  policyId  String   @map("policy_id") @db.Uuid
+  tagId     String   @map("tag_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  policy TagAccessPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  tag    Tag             @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([policyId, tagId])
+  @@index([tagId])
+  @@map("tag_access_grants")
 }
 
 /// A complaint raised against a lead (LEAD-01.3 AC2).

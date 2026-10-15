@@ -1,4 +1,4 @@
-import { UserRole } from '../generated/prisma/client';
+import { Prisma, UserRole } from '../generated/prisma/client';
 
 /**
  * The post-sale roles of the client CRM workflow (ADR-0084, plus QC from the 2026-10-01
@@ -26,6 +26,43 @@ export const SALES_MODULE_ROLES: readonly UserRole[] = [
   UserRole.CUSTOMER_SERVICE_AGENT,
   UserRole.MARKETING_ANALYST,
 ];
+
+/**
+ * Who may choose a lead's assignees: the Reassign actions' `@Roles` (AUTH-02.2 — "only managers
+ * and admins see … reassignment tools"), and the New/Edit Lead form's Assigned field with them.
+ */
+export const REASSIGN_ROLES: readonly UserRole[] = [
+  UserRole.SUPERADMIN,
+  UserRole.SALES_MANAGER,
+];
+
+/**
+ * Who may move a lead from one pipeline to another (ADR-0093 B5): Change Pipeline, and an edit
+ * that changes the Pipeline field. Creating a lead in a pipeline is not a move.
+ */
+export const PIPELINE_MOVE_ROLES: readonly UserRole[] = [
+  UserRole.SUPERADMIN,
+  UserRole.SALES_MANAGER,
+];
+
+/** Who a lead may be assigned to: the lead-handling roles (LEAD-06.2). */
+export const ASSIGNABLE_ROLES: readonly UserRole[] = [
+  UserRole.SALES_AGENT,
+  UserRole.SALES_MANAGER,
+  UserRole.CUSTOMER_SERVICE_AGENT,
+];
+
+/**
+ * A user a lead may NEWLY be assigned to: not deleted, active, in an assignable role. The one
+ * rule behind every way a lead gains an assignee — create, edit, Reassign (row and bulk),
+ * automatic assignment, Duplicate — and behind the Assigned field's options. It is never applied
+ * to an assignee a lead already has: deactivating a user leaves their leads as they are.
+ */
+export const ASSIGNABLE_USER_WHERE = {
+  deletedAt: null,
+  isActive: true,
+  role: { in: [...ASSIGNABLE_ROLES] },
+} satisfies Prisma.UserWhereInput;
 
 export function isOperationalRole(role: UserRole | undefined): boolean {
   return role !== undefined && OPERATIONAL_ROLES.includes(role);

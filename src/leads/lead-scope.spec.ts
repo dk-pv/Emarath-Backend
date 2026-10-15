@@ -108,6 +108,85 @@ describe('leadScopeWhere', () => {
     });
   });
 
+  // ADR-0093: pipeline access, read per request into `deniedPipelines`.
+  describe('pipelines closed to the caller', () => {
+    const closed = ['VIP', 'Complaints'];
+
+    it('adds nothing for any role while no pipeline is closed (All users)', () => {
+      for (const role of Object.values(UserRole)) {
+        expect(
+          leadScopeWhere({ ...user(role), team: 'Sales', deniedPipelines: [] }),
+        ).toEqual(leadScopeWhere({ ...user(role), team: 'Sales' }));
+      }
+    });
+
+    it('keeps a manager to their team’s leads in the pipelines open to them (B3, B8)', () => {
+      expect(
+        leadScopeWhere({
+          id: 'mgr-1',
+          role: UserRole.SALES_MANAGER,
+          team: 'Sales',
+          deniedPipelines: closed,
+        }),
+      ).toEqual({
+        deletedAt: null,
+        pipeline: { notIn: ['VIP', 'Complaints'] },
+        assignments: { some: { user: { team: 'Sales' } } },
+      });
+    });
+
+    it('closes the pipelines to a teamless manager’s own leads too (no exception, B2)', () => {
+      expect(
+        leadScopeWhere(
+          {
+            id: 'mgr-1',
+            role: UserRole.SALES_MANAGER,
+            team: null,
+            deniedPipelines: closed,
+          },
+          true,
+        ),
+      ).toEqual({
+        deletedAt: { not: null },
+        pipeline: { notIn: ['VIP', 'Complaints'] },
+        assignments: { some: { userId: 'mgr-1' } },
+      });
+    });
+
+    it.each([UserRole.CUSTOMER_SERVICE_AGENT, UserRole.MARKETING_ANALYST])(
+      'keeps %s org-wide except the pipelines closed to them (B4)',
+      (role) => {
+        expect(
+          leadScopeWhere({ ...user(role), deniedPipelines: closed }),
+        ).toEqual({
+          deletedAt: null,
+          pipeline: { notIn: ['VIP', 'Complaints'] },
+        });
+      },
+    );
+
+    it('leaves a sales agent every lead assigned to them, in any pipeline (B2)', () => {
+      expect(
+        leadScopeWhere({
+          ...user(UserRole.SALES_AGENT),
+          deniedPipelines: closed,
+        }),
+      ).toEqual({
+        deletedAt: null,
+        assignments: { some: { userId: 'user-1' } },
+      });
+    });
+
+    it('never narrows the admin, even if handed a closed list (B1)', () => {
+      expect(
+        leadScopeWhere({
+          ...user(UserRole.SUPERADMIN),
+          deniedPipelines: closed,
+        }),
+      ).toEqual({ deletedAt: null });
+    });
+  });
+
   it('returns a scope for every role the enum defines', () => {
     // A role added without a branch here would fall through and return
     // undefined, which Prisma reads as "no filter" — an unscoped table.

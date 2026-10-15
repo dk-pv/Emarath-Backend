@@ -243,9 +243,7 @@ describe('SettingsService', () => {
 
 describe('SettingsService — Duplicate Settings', () => {
   const dto = (over: Partial<UpdateSalesCrmDuplicateDto> = {}) => ({
-    mode: SALES_CRM_DUPLICATE_DEFAULTS.mode,
     allowDuplicateSearch: SALES_CRM_DUPLICATE_DEFAULTS.allowDuplicateSearch,
-    displayAssigneeInfo: SALES_CRM_DUPLICATE_DEFAULTS.displayAssigneeInfo,
     checkArchivedLeads: SALES_CRM_DUPLICATE_DEFAULTS.checkArchivedLeads,
     ...over,
   });
@@ -264,6 +262,19 @@ describe('SettingsService — Duplicate Settings', () => {
     );
   });
 
+  it('has no duplicate-handling mode at all — a duplicate is always created (ADR-0092)', async () => {
+    const { service, findUnique } = makeService();
+    findUnique.mockResolvedValue(null);
+
+    const settings = await service.getSalesCrmDuplicate();
+
+    expect(Object.keys(settings).sort()).toEqual([
+      'allowDuplicateSearch',
+      'checkArchivedLeads',
+      'log',
+    ]);
+  });
+
   it('falls back per field when a stored row is half-formed', async () => {
     const { service, findUnique } = makeService();
     findUnique.mockResolvedValue({
@@ -276,48 +287,122 @@ describe('SettingsService — Duplicate Settings', () => {
 
     const settings = await service.getSalesCrmDuplicate();
 
-    expect(settings.mode).toBe('WARN_ALLOW_SAVE');
     expect(settings.allowDuplicateSearch).toBe(true);
     // The one valid field survives.
     expect(settings.checkArchivedLeads).toBe(true);
+    expect(settings).not.toHaveProperty('mode');
+  });
+
+  describe('a legacy row that still says Block, hard stop', () => {
+    const legacy = {
+      mode: 'BLOCK_HARD_STOP',
+      allowDuplicateSearch: false,
+      displayAssigneeInfo: true,
+      checkArchivedLeads: true,
+      log: [
+        {
+          at: '2026-09-05T10:00:00.000Z',
+          byName: 'Old Admin',
+          changes: [
+            'Duplicate handling changed from “Warn, allow save” to “Block, hard stop”',
+          ],
+        },
+      ],
+    };
+
+    it('is read deterministically: the mode is never surfaced, the other values survive', async () => {
+      const { service, findUnique } = makeService();
+      findUnique.mockResolvedValue({ value: legacy });
+
+      const settings = await service.getSalesCrmDuplicate();
+
+      // Nothing in the result can make a caller refuse a lead.
+      expect(settings).toEqual({
+        allowDuplicateSearch: false,
+        checkArchivedLeads: true,
+        log: legacy.log,
+      });
+      expect(JSON.stringify(settings)).not.toContain('BLOCK');
+    });
+
+    it('reads the same as an identical row that said Warn', async () => {
+      const { service, findUnique } = makeService();
+      findUnique.mockResolvedValueOnce({ value: legacy });
+      const asBlock = await service.getSalesCrmDuplicate();
+      findUnique.mockResolvedValueOnce({
+        value: { ...legacy, mode: 'WARN_ALLOW_SAVE' },
+      });
+      const asWarn = await service.getSalesCrmDuplicate();
+
+      expect(asBlock).toEqual(asWarn);
+    });
+
+    it('is retired on the next save: the stored row no longer carries it, and the log is kept', async () => {
+      const { service, findUnique, upsert } = makeService();
+      findUnique.mockResolvedValue({ value: legacy });
+
+      await service.saveSalesCrmDuplicate(
+        dto({ allowDuplicateSearch: true, checkArchivedLeads: true }),
+        'u1',
+      );
+
+      const value = storedValue(upsert);
+      expect(value).not.toHaveProperty('mode');
+      expect(value).not.toHaveProperty('displayAssigneeInfo');
+      expect(JSON.stringify(value)).not.toContain('"mode"');
+      const log = value.log as { byName: string; changes: string[] }[];
+      // The earlier entry stays, the new change sits above it.
+      expect(log).toHaveLength(2);
+      expect(log[1].byName).toBe('Old Admin');
+      expect(log[0].changes).toEqual([
+        'Ability to search and view Duplicate leads turned on',
+      ]);
+    });
   });
 
   it('writes to its own key, leaving the general settings row alone', async () => {
     const { service, findUnique, upsert } = makeService();
     findUnique.mockResolvedValue(null);
 
-    await service.saveSalesCrmDuplicate(dto({ mode: 'BLOCK_HARD_STOP' }), 'u1');
+    await service.saveSalesCrmDuplicate(
+      dto({ checkArchivedLeads: true }),
+      'u1',
+    );
 
     const [call] = upsert.mock.calls[0] as [{ where: { key: string } }];
     expect(call.where.key).toBe(SALES_CRM_DUPLICATE_KEY);
     expect(call.where.key).not.toBe(SALES_CRM_GENERAL_KEY);
   });
 
-  it('keeps the block toggles while Warn is selected, so switching back restores them', async () => {
+  it('stores only the two settings that remain', async () => {
     const { service, findUnique, upsert } = makeService();
     findUnique.mockResolvedValue(null);
 
     await service.saveSalesCrmDuplicate(
-      dto({
-        mode: 'WARN_ALLOW_SAVE',
-        displayAssigneeInfo: true,
-        checkArchivedLeads: true,
-      }),
+      dto({ allowDuplicateSearch: false, checkArchivedLeads: true }),
       'u1',
     );
 
-    expect(storedValue(upsert)).toMatchObject({
-      mode: 'WARN_ALLOW_SAVE',
-      displayAssigneeInfo: true,
+    const value = storedValue(upsert);
+    expect(Object.keys(value).sort()).toEqual([
+      'allowDuplicateSearch',
+      'checkArchivedLeads',
+      'log',
+    ]);
+    expect(value).toMatchObject({
+      allowDuplicateSearch: false,
       checkArchivedLeads: true,
     });
   });
 
-  it('logs a mode change with the author’s name', async () => {
+  it('logs a change with the author’s name', async () => {
     const { service, findUnique, upsert } = makeService();
     findUnique.mockResolvedValue(null);
 
-    await service.saveSalesCrmDuplicate(dto({ mode: 'BLOCK_HARD_STOP' }), 'u1');
+    await service.saveSalesCrmDuplicate(
+      dto({ checkArchivedLeads: true }),
+      'u1',
+    );
 
     const log = storedValue(upsert).log as {
       byName: string;
@@ -325,8 +410,9 @@ describe('SettingsService — Duplicate Settings', () => {
     }[];
     expect(log).toHaveLength(1);
     expect(log[0].byName).toBe('Emarath Admin');
-    expect(log[0].changes[0]).toContain('Warn, allow save');
-    expect(log[0].changes[0]).toContain('Block, hard stop');
+    expect(log[0].changes).toEqual([
+      'Check archived leads for duplicates turned on',
+    ]);
   });
 
   it('logs one line per toggle that actually changed', async () => {
@@ -367,11 +453,58 @@ describe('SettingsService — Duplicate Settings', () => {
       },
     });
 
-    await service.saveSalesCrmDuplicate(dto({ mode: 'BLOCK_HARD_STOP' }), 'u1');
+    await service.saveSalesCrmDuplicate(
+      dto({ checkArchivedLeads: true }),
+      'u1',
+    );
 
     const log = storedValue(upsert).log as { changes: string[] }[];
     expect(log).toHaveLength(2);
     expect(log[1].changes).toEqual(['earlier']);
+  });
+
+  describe('UpdateSalesCrmDuplicateDto — an Admin cannot configure duplicates to be refused', () => {
+    const check = (body: Record<string, unknown>) =>
+      validate(plainToInstance(UpdateSalesCrmDuplicateDto, body), {
+        whitelist: true,
+        forbidNonWhitelisted: true,
+      });
+
+    it('accepts the two remaining toggles', async () => {
+      await expect(
+        check({ allowDuplicateSearch: true, checkArchivedLeads: false }),
+      ).resolves.toHaveLength(0);
+    });
+
+    it.each(['BLOCK_HARD_STOP', 'WARN_ALLOW_SAVE', 'anything'])(
+      'rejects a body that names a mode (%s) — the Block option no longer exists',
+      async (mode) => {
+        const errors = await check({
+          mode,
+          allowDuplicateSearch: true,
+          checkArchivedLeads: false,
+        });
+        expect(errors.map((error) => error.property)).toContain('mode');
+      },
+    );
+
+    it('rejects the retired Block-only toggle too', async () => {
+      const errors = await check({
+        allowDuplicateSearch: true,
+        checkArchivedLeads: false,
+        displayAssigneeInfo: true,
+      });
+      expect(errors.map((error) => error.property)).toContain(
+        'displayAssigneeInfo',
+      );
+    });
+
+    it('still requires both toggles', async () => {
+      const errors = await check({ allowDuplicateSearch: true });
+      expect(errors.map((error) => error.property)).toContain(
+        'checkArchivedLeads',
+      );
+    });
   });
 });
 

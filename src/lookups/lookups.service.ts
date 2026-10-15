@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { DEFAULT_PIPELINE } from '../stages/stage.constants';
 import {
@@ -20,7 +21,23 @@ import {
  */
 @Injectable()
 export class LookupsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly currentUser: CurrentUserService,
+  ) {}
+
+  /**
+   * The options a user is offered (`GET /lookups/:type`): `byType`, except that the pipelines
+   * closed to the caller are left out (ADR-0093), so no picker offers a board they cannot
+   * open. `byType` stays the whole catalogue for the server's own checks, which answer a closed
+   * pipeline with a 403 rather than "does not exist".
+   */
+  async offered(type: string): Promise<LookupOption[]> {
+    const options = await this.byType(type);
+    if (type !== 'pipelines') return options;
+    const { deniedPipelines = [] } = await this.currentUser.resolve();
+    return options.filter((option) => !deniedPipelines.includes(option.value));
+  }
 
   async byType(type: string): Promise<LookupOption[]> {
     if (type === 'tags') return this.tags();

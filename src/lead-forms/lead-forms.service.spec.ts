@@ -317,6 +317,18 @@ describe('LeadFormsService', () => {
       expect(formUpdateMany).not.toHaveBeenCalled();
     });
 
+    // The builder now offers Default on create; an inactive default would clear the real one
+    // and then be ignored by `defaultForm`.
+    it('refuses an inactive default, leaving the current default in place', async () => {
+      const { service, formCreate, formUpdateMany } = makeService();
+
+      await expect(
+        service.create(dto({ isDefault: true, isActive: false }), 'Admin'),
+      ).rejects.toThrow('The default form must stay Active.');
+      expect(formUpdateMany).not.toHaveBeenCalled();
+      expect(formCreate).not.toHaveBeenCalled();
+    });
+
     it('refuses a duplicate name, whatever its case', async () => {
       const { service, formFindFirst } = makeService();
       formFindFirst.mockResolvedValue({ id: 'other' });

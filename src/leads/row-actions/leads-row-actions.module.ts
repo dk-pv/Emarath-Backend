@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { TagAccessModule } from '../../tag-access/tag-access.module';
 import { LeadsBulkModule } from '../bulk/leads-bulk.module';
 import { LeadRowActionsController } from './leads-row-actions.controller';
 import { LeadRowActionsService } from './leads-row-actions.service';
@@ -10,7 +11,7 @@ import { LeadRowActionsService } from './leads-row-actions.service';
  * either — one folder per Leads capability, mirroring bulk/import/export.
  */
 @Module({
-  imports: [LeadsBulkModule],
+  imports: [LeadsBulkModule, TagAccessModule],
   controllers: [LeadRowActionsController],
   providers: [LeadRowActionsService],
 })

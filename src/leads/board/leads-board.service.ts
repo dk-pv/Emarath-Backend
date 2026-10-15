@@ -8,10 +8,11 @@ import { CurrentUserService } from '../../auth/current-user';
 import { PrismaService } from '../../prisma/prisma.service';
 import { userActor } from '../../audit/audit-events';
 import { StagesService } from '../../stages/stages.service';
-import { auditLeadChanges } from '../lead-audit';
+import { auditLeadChanges, withLogisticsOrder } from '../lead-audit';
 import { OUT_OF_SCOPE_REASON } from '../bulk/dto/bulk-actions.dto';
 import { LEAD_LIST_SELECT, toLeadListItem } from '../dto/lead-response.dto';
 import { leadScopeWhere } from '../lead-scope';
+import { assertMayChangeLead } from '../../pipelines/pipeline-access';
 import { buildLeadWhere, LeadWhereQuery } from '../lead-where';
 import { BoardStageSummary, LeadBoardResponse } from './dto/board-query.dto';
 import { MoveLeadStageDto, MoveLeadStageResponse } from './dto/move-stage.dto';
@@ -101,6 +102,7 @@ export class LeadsBoardService {
       select: { status: true, pipeline: true },
     });
     if (!current) throw new NotFoundException(OUT_OF_SCOPE_REASON);
+    assertMayChangeLead(user, current);
 
     // The target must be a real stage of this lead's own pipeline, checked against
     // the canonical catalogue (KAN-05.1) — an unknown stage is a clear 400 before any
@@ -140,7 +142,7 @@ export class LeadsBoardService {
     );
 
     return {
-      lead: toLeadListItem(updated),
+      lead: toLeadListItem(await withLogisticsOrder(this.prisma, updated)),
       pipeline: current.pipeline,
       stages,
     };

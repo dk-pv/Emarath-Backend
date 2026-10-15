@@ -58,6 +58,66 @@ describe('importJobScopeWhere (AUTH-02.1)', () => {
     });
   });
 
+  // ADR-0093: a job into a pipeline closed to the caller is out of scope — its error report
+  // carries the rejected rows' customer data.
+  describe('pipelines closed to the caller', () => {
+    const deniedPipelines = ['VIP'];
+
+    it('adds nothing for any role while no pipeline is closed (All users)', () => {
+      for (const role of Object.values(UserRole)) {
+        expect(
+          importJobScopeWhere({
+            id: 'u1',
+            role,
+            team: 'Sales',
+            deniedPipelines: [],
+          }),
+        ).toEqual(importJobScopeWhere({ id: 'u1', role, team: 'Sales' }));
+      }
+    });
+
+    it('hides a manager’s team imports into a closed pipeline', () => {
+      expect(
+        importJobScopeWhere({
+          id: 'mgr-1',
+          role: UserRole.SALES_MANAGER,
+          team: 'Sales',
+          deniedPipelines,
+        }),
+      ).toEqual({
+        deletedAt: null,
+        pipeline: { notIn: ['VIP'] },
+        createdBy: { team: 'Sales' },
+      });
+    });
+
+    it.each([UserRole.CUSTOMER_SERVICE_AGENT, UserRole.MARKETING_ANALYST])(
+      'hides imports into a closed pipeline from %s',
+      (role) => {
+        expect(
+          importJobScopeWhere({ id: 'u1', role, deniedPipelines }),
+        ).toEqual({ deletedAt: null, pipeline: { notIn: ['VIP'] } });
+      },
+    );
+
+    it('keeps an agent’s own imports and never narrows the admin', () => {
+      expect(
+        importJobScopeWhere({
+          id: 'u1',
+          role: UserRole.SALES_AGENT,
+          deniedPipelines,
+        }),
+      ).toEqual({ deletedAt: null, createdById: 'u1' });
+      expect(
+        importJobScopeWhere({
+          id: 'u1',
+          role: UserRole.SUPERADMIN,
+          deniedPipelines,
+        }),
+      ).toEqual({ deletedAt: null });
+    });
+  });
+
   it('returns a scope for every role the enum defines', () => {
     for (const role of Object.values(UserRole)) {
       expect(importJobScopeWhere({ id: 'u1', role })).toBeDefined();

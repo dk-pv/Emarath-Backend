@@ -8,6 +8,7 @@ import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CurrentUserService } from '../auth/current-user';
 import { recordAuditEvents, userActor } from '../audit/audit-events';
+import { assertPipelineOpen } from '../pipelines/pipeline-access';
 import { CONVERTED_STATUS } from '../reports/converted-leads-where';
 import { QC_REJECTED_LEAD_STATUS } from '../logistics/logistics-status';
 import {
@@ -94,9 +95,18 @@ export class StagesService {
     return found !== null;
   }
 
+  /**
+   * Refuses managing the stages of a pipeline closed to the caller (ADR-0093 B10). The route's
+   * @Roles still decides who manages stages at all; this decides where.
+   */
+  private async assertMayManage(pipeline: string): Promise<void> {
+    assertPipelineOpen(await this.currentUser.resolve(), pipeline);
+  }
+
   /** Adds a stage, appended after the current last one (AC1). */
   async create(dto: CreateStageDto): Promise<StageResponse> {
     const { pipeline, name, color } = dto;
+    await this.assertMayManage(pipeline);
 
     // A second WON / QC NOT APPROVED would convert or QC-reject leads by name in
     // whichever pipeline holds it, and could then never be renamed or deleted
@@ -141,6 +151,7 @@ export class StagesService {
       select: { id: true, pipeline: true, name: true },
     });
     if (!stage) throw new NotFoundException('Stage not found.');
+    await this.assertMayManage(stage.pipeline);
 
     const data: Prisma.StageUpdateInput = { ...wizardFields(dto) };
     if (dto.color !== undefined) data.color = dto.color;
@@ -199,6 +210,7 @@ export class StagesService {
   /** Persists a new stage order for a pipeline (AC3). */
   async reorder(dto: ReorderStagesDto): Promise<StageResponse[]> {
     const { pipeline, orderedIds } = dto;
+    await this.assertMayManage(pipeline);
 
     const stages = await this.prisma.stage.findMany({
       where: { pipeline },
@@ -235,6 +247,7 @@ export class StagesService {
       select: { id: true, pipeline: true, name: true },
     });
     if (!stage) throw new NotFoundException('Stage not found.');
+    await this.assertMayManage(stage.pipeline);
     guardReservedStageName(stage.name);
 
     // Archived leads count too: they keep their status, so unarchiving one into a
@@ -278,6 +291,42 @@ export async function firstStageName(
     select: { name: true },
   });
   return first?.name ?? null;
+}
+
+/**
+ * The status, once checked: a lead's pipeline must exist and its status must be one of that
+ * pipeline's stages — the rule the Kanban move, Change Pipeline and import apply — or the lead
+ * sits in no board column. Matched exactly, as the stage catalogue stores it. A pipeline with no
+ * stages yet (`status` null, from `firstStageName`) is refused, as import and Change Pipeline
+ * refuse it. Shared by create, edit and the status action, so all three answer alike (400).
+ */
+export async function stageOfPipeline(
+  prisma: PrismaService,
+  pipeline: string,
+  status: string | null,
+): Promise<string> {
+  const known = await prisma.pipeline.findUnique({
+    where: { name: pipeline },
+    select: { id: true },
+  });
+  if (!known) {
+    throw new BadRequestException(`Pipeline "${pipeline}" does not exist.`);
+  }
+  if (status === null) {
+    throw new BadRequestException(
+      `The "${pipeline}" pipeline has no stages yet. Add its stages in Settings first.`,
+    );
+  }
+  const stage = await prisma.stage.findUnique({
+    where: { pipeline_name: { pipeline, name: status } },
+    select: { id: true },
+  });
+  if (!stage) {
+    throw new BadRequestException(
+      `"${status}" is not a stage of the "${pipeline}" pipeline.`,
+    );
+  }
+  return status;
 }
 
 /**

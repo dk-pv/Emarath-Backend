@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { LeadCustomFieldsModule } from '../lead-custom-fields/lead-custom-fields.module';
 import { AssignmentRulesModule } from '../assignment-rules/assignment-rules.module';
 import { SettingsModule } from '../settings/settings.module';
+import { TagAccessModule } from '../tag-access/tag-access.module';
 import { LeadsController } from './leads.controller';
 import { LeadsService } from './leads.service';
 import { LeadsRepository } from './leads.repository';
@@ -13,7 +14,14 @@ import { LeadsRepository } from './leads.repository';
   // duplicates an existing lead (Settings → Sales & CRM → Duplicate Settings).
   // AssignmentRulesModule exports the engine that picks an assignee for a new lead
   // when the form named none (Settings → Assignment → General Settings/Rules).
-  imports: [LeadCustomFieldsModule, SettingsModule, AssignmentRulesModule],
+  // TagAccessModule exports the service that decides which tags a caller may put on a lead
+  // (Tag Permissions, ADR-0091).
+  imports: [
+    LeadCustomFieldsModule,
+    SettingsModule,
+    AssignmentRulesModule,
+    TagAccessModule,
+  ],
   controllers: [LeadsController],
   providers: [LeadsService, LeadsRepository],
 })
