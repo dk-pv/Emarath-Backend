@@ -8,15 +8,17 @@ import {
  * The Logistics order a lead converted into (ADR-0085), as a lead response carries it. Once it
  * exists the lead's status and pipeline belong to the Logistics workflow and the lead can't be
  * deleted (`guardConvertedLeads`, `retainedLeads`), so the lead screens read this to stop
- * offering those actions. `orderNumber` is the order's own sequence value, unformatted.
+ * offering those actions. `orderNumber` is the order's own sequence value, unformatted; `id`
+ * lets a lead screen open the order itself, which the order route still scopes.
  */
 export interface LeadLogisticsOrder {
+  id: string;
   orderNumber: number;
   status: LogisticsStatus;
 }
 
 const LEAD_LOGISTICS_ORDER_SELECT = {
-  select: { orderNumber: true, status: true },
+  select: { id: true, orderNumber: true, status: true },
 } satisfies Prisma.Lead$logisticsOrderArgs;
 
 /**

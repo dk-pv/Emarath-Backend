@@ -789,12 +789,12 @@ describe('LeadsService.findById', () => {
     expect((await service.findById('lead-1')).logisticsOrder).toBeNull();
   });
 
-  it('reads only the order’s number and status into the lead', () => {
+  it('reads only the order’s id, number and status into the lead', () => {
     expect(LEAD_LIST_SELECT.logisticsOrder).toEqual({
-      select: { orderNumber: true, status: true },
+      select: { id: true, orderNumber: true, status: true },
     });
     expect(LEAD_EDIT_SELECT.logisticsOrder).toEqual({
-      select: { orderNumber: true, status: true },
+      select: { id: true, orderNumber: true, status: true },
     });
   });
 
