@@ -15,8 +15,12 @@ import {
   CorrectAwbDto,
   DispatchOrderDto,
   ListLogisticsOrdersDto,
+  LogisticsDeliveryScheduleResponse,
+  LogisticsOrderFilterOptions,
+  LogisticsOrderFiltersDto,
   LogisticsOrderListResponse,
   LogisticsOrderResponse,
+  LogisticsOrderSummaryResponse,
   OrderReasonDto,
   QcDecisionDto,
   QcRejectDto,
@@ -47,6 +51,37 @@ export class LogisticsOrdersController {
     @Query() query: ListLogisticsOrdersDto,
   ): Promise<LogisticsOrderListResponse> {
     return this.orders.list(query);
+  }
+
+  /**
+   * The queue's counts per status, country and city. Declared before `:id`, which would
+   * otherwise take it.
+   */
+  @Get('summary')
+  @Roles(...LOGISTICS_READ_ROLES)
+  summary(
+    @Query() query: LogisticsOrderFiltersDto,
+  ): Promise<LogisticsOrderSummaryResponse> {
+    return this.orders.summary(query);
+  }
+
+  /**
+   * The delivery schedule: counts per delivery bucket and per day for the coming two weeks, under
+   * every filter but the delivery date's own. Before `:id`.
+   */
+  @Get('delivery-schedule')
+  @Roles(...LOGISTICS_READ_ROLES)
+  deliverySchedule(
+    @Query() query: LogisticsOrderFiltersDto,
+  ): Promise<LogisticsDeliveryScheduleResponse> {
+    return this.orders.deliverySchedule(query);
+  }
+
+  /** The country and city values the filter offers — the caller's scope only. Before `:id`. */
+  @Get('filter-options')
+  @Roles(...LOGISTICS_READ_ROLES)
+  filterOptions(): Promise<LogisticsOrderFilterOptions> {
+    return this.orders.filterOptions();
   }
 
   @Get(':id')

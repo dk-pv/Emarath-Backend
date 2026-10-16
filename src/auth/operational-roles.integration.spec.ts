@@ -152,6 +152,9 @@ const MANAGER_AND_ADMIN_ROUTES = new Set([
 */
 const LOGISTICS_READ_LABELS = new Set([
   'GET /api/logistics/orders',
+  'GET /api/logistics/orders/summary',
+  'GET /api/logistics/orders/delivery-schedule',
+  'GET /api/logistics/orders/filter-options',
   'GET /api/logistics/orders/:id',
 ]);
 const LOGISTICS_QC_LABELS = new Set([

@@ -171,12 +171,129 @@ describe('Logistics write routes (e2e)', () => {
     expect(response.status).toBe(400);
   });
 
-  it('refuses an edit that blanks the customer name, sends a field the order does not have, or a value its column cannot hold', async () => {
+  const read = async (role: UserRole, path: string) =>
+    request(app.getHttpServer())
+      .get(`/api/logistics/orders${path}`)
+      .set('Cookie', await cookieFor(role));
+
+  /*
+    The counts route sits beside `:id`. A search one character over the limit tells them apart
+    without a query: only the counts route's DTO answers with the search rule, where `:id`
+    would refuse "summary" as an id. Every reader is admitted; Accounts is not.
+  */
+  it.each(Object.values(UserRole))(
+    'GET /summary as %s reaches the counts route, not :id',
+    async (role) => {
+      const response = await read(role, `/summary?search=${'a'.repeat(201)}`);
+      if (role === UserRole.ACCOUNTS_EXECUTIVE) {
+        expect(response.status).toBe(403);
+        return;
+      }
+      expect(response.status).toBe(400);
+      expect(JSON.stringify(response.body)).toContain(
+        'search must be at most 200 characters',
+      );
+    },
+  );
+
+  /*
+    The delivery schedule sits beside `:id` too, and is told apart the same way. Every reader is
+    admitted; Accounts is not.
+  */
+  it.each(Object.values(UserRole))(
+    'GET /delivery-schedule as %s reaches the schedule route, not :id',
+    async (role) => {
+      const response = await read(
+        role,
+        `/delivery-schedule?search=${'a'.repeat(201)}`,
+      );
+      if (role === UserRole.ACCOUNTS_EXECUTIVE) {
+        expect(response.status).toBe(403);
+        return;
+      }
+      expect(response.status).toBe(400);
+      expect(JSON.stringify(response.body)).toContain(
+        'search must be at most 200 characters',
+      );
+    },
+  );
+
+  /*
+    The list, its counts and the delivery schedule read the same filters through the same rules,
+    so a value one of them refuses, the others refuse too — before any query runs.
+  */
+  it.each([
+    [
+      'a status outside the lifecycle',
+      '?status=DISPATCHED&status=SHIPPED',
+      'each status must be one of',
+    ],
+    [
+      'a country longer than its column',
+      `?country=${'a'.repeat(65)}`,
+      'each country must be at most 64 characters',
+    ],
+    [
+      'a city longer than its column',
+      `?city=${'a'.repeat(121)}`,
+      'each city must be at most 120 characters',
+    ],
+    [
+      'a delivery bucket that does not exist',
+      '?delivery=today&delivery=someday',
+      'each delivery must be one of',
+    ],
+    [
+      'more than 100 cities',
+      `?${Array.from({ length: 101 }, (_, i) => `city=c${i}`).join('&')}`,
+      'city accepts at most 100 values',
+    ],
+    [
+      'a delivery day that is not a calendar day',
+      '?deliveryOn=2026-02-30',
+      'deliveryOn must be a real date written YYYY-MM-DD',
+    ],
+    [
+      'two delivery days',
+      '?deliveryOn=2026-10-15&deliveryOn=2026-10-16',
+      'deliveryOn must be a real date written YYYY-MM-DD',
+    ],
+  ])(
+    'refuses %s on the list, the counts and the schedule → 400',
+    async (_label, query, rule) => {
+      for (const path of [
+        query,
+        `/summary${query}`,
+        `/delivery-schedule${query}`,
+      ]) {
+        const response = await read(UserRole.LOGISTICS_EXECUTIVE, path);
+        expect(response.status).toBe(400);
+        expect(JSON.stringify(response.body)).toContain(rule);
+      }
+    },
+  );
+
+  it.each(['awbNumber', 'id;DROP', 'convertedAt desc'])(
+    'refuses sorting the list by %j → 400',
+    async (sort) => {
+      const response = await read(
+        UserRole.LOGISTICS_MANAGER,
+        `?sort=${encodeURIComponent(sort)}`,
+      );
+      expect(response.status).toBe(400);
+      expect(JSON.stringify(response.body)).toContain('sort must be one of');
+    },
+  );
+
+  it('refuses an edit that blanks the customer name, sends a field the order does not have, a value its column cannot hold, or a delivery date that is not a calendar day', async () => {
     for (const body of [
       { customerName: ' ' },
       { status: 'DELIVERED' },
       { awbNumber: 'AWB-9' },
       { orderValue: '250.555' },
+      { deliveryDate: '2026-02-30' },
+      { deliveryDate: '15-10-2026' },
+      { deliveryDate: '2026-10-15T00:00:00.000Z' },
     ]) {
       const response = await send(
         UserRole.LOGISTICS_MANAGER,

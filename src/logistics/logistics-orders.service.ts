@@ -3,14 +3,28 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { LogisticsStatus, Prisma, UserRole } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { AppConfig } from '../config/configuration';
 import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { recordAuditEvents, userActor } from '../audit/audit-events';
 import { applyLeadChanges } from '../leads/lead-audit';
 import { escapeLike } from '../leads/lead-search';
 import { CONVERTED_STATUS } from '../reports/converted-leads-where';
 import { logisticsOrderScopeWhere } from './logistics-roles';
+import {
+  addDays,
+  BusinessDay,
+  businessDay,
+  DELIVERY_BUCKETS,
+  DELIVERY_SCHEDULE_DAYS,
+  DeliveryBucket,
+  deliveryBucketOf,
+  deliveryBucketWhere,
+  fromDbDate,
+  toDbDate,
+} from './delivery-date';
 import {
   LOGISTICS_TRANSITIONS,
   LogisticsAction,
@@ -24,21 +38,20 @@ import {
   EDITABLE_ORDER_FIELDS,
   ListLogisticsOrdersDto,
   LOGISTICS_ORDER_SELECT,
+  LogisticsDeliveryScheduleResponse,
+  LogisticsOrderFilterOptions,
+  LogisticsOrderFiltersDto,
   LogisticsOrderListResponse,
   LogisticsOrderResponse,
   LogisticsOrderRow,
+  LogisticsOrderSummaryResponse,
   OrderReasonDto,
   QcDecisionDto,
   QcRejectDto,
+  RegionCount,
   toLogisticsOrderResponse,
   UpdateLogisticsOrderDto,
 } from './dto/logistics-order.dto';
-
-/** Newest first; `id` breaks ties so a row never repeats across pages. */
-const ORDER_BY: Prisma.LogisticsOrderOrderByWithRelationInput[] = [
-  { convertedAt: 'desc' },
-  { id: 'asc' },
-];
 
 /** The editable fields stored as decimals, compared by value rather than by spelling. */
 const DECIMAL_FIELDS: ReadonlySet<string> = new Set([
@@ -72,6 +85,89 @@ function orderSearchWhere(
       { awbNumber: contains },
     ],
   };
+}
+
+/**
+ * The orders a query reaches: the caller's scope first, then the narrowing terms, so a filter
+ * can only ever narrow it. The list, the board's columns and the counts all build their `where`
+ * here, which is what keeps the numbers above the queue in step with its rows. Delivery buckets
+ * are measured against `day`, the business day of the request; a chosen delivery day joins them.
+ */
+function orderWhere(
+  user: CurrentUser,
+  filters: LogisticsOrderFiltersDto,
+  day: BusinessDay,
+): Prisma.LogisticsOrderWhereInput {
+  return {
+    AND: [
+      logisticsOrderScopeWhere(user),
+      filters.status ? { status: { in: filters.status } } : {},
+      filters.country ? { country: { in: filters.country } } : {},
+      filters.city ? { city: { in: filters.city } } : {},
+      filters.leadId ? { leadId: filters.leadId } : {},
+      orderSearchWhere(filters.search),
+      deliveryBucketWhere(filters.delivery, day, filters.deliveryOn),
+    ],
+  };
+}
+
+/** A count for every status, each starting at zero. */
+const statusCounts = (): Record<LogisticsStatus, number> =>
+  Object.fromEntries(
+    Object.values(LogisticsStatus).map((status) => [status, 0]),
+  ) as Record<LogisticsStatus, number>;
+
+/** A blank value is no value, so it is counted with the orders that have none. */
+const recorded = (value: string | null): string | null =>
+  value?.trim() ? value : null;
+
+/** Most orders first, then by name; orders with no value recorded last. */
+function regionCounts(totals: Map<string | null, number>): RegionCount[] {
+  return [...totals]
+    .map(([value, count]) => ({ value, count }))
+    .sort(
+      (a, b) =>
+        Number(a.value === null) - Number(b.value === null) ||
+        b.count - a.count ||
+        (a.value ?? '').localeCompare(b.value ?? '', 'en'),
+    );
+}
+
+/** The distinct values a column holds, blanks left out, in name order. */
+const distinctValues = (values: (string | null)[]): string[] =>
+  [
+    ...new Set(
+      values.filter((value): value is string => Boolean(value?.trim())),
+    ),
+  ].sort((a, b) => a.localeCompare(b, 'en'));
+
+/**
+ * The status a write-back gives the lead must be a stage of the lead's own pipeline: a status
+ * no column of that board holds would drop the lead off it while the order moved on. Refusing
+ * throws inside the move's transaction, so the order and the lead change together or not at
+ * all. Neither stage can disappear after this check — both are reserved names, which can't be
+ * renamed or deleted — and the lead's pipeline is locked while it has an order.
+ */
+async function assertLeadStage(
+  tx: Prisma.TransactionClient,
+  leadId: string,
+  status: string,
+): Promise<void> {
+  const lead = await tx.lead.findUnique({
+    where: { id: leadId },
+    select: { pipeline: true },
+  });
+  const stage =
+    lead &&
+    (await tx.stage.findUnique({
+      where: { pipeline_name: { pipeline: lead.pipeline, name: status } },
+      select: { id: true },
+    }));
+  if (!stage) {
+    throw new ConflictException(
+      `The lead’s pipeline “${lead?.pipeline ?? ''}” has no “${status}” stage, so this can’t be recorded and nothing was changed. Contact your administrator.`,
+    );
+  }
 }
 
 /**
@@ -134,30 +230,42 @@ async function withAwbClash<T>(write: () => Promise<T>): Promise<T> {
  */
 @Injectable()
 export class LogisticsOrdersService {
+  /** The business timezone (`BUSINESS_TIME_ZONE`), whose calendar day the buckets use. */
+  private readonly timeZone: string;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
-  ) {}
+    config: ConfigService,
+  ) {
+    this.timeZone = config.getOrThrow<AppConfig>('app').businessTimeZone;
+  }
+
+  /** Today and tomorrow in the business timezone, read once per request. */
+  private businessDay(): BusinessDay {
+    return businessDay(this.timeZone);
+  }
 
   /** A scoped page of orders: Logistics and QC see every one, Sales only their own leads'. */
   async list(
     query: ListLogisticsOrdersDto,
   ): Promise<LogisticsOrderListResponse> {
     const user = await this.currentUser.resolve();
-    const where: Prisma.LogisticsOrderWhereInput = {
-      AND: [
-        logisticsOrderScopeWhere(user),
-        query.status ? { status: query.status } : {},
-        query.leadId ? { leadId: query.leadId } : {},
-        orderSearchWhere(query.search),
-      ],
-    };
+    const day = this.businessDay();
+    const where = orderWhere(user, query, day);
 
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.logisticsOrder.findMany({
         where,
         select: LOGISTICS_ORDER_SELECT,
-        orderBy: ORDER_BY,
+        // `sort` is one of the DTO's whitelisted columns; `id` breaks ties so a row never
+        // repeats across pages. Orders without a delivery date sort last either way.
+        orderBy: [
+          query.sort === 'deliveryDate'
+            ? { deliveryDate: { sort: query.direction, nulls: 'last' } }
+            : { [query.sort]: query.direction },
+          { id: 'asc' },
+        ],
         skip: (query.page - 1) * query.size,
         take: query.size,
       }),
@@ -165,8 +273,110 @@ export class LogisticsOrdersService {
     ]);
 
     return {
-      rows: rows.map((row) => toLogisticsOrderResponse(row, user.role)),
+      rows: rows.map((row) => toLogisticsOrderResponse(row, user.role, day)),
       total,
+    };
+  }
+
+  /**
+   * How many orders the caller can see under the list's own filters and scope, its status filter
+   * included: per status, per country and per city. One grouped query feeds all three, so each
+   * breakdown adds up to the same total as the list. Every status is present, so a zero is a
+   * count rather than a missing key. The business day the delivery buckets used comes back with
+   * the counts, so a screen can say which day "today" is without reading its own clock.
+   */
+  async summary(
+    filters: LogisticsOrderFiltersDto,
+  ): Promise<LogisticsOrderSummaryResponse> {
+    const user = await this.currentUser.resolve();
+    const day = this.businessDay();
+    const groups = await this.prisma.logisticsOrder.groupBy({
+      by: ['status', 'country', 'city'],
+      where: orderWhere(user, filters, day),
+      _count: { _all: true },
+    });
+
+    const counts = statusCounts();
+    const countries = new Map<string | null, number>();
+    const cities = new Map<string | null, number>();
+    for (const group of groups) {
+      const count = group._count._all;
+      counts[group.status] += count;
+      const country = recorded(group.country);
+      const city = recorded(group.city);
+      countries.set(country, (countries.get(country) ?? 0) + count);
+      cities.set(city, (cities.get(city) ?? 0) + count);
+    }
+    return {
+      counts,
+      total: groups.reduce((sum, group) => sum + group._count._all, 0),
+      countries: regionCounts(countries),
+      cities: regionCounts(cities),
+      businessDay: day,
+    };
+  }
+
+  /**
+   * The delivery schedule: the caller's orders under every filter of the screen except the
+   * delivery date's own (its buckets and its day), so choosing one day never hides the others —
+   * counted per bucket, and per day for the `DELIVERY_SCHEDULE_DAYS` days from today, every day
+   * present. One grouped query over the orders some bucket holds (a past delivery with an outcome
+   * is in none), sorted by `deliveryBucketOf`, the filter's own rules, so each count is the list's
+   * total for that bucket or that day.
+   */
+  async deliverySchedule(
+    filters: LogisticsOrderFiltersDto,
+  ): Promise<LogisticsDeliveryScheduleResponse> {
+    const user = await this.currentUser.resolve();
+    const day = this.businessDay();
+    const others = { ...filters, delivery: undefined, deliveryOn: undefined };
+    const groups = await this.prisma.logisticsOrder.groupBy({
+      by: ['deliveryDate', 'status'],
+      where: {
+        AND: [
+          orderWhere(user, others, day),
+          deliveryBucketWhere(DELIVERY_BUCKETS, day),
+        ],
+      },
+      _count: { _all: true },
+    });
+
+    const buckets = Object.fromEntries(
+      DELIVERY_BUCKETS.map((bucket) => [bucket, 0]),
+    ) as Record<DeliveryBucket, number>;
+    const days = Array.from({ length: DELIVERY_SCHEDULE_DAYS }, (_, index) => ({
+      date: addDays(day.today, index),
+      total: 0,
+      counts: statusCounts(),
+    }));
+    for (const group of groups) {
+      const count = group._count._all;
+      const date = group.deliveryDate && fromDbDate(group.deliveryDate);
+      const bucket = deliveryBucketOf(date, group.status, day);
+      if (bucket) buckets[bucket] += count;
+      const slot = days.find((each) => each.date === date);
+      if (slot) {
+        slot.total += count;
+        slot.counts[group.status] += count;
+      }
+    }
+    return { businessDay: day, buckets, days };
+  }
+
+  /**
+   * The country and city values in the caller's scope — every order they may see, whatever the
+   * filters in force, so choosing one value never hides the others. A value only orders outside
+   * the scope hold is never offered.
+   */
+  async filterOptions(): Promise<LogisticsOrderFilterOptions> {
+    const user = await this.currentUser.resolve();
+    const groups = await this.prisma.logisticsOrder.groupBy({
+      by: ['country', 'city'],
+      where: logisticsOrderScopeWhere(user),
+    });
+    return {
+      countries: distinctValues(groups.map((group) => group.country)),
+      cities: distinctValues(groups.map((group) => group.city)),
     };
   }
 
@@ -178,7 +388,7 @@ export class LogisticsOrdersService {
       select: LOGISTICS_ORDER_SELECT,
     });
     if (!order) throw new NotFoundException('Order not found.');
-    return toLogisticsOrderResponse(order, user.role);
+    return toLogisticsOrderResponse(order, user.role, this.businessDay());
   }
 
   /**
@@ -316,7 +526,8 @@ export class LogisticsOrdersService {
    * The Logistics Manager corrects a QC-verified order's own data (Q5). The order stays
    * QC_VERIFIED — it does not go back to QC — and the lead is not touched: this is the order's
    * copy. Only fields whose value actually changes are written, and they are audited before and
-   * after; an edit that changes nothing writes nothing.
+   * after; an edit that changes nothing writes nothing. The delivery date (ADR-0094) is one of
+   * these fields, compared and audited as its `YYYY-MM-DD` day; setting it never moves the status.
    */
   async edit(
     id: string,
@@ -331,7 +542,10 @@ export class LogisticsOrdersService {
       for (const field of EDITABLE_ORDER_FIELDS) {
         const next = dto[field];
         if (next === undefined) continue;
-        const was = order[field]?.toString() ?? null;
+        const was =
+          field === 'deliveryDate'
+            ? order.deliveryDate && fromDbDate(order.deliveryDate)
+            : (order[field]?.toString() ?? null);
         const now =
           next === null || !DECIMAL_FIELDS.has(field)
             ? next
@@ -343,7 +557,17 @@ export class LogisticsOrdersService {
       }
 
       if (Object.keys(after).length > 0) {
-        await tx.logisticsOrder.update({ where: { id }, data: after });
+        const { deliveryDate, ...fields } = after;
+        await tx.logisticsOrder.update({
+          where: { id },
+          data:
+            deliveryDate === undefined
+              ? fields
+              : {
+                  ...fields,
+                  deliveryDate: deliveryDate && toDbDate(deliveryDate),
+                },
+        });
         await recordAuditEvents(tx, [
           {
             entityType: 'LOGISTICS_ORDER',
@@ -442,6 +666,7 @@ export class LogisticsOrdersService {
         },
         async (inner) => {
           await this.move(inner, order, action, fields, user, details);
+          await assertLeadStage(inner, order.leadId, leadStatus);
           await inner.lead.update({
             where: { id: order.leadId },
             // The capture rule: any status other than LOST clears the lost reason, so a lead
@@ -564,6 +789,6 @@ export class LogisticsOrdersService {
       select: LOGISTICS_ORDER_SELECT,
     });
     if (!order) throw new NotFoundException('Order not found.');
-    return toLogisticsOrderResponse(order, role);
+    return toLogisticsOrderResponse(order, role, this.businessDay());
   }
 }

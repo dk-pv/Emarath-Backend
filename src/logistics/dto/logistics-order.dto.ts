@@ -1,5 +1,7 @@
 import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsEmail,
   IsIn,
   IsInt,
@@ -11,7 +13,10 @@ import {
   Max,
   MaxLength,
   Min,
+  Validate,
   ValidateIf,
+  ValidatorConstraint,
+  type ValidatorConstraintInterface,
 } from 'class-validator';
 import {
   LogisticsStatus,
@@ -19,11 +24,28 @@ import {
   UserRole,
 } from '../../generated/prisma/client';
 import { allowedActions, OrderAction } from '../logistics-roles';
+import {
+  BusinessDay,
+  DELIVERY_BUCKETS,
+  DeliveryBucket,
+  deliveryBucketOf,
+  fromDbDate,
+  isDateOnly,
+} from '../delivery-date';
+import {
+  MAX_FILTER_VALUES,
+  MAX_SEARCH_LENGTH,
+} from '../../leads/dto/list-leads-query.dto';
+import { normalizeFilterValues } from '../../leads/lead-filter';
 
 const MAX_PAGE_SIZE = 200;
 
 const trim = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' ? value.trim() : value;
+
+/** `?city=A&city=B` or a single `?city=A`, blanks dropped — the Leads list's own coercion. */
+const toFilterValues = ({ value }: { value: unknown }): unknown =>
+  normalizeFilterValues(value);
 
 /**
  * What a `Decimal(12, 2)` column can hold exactly: at most ten integer digits and two decimals.
@@ -38,8 +60,116 @@ const blankToNull = ({ value }: { value: unknown }): unknown => {
   return trimmed === '' ? null : trimmed;
 };
 
-/** The Logistics work queue: one page of orders, newest first. */
-export class ListLogisticsOrdersDto {
+/** A delivery date: a real calendar day, `YYYY-MM-DD` (ADR-0094). */
+@ValidatorConstraint({ name: 'deliveryDay', async: false })
+class DeliveryDay implements ValidatorConstraintInterface {
+  validate(value: unknown): boolean {
+    return typeof value === 'string' && isDateOnly(value);
+  }
+
+  defaultMessage(): string {
+    return 'Delivery Date must be a real date written YYYY-MM-DD (years 2000-2099)';
+  }
+}
+
+/**
+ * What narrows the queue — shared by the list and its counts, so the numbers above the list
+ * always describe the rows the same filters return. Each multi-value filter matches any of its
+ * values; different filters must all match.
+ */
+export class LogisticsOrderFiltersDto {
+  /** The lead whose order to read — how a Lead screen asks for its own order. */
+  @IsOptional()
+  @IsUUID()
+  leadId?: string;
+
+  /** Free text over what the queue shows; blank is no filter. The platform's list limit. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(MAX_SEARCH_LENGTH, {
+    message: `search must be at most ${MAX_SEARCH_LENGTH} characters`,
+  })
+  search?: string;
+
+  /** The lifecycle statuses to narrow to. */
+  @Transform(toFilterValues)
+  @IsArray({ message: 'status must be one or more values' })
+  @IsIn(Object.values(LogisticsStatus), {
+    each: true,
+    message: `each status must be one of: ${Object.values(LogisticsStatus).join(', ')}`,
+  })
+  @ArrayMaxSize(MAX_FILTER_VALUES, {
+    message: `status accepts at most ${MAX_FILTER_VALUES} values`,
+  })
+  @IsOptional()
+  status?: LogisticsStatus[];
+
+  /** Countries, matched exactly as the order stores them. The column's length is the cap. */
+  @Transform(toFilterValues)
+  @IsArray({ message: 'country must be one or more values' })
+  @IsString({ each: true, message: 'each country must be a string' })
+  @MaxLength(64, {
+    each: true,
+    message: 'each country must be at most 64 characters',
+  })
+  @ArrayMaxSize(MAX_FILTER_VALUES, {
+    message: `country accepts at most ${MAX_FILTER_VALUES} values`,
+  })
+  @IsOptional()
+  country?: string[];
+
+  /** Cities, matched exactly as stored: free text on the lead form, so spellings are distinct. */
+  @Transform(toFilterValues)
+  @IsArray({ message: 'city must be one or more values' })
+  @IsString({ each: true, message: 'each city must be a string' })
+  @MaxLength(120, {
+    each: true,
+    message: 'each city must be at most 120 characters',
+  })
+  @ArrayMaxSize(MAX_FILTER_VALUES, {
+    message: `city accepts at most ${MAX_FILTER_VALUES} values`,
+  })
+  @IsOptional()
+  city?: string[];
+
+  /** Delivery-date buckets, measured against the business day (ADR-0094). */
+  @Transform(toFilterValues)
+  @IsArray({ message: 'delivery must be one or more values' })
+  @IsIn(DELIVERY_BUCKETS, {
+    each: true,
+    message: `each delivery must be one of: ${DELIVERY_BUCKETS.join(', ')}`,
+  })
+  @ArrayMaxSize(MAX_FILTER_VALUES, {
+    message: `delivery accepts at most ${MAX_FILTER_VALUES} values`,
+  })
+  @IsOptional()
+  delivery?: DeliveryBucket[];
+
+  /**
+   * One delivery day, `YYYY-MM-DD` — an alternative to the buckets, as a filter's values are: an
+   * order matches a chosen bucket or this day (ADR-0094).
+   */
+  @IsOptional()
+  @Validate(DeliveryDay, {
+    message:
+      'deliveryOn must be a real date written YYYY-MM-DD (years 2000-2099)',
+  })
+  deliveryOn?: string;
+}
+
+/** The columns the queue can be ordered by — a whitelist, never a raw column name. */
+export const LOGISTICS_SORT_COLUMNS = [
+  'orderNumber',
+  'customerName',
+  'status',
+  'convertedAt',
+  'statusChangedAt',
+  'deliveryDate',
+] as const;
+export type LogisticsSortColumn = (typeof LOGISTICS_SORT_COLUMNS)[number];
+
+/** The Logistics work queue: one page of orders, newest first unless sorted otherwise. */
+export class ListLogisticsOrdersDto extends LogisticsOrderFiltersDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
@@ -51,21 +181,18 @@ export class ListLogisticsOrdersDto {
   @Max(MAX_PAGE_SIZE, { message: `size must be at most ${MAX_PAGE_SIZE}` })
   size: number = 50;
 
-  /** One lifecycle status to narrow to. */
   @IsOptional()
-  @IsIn(Object.values(LogisticsStatus))
-  status?: LogisticsStatus;
+  @IsIn(LOGISTICS_SORT_COLUMNS, {
+    message: `sort must be one of: ${LOGISTICS_SORT_COLUMNS.join(', ')}`,
+  })
+  sort: LogisticsSortColumn = 'convertedAt';
 
-  /** The lead whose order to read — how a Lead screen asks for its own order. */
+  @Transform(({ value }: { value: unknown }): unknown =>
+    typeof value === 'string' ? value.toLowerCase() : value,
+  )
   @IsOptional()
-  @IsUUID()
-  leadId?: string;
-
-  /** Free text over what the queue shows; blank is no filter. */
-  @IsOptional()
-  @IsString()
-  @MaxLength(100)
-  search?: string;
+  @IsIn(['asc', 'desc'], { message: 'direction must be asc or desc' })
+  direction: 'asc' | 'desc' = 'desc';
 }
 
 /** An optional note: QC's on a verification (Q4), the resubmitter's on a resubmit. */
@@ -232,6 +359,16 @@ export class UpdateLogisticsOrderDto {
   @IsString()
   @MaxLength(64)
   paymentMethod?: string | null;
+
+  /**
+   * The planned delivery day, `YYYY-MM-DD` (ADR-0094); sent blank, it is cleared. Who sets it and
+   * until when is open client question D4 — until answered it follows this edit's rules: the
+   * Logistics Manager, while the order is QC Verified.
+   */
+  @Transform(blankToNull)
+  @IsOptional()
+  @Validate(DeliveryDay)
+  deliveryDate?: string | null;
 }
 
 /**
@@ -255,6 +392,7 @@ export const EDITABLE_ORDER_FIELDS = [
   'product2Qty',
   'orderValue',
   'paymentMethod',
+  'deliveryDate',
 ] as const satisfies readonly (keyof UpdateLogisticsOrderDto)[];
 
 /** One order as the API returns it. Money and quantities are strings — never floats. */
@@ -291,6 +429,13 @@ export interface LogisticsOrderResponse {
   cancelReason: string | null;
   rtoAt: string | null;
   rtoReason: string | null;
+  /** The planned delivery day, `YYYY-MM-DD`, or null when none is set. */
+  deliveryDate: string | null;
+  /**
+   * Where that date stands on today's business day (ADR-0094) — worked out here, so no browser
+   * clock decides it. Null for a past date whose delivery already has an outcome.
+   */
+  deliveryBucket: DeliveryBucket | null;
   /**
    * What this caller may do to the order now (`allowedActions`, logistics-roles.ts). Advisory:
    * the UI renders it instead of working out permissions itself; the routes stay the authority.
@@ -301,6 +446,49 @@ export interface LogisticsOrderResponse {
 export interface LogisticsOrderListResponse {
   rows: LogisticsOrderResponse[];
   total: number;
+}
+
+/** How many orders hold one country or city value; `null` is an order with none recorded. */
+export interface RegionCount {
+  value: string | null;
+  count: number;
+}
+
+/**
+ * How many of the caller's orders the filters select: per status (every status present, zero
+ * included) and per country and city — most orders first, then by name, none recorded last.
+ */
+export interface LogisticsOrderSummaryResponse {
+  counts: Record<LogisticsStatus, number>;
+  total: number;
+  countries: RegionCount[];
+  cities: RegionCount[];
+  /** The business day the delivery buckets were measured against, and its timezone. */
+  businessDay: BusinessDay;
+}
+
+/** One day of the delivery schedule: its orders, and how many hold each status (zero included). */
+export interface DeliveryScheduleDay {
+  date: string;
+  total: number;
+  counts: Record<LogisticsStatus, number>;
+}
+
+/**
+ * How many of the caller's orders every filter but the delivery date's own selects — per delivery
+ * bucket, and per day for the `DELIVERY_SCHEDULE_DAYS` days from the business day's today, every
+ * day present. Each count is the list's total for that bucket or that day under the same filters.
+ */
+export interface LogisticsDeliveryScheduleResponse {
+  businessDay: BusinessDay;
+  buckets: Record<DeliveryBucket, number>;
+  days: DeliveryScheduleDay[];
+}
+
+/** The country and city values the caller's own orders hold — the filter's choices. */
+export interface LogisticsOrderFilterOptions {
+  countries: string[];
+  cities: string[];
 }
 
 /** Everything the response needs, declared once so query and mapper cannot drift. */
@@ -337,19 +525,27 @@ export const LOGISTICS_ORDER_SELECT = {
   cancelReason: true,
   rtoAt: true,
   rtoReason: true,
+  deliveryDate: true,
 } satisfies Prisma.LogisticsOrderSelect;
 
 export type LogisticsOrderRow = Prisma.LogisticsOrderGetPayload<{
   select: typeof LOGISTICS_ORDER_SELECT;
 }>;
 
-/** The order as `role` receives it — its actions depend on who is asking. */
+/**
+ * The order as `role` receives it — its actions depend on who is asking — with its delivery date
+ * placed on `day`, the business day of the request.
+ */
 export function toLogisticsOrderResponse(
   row: LogisticsOrderRow,
   role: UserRole,
+  day: BusinessDay,
 ): LogisticsOrderResponse {
+  const deliveryDate = row.deliveryDate ? fromDbDate(row.deliveryDate) : null;
   return {
     ...row,
+    deliveryDate,
+    deliveryBucket: deliveryBucketOf(deliveryDate, row.status, day),
     allowedActions: allowedActions(row.status, role),
     statusChangedAt: row.statusChangedAt.toISOString(),
     convertedAt: row.convertedAt.toISOString(),

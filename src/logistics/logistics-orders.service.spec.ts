@@ -1,4 +1,5 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { LogisticsStatus, Prisma, UserRole } from '../generated/prisma/client';
@@ -14,6 +15,7 @@ import {
   CorrectAwbDto,
   EDITABLE_ORDER_FIELDS,
   ListLogisticsOrdersDto,
+  LogisticsOrderFiltersDto,
   OrderReasonDto,
   QcDecisionDto,
   QcRejectDto,
@@ -36,6 +38,12 @@ interface Options {
   awbNumber?: string | null;
   /** A concurrent move that commits between the service's read and its write. */
   racedTo?: LogisticsStatus;
+  /** A stage the lead's pipeline lacks, as a pipeline created without it would. */
+  missingStage?: string;
+  /** The order's planned delivery day (its DATE column), when it has one. */
+  deliveryDate?: Date;
+  /** BUSINESS_TIME_ZONE; Asia/Dubai when not given. */
+  timeZone?: string;
 }
 
 /**
@@ -77,6 +85,7 @@ function makeService(options: Options = {}) {
     cancelReason: null as string | null,
     rtoAt: null as Date | null,
     rtoReason: null as string | null,
+    deliveryDate: options.deliveryDate ?? (null as Date | null),
   };
   const lead = { status: options.leadStatus ?? 'WON' };
 
@@ -162,6 +171,17 @@ function makeService(options: Options = {}) {
     lead.status = args.data.status;
     return Promise.resolve({ id: LEAD });
   });
+  const leadFindUnique = jest
+    .fn()
+    .mockResolvedValue({ pipeline: 'Lead Pipeline' });
+  const stageFindUnique = jest.fn(
+    (args: { where: { pipeline_name: { name: string } } }) =>
+      Promise.resolve(
+        args.where.pipeline_name.name === options.missingStage
+          ? null
+          : { id: 'stage-1' },
+      ),
+  );
   const auditCreateMany = jest.fn().mockResolvedValue({ count: 1 });
   // The lead already has this order, so the guard sees it and the conversion keeps it.
   const orderFindMany = jest
@@ -180,12 +200,18 @@ function makeService(options: Options = {}) {
       findMany: orderFindMany,
       createManyAndReturn,
     },
-    lead: { findMany: leadFindMany, update: leadUpdate },
+    lead: {
+      findMany: leadFindMany,
+      findUnique: leadFindUnique,
+      update: leadUpdate,
+    },
+    stage: { findUnique: stageFindUnique },
     auditEvent: { createMany: auditCreateMany },
   };
   const listFindMany = jest.fn().mockResolvedValue([{ ...order }]);
   const listCount = jest.fn().mockResolvedValue(1);
   const findFirst = jest.fn().mockResolvedValue({ ...order });
+  const groupBy = jest.fn().mockResolvedValue([]);
   const prisma = {
     $transaction: jest.fn(
       (arg: ((client: typeof tx) => Promise<unknown>) | Promise<unknown>[]) =>
@@ -195,8 +221,14 @@ function makeService(options: Options = {}) {
       findMany: listFindMany,
       count: listCount,
       findFirst,
+      groupBy,
     },
   } as unknown as PrismaService;
+
+  // The business timezone, as configuration.ts reads it from BUSINESS_TIME_ZONE.
+  const config = {
+    getOrThrow: () => ({ businessTimeZone: options.timeZone ?? 'Asia/Dubai' }),
+  } as unknown as ConfigService;
 
   const currentUser = {
     resolve: jest.fn().mockResolvedValue({
@@ -207,7 +239,7 @@ function makeService(options: Options = {}) {
   } as unknown as CurrentUserService;
 
   return {
-    service: new LogisticsOrdersService(prisma, currentUser),
+    service: new LogisticsOrdersService(prisma, currentUser, config),
     order,
     lead,
     orderUpdateMany,
@@ -218,7 +250,10 @@ function makeService(options: Options = {}) {
     createManyAndReturn,
     queryRaw,
     listFindMany,
+    listCount,
     findFirst,
+    groupBy,
+    stageFindUnique,
   };
 }
 
@@ -231,9 +266,18 @@ function events(auditCreateMany: jest.Mock): Record<string, unknown>[] {
 
 const query = (
   over: Partial<ListLogisticsOrdersDto> = {},
-): ListLogisticsOrdersDto => ({ page: 1, size: 50, ...over });
+): ListLogisticsOrdersDto => ({
+  page: 1,
+  size: 50,
+  sort: 'convertedAt',
+  direction: 'desc',
+  ...over,
+});
 
 const reason = (text: string): OrderReasonDto => ({ reason: text });
+
+/** Where the search sits among `orderWhere`'s AND terms: scope, status, country, city, lead, search. */
+const SEARCH_TERM = 5;
 
 describe('LogisticsOrdersService — QC', () => {
   it('verifies an order waiting for QC, and leaves the lead alone', async () => {
@@ -458,6 +502,102 @@ describe('LogisticsOrdersService — resubmit', () => {
       ConflictException,
     );
   });
+});
+
+/*
+  A write-back sets the lead's status by name. On a pipeline without that stage the lead would
+  sit in no column of its board while the order moved on, so the whole move is refused.
+*/
+describe('LogisticsOrdersService — the write-back’s stage must exist', () => {
+  const CASES: [
+    string,
+    string,
+    Options,
+    (service: LogisticsOrdersService) => Promise<unknown>,
+  ][] = [
+    [
+      'a QC rejection',
+      'QC NOT APPROVED',
+      { role: UserRole.QC },
+      (service) => service.qcReject(ORDER, { remarks: 'Wrong address' }),
+    ],
+    [
+      'a resubmit',
+      'WON',
+      {
+        status: LogisticsStatus.QC_REJECTED,
+        leadStatus: 'QC NOT APPROVED',
+        role: UserRole.SALES_MANAGER,
+        team: 'Dubai',
+      },
+      (service) => service.resubmit(ORDER, {}),
+    ],
+  ];
+
+  it.each(CASES)(
+    'refuses %s when the lead’s pipeline has no %s stage, and leaves the lead alone',
+    async (_label, stage, options, act) => {
+      const { service, leadUpdate, stageFindUnique } = makeService({
+        ...options,
+        missingStage: stage,
+      });
+
+      const attempt = act(service);
+
+      await expect(attempt).rejects.toBeInstanceOf(ConflictException);
+      await expect(attempt).rejects.toThrow(`no “${stage}” stage`);
+      expect(stageFindUnique).toHaveBeenCalledWith({
+        where: { pipeline_name: { pipeline: 'Lead Pipeline', name: stage } },
+        select: { id: true },
+      });
+      // Thrown inside the move's transaction before the lead is written, so the move rolls back.
+      expect(leadUpdate).not.toHaveBeenCalled();
+    },
+  );
+
+  /*
+    Only a write-back needs its stage. Every other move leaves the lead alone, so it works on
+    such a pipeline exactly as before and never reads its stages.
+  */
+  it.each([
+    [
+      'QC verification',
+      LogisticsStatus.INITIAL,
+      UserRole.QC,
+      (service: LogisticsOrdersService) => service.qcVerify(ORDER, {}),
+      LogisticsStatus.QC_VERIFIED,
+    ],
+    [
+      'dispatch',
+      LogisticsStatus.QC_VERIFIED,
+      UserRole.LOGISTICS_EXECUTIVE,
+      (service: LogisticsOrdersService) =>
+        service.dispatch(ORDER, { awbNumber: 'AWB-1' }),
+      LogisticsStatus.DISPATCHED,
+    ],
+    [
+      'delivery',
+      LogisticsStatus.DISPATCHED,
+      UserRole.LOGISTICS_EXECUTIVE,
+      (service: LogisticsOrdersService) => service.deliver(ORDER),
+      LogisticsStatus.DELIVERED,
+    ],
+  ] as const)(
+    'lets %s through on a pipeline without the reserved stages, never reading them',
+    async (_label, status, role, act, reached) => {
+      const { service, order, leadUpdate, stageFindUnique } = makeService({
+        status,
+        role,
+        missingStage: 'QC NOT APPROVED',
+      });
+
+      await act(service);
+
+      expect(order.status).toBe(reached);
+      expect(stageFindUnique).not.toHaveBeenCalled();
+      expect(leadUpdate).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('LogisticsOrdersService — dispatch and the AWB', () => {
@@ -1037,6 +1177,7 @@ describe('LogisticsOrdersService — provisional answers, pinned (Q12, Q13, Q15,
     ]);
   });
 
+  // The delivery date (ADR-0094) joined the same edit, under the same role and status rules.
   it('Q17 — the editable fields are exactly these', () => {
     expect([...EDITABLE_ORDER_FIELDS]).toEqual([
       'customerName',
@@ -1054,6 +1195,7 @@ describe('LogisticsOrdersService — provisional answers, pinned (Q12, Q13, Q15,
       'product2Qty',
       'orderValue',
       'paymentMethod',
+      'deliveryDate',
     ]);
   });
 
@@ -1133,7 +1275,9 @@ describe('LogisticsOrdersService — reading', () => {
       const [args] = listFindMany.mock.calls[0] as [
         { where: { AND: { OR?: unknown[] }[] } },
       ];
-      expect(args.where.AND.at(-1)?.OR?.[0]).toEqual({ orderNumber: 1001 });
+      expect(args.where.AND[SEARCH_TERM]?.OR?.[0]).toEqual({
+        orderNumber: 1001,
+      });
     },
   );
 
@@ -1147,7 +1291,7 @@ describe('LogisticsOrdersService — reading', () => {
 
     const calls = listFindMany.mock.calls as [{ where: { AND: unknown[] } }][];
     expect(JSON.stringify(calls[0][0].where)).toContain('50\\\\%\\\\_');
-    expect(calls[1][0].where.AND.at(-1)).toEqual({});
+    expect(calls[1][0].where.AND[SEARCH_TERM]).toEqual({});
   });
 
   it('reads one order through the same scope', async () => {
@@ -1164,6 +1308,682 @@ describe('LogisticsOrdersService — reading', () => {
     findFirst.mockResolvedValue(null);
 
     await expect(service.get(ORDER)).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('lists newest first by default, with the id breaking ties', async () => {
+    const { service, listFindMany } = makeService();
+
+    await service.list(query());
+
+    const [args] = listFindMany.mock.calls[0] as [{ orderBy: unknown }];
+    expect(args.orderBy).toEqual([{ convertedAt: 'desc' }, { id: 'asc' }]);
+  });
+
+  it.each([
+    ['orderNumber', 'asc'],
+    ['customerName', 'asc'],
+    ['status', 'desc'],
+    ['statusChangedAt', 'asc'],
+  ] as const)(
+    'sorts by %s %s, still tie-broken by id',
+    async (sort, direction) => {
+      const { service, listFindMany } = makeService();
+
+      await service.list(query({ sort, direction }));
+
+      const [args] = listFindMany.mock.calls[0] as [{ orderBy: unknown }];
+      expect(args.orderBy).toEqual([{ [sort]: direction }, { id: 'asc' }]);
+    },
+  );
+
+  it('narrows by any of the chosen statuses, countries and cities — each filter one more AND term', async () => {
+    const { service, listFindMany } = makeService();
+
+    await service.list(
+      query({
+        status: [LogisticsStatus.DISPATCHED, LogisticsStatus.RTO],
+        country: ['United Arab Emirates', 'Oman'],
+        city: ['Dubai'],
+      }),
+    );
+
+    const [args] = listFindMany.mock.calls[0] as [
+      { where: { AND: unknown[] } },
+    ];
+    expect(args.where.AND).toEqual([
+      {},
+      { status: { in: ['DISPATCHED', 'RTO'] } },
+      { country: { in: ['United Arab Emirates', 'Oman'] } },
+      { city: { in: ['Dubai'] } },
+      {},
+      {},
+      {},
+    ]);
+  });
+
+  it('keeps a sales agent’s scope beside the filters, so they can only narrow it', async () => {
+    const { service, listFindMany } = makeService({
+      role: UserRole.SALES_AGENT,
+    });
+
+    await service.list(query({ country: ['Oman'], city: ['Muscat'] }));
+
+    const [args] = listFindMany.mock.calls[0] as [
+      { where: { AND: unknown[] } },
+    ];
+    expect(JSON.stringify(args.where.AND[0])).toContain(`"userId":"${USER}"`);
+    expect(args.where.AND).toContainEqual({ country: { in: ['Oman'] } });
+    expect(args.where.AND).toContainEqual({ city: { in: ['Muscat'] } });
+  });
+
+  it('pages and sorts the filtered rows, and counts the same filtered rows', async () => {
+    const { service, listFindMany, listCount } = makeService();
+
+    await service.list(
+      query({
+        status: [LogisticsStatus.QC_VERIFIED],
+        city: ['Dubai'],
+        sort: 'customerName',
+        direction: 'asc',
+        page: 3,
+        size: 20,
+      }),
+    );
+
+    const [args] = listFindMany.mock.calls[0] as [
+      { where: unknown; orderBy: unknown; skip: number; take: number },
+    ];
+    expect(args).toMatchObject({
+      orderBy: [{ customerName: 'asc' }, { id: 'asc' }],
+      skip: 40,
+      take: 20,
+    });
+    const [countArgs] = listCount.mock.calls[0] as [{ where: unknown }];
+    expect(countArgs.where).toEqual(args.where);
+  });
+});
+
+/*
+  The counts above the queue are the database's, under the same scope and filters as the rows,
+  so the List, the Pipeline board and the numbers can never tell different stories.
+*/
+describe('LogisticsOrdersService — the counts', () => {
+  const group = (
+    status: string,
+    country: string | null,
+    city: string | null,
+    count: number,
+  ) => ({ status, country, city, _count: { _all: count } });
+
+  it('counts every status, country and city from one grouped query, zero included', async () => {
+    const { service, groupBy } = makeService();
+    groupBy.mockResolvedValue([
+      group('INITIAL', 'United Arab Emirates', 'Dubai', 2),
+      group('INITIAL', 'Oman', 'Muscat', 1),
+      group('DISPATCHED', 'United Arab Emirates', 'Abu Dhabi', 2),
+    ]);
+
+    const summary = await service.summary({});
+
+    expect(summary).toEqual({
+      counts: {
+        INITIAL: 3,
+        QC_VERIFIED: 0,
+        QC_REJECTED: 0,
+        DISPATCHED: 2,
+        DELIVERED: 0,
+        CANCELLED: 0,
+        RTO: 0,
+      },
+      total: 5,
+      countries: [
+        { value: 'United Arab Emirates', count: 4 },
+        { value: 'Oman', count: 1 },
+      ],
+      cities: [
+        { value: 'Abu Dhabi', count: 2 },
+        { value: 'Dubai', count: 2 },
+        { value: 'Muscat', count: 1 },
+      ],
+      businessDay: {
+        timeZone: 'Asia/Dubai',
+        today: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) as string,
+        tomorrow: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) as string,
+      },
+    });
+    expect(groupBy).toHaveBeenCalledTimes(1);
+    expect(groupBy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        by: ['status', 'country', 'city'],
+        _count: { _all: true },
+      }),
+    );
+  });
+
+  it('counts orders with no country or city, a blank one included, last — so each breakdown adds up to the total', async () => {
+    const { service, groupBy } = makeService();
+    groupBy.mockResolvedValue([
+      group('INITIAL', null, null, 4),
+      group('INITIAL', '', '  ', 1),
+      group('DELIVERED', 'Oman', null, 2),
+      group('RTO', 'Bahrain', 'Manama', 2),
+    ]);
+
+    const { total, countries, cities } = await service.summary({});
+
+    expect(countries).toEqual([
+      { value: 'Bahrain', count: 2 },
+      { value: 'Oman', count: 2 },
+      { value: null, count: 5 },
+    ]);
+    expect(cities).toEqual([
+      { value: 'Manama', count: 2 },
+      { value: null, count: 7 },
+    ]);
+    const sum = (rows: { count: number }[]) =>
+      rows.reduce((acc, row) => acc + row.count, 0);
+    expect(sum(countries)).toBe(total);
+    expect(sum(cities)).toBe(total);
+  });
+
+  it('counts under exactly the list’s scope and filters, its statuses included', async () => {
+    const { service, groupBy, listFindMany } = makeService({
+      role: UserRole.SALES_AGENT,
+    });
+    const filters = {
+      search: 'Acme',
+      leadId: LEAD,
+      status: [LogisticsStatus.DISPATCHED, LogisticsStatus.DELIVERED],
+      country: ['United Arab Emirates'],
+      city: ['Dubai', 'Sharjah'],
+    };
+
+    await service.list(query(filters));
+    await service.summary(filters);
+
+    const [listArgs] = listFindMany.mock.calls[0] as [{ where: unknown }];
+    const [countArgs] = groupBy.mock.calls[0] as [{ where: unknown }];
+    expect(countArgs.where).toEqual(listArgs.where);
+    // A sales agent's counts cover their own leads' orders only.
+    expect(JSON.stringify(countArgs.where)).toContain(`"userId":"${USER}"`);
+  });
+
+  /*
+    The Pipeline asks for one column at a time — the list route with that column's status and
+    the screen's other filters — so each column holds exactly what its count says.
+  */
+  it('builds a board column’s query from the same filters as the counts', async () => {
+    const { service, groupBy, listFindMany } = makeService();
+    const others = { country: ['Oman'], city: ['Muscat'], search: 'Acme' };
+
+    await service.summary({ ...others, status: [LogisticsStatus.RTO] });
+    await service.list(
+      query({ ...others, status: [LogisticsStatus.RTO], size: 20 }),
+    );
+
+    const [countArgs] = groupBy.mock.calls[0] as [{ where: unknown }];
+    const [columnArgs] = listFindMany.mock.calls[0] as [{ where: unknown }];
+    expect(columnArgs.where).toEqual(countArgs.where);
+  });
+
+  it('counts nothing for a role with no Logistics business', async () => {
+    const { service, groupBy } = makeService({
+      role: UserRole.ACCOUNTS_EXECUTIVE,
+    });
+
+    await service.summary({});
+
+    const [countArgs] = groupBy.mock.calls[0] as [
+      { where: { AND: unknown[] } },
+    ];
+    expect(countArgs.where.AND[0]).toEqual({ id: { in: [] } });
+  });
+});
+
+/*
+  The filter offers the values the caller's own orders hold — never a country or city that only
+  orders outside their scope carry — and the whole scope, so choosing one value hides no other.
+*/
+describe('LogisticsOrdersService — the filter’s choices', () => {
+  it('offers each country and city once, in name order, blanks left out', async () => {
+    const { service, groupBy } = makeService();
+    groupBy.mockResolvedValue([
+      { country: 'United Arab Emirates', city: 'Dubai' },
+      { country: 'United Arab Emirates', city: 'Abu Dhabi' },
+      { country: 'Oman', city: null },
+      { country: null, city: 'Dubai' },
+      { country: ' ', city: '' },
+    ]);
+
+    expect(await service.filterOptions()).toEqual({
+      countries: ['Oman', 'United Arab Emirates'],
+      cities: ['Abu Dhabi', 'Dubai'],
+    });
+    expect(groupBy).toHaveBeenCalledWith({
+      by: ['country', 'city'],
+      where: {},
+    });
+  });
+
+  it('reads a sales agent’s choices from their own leads’ orders only', async () => {
+    const { service, groupBy } = makeService({ role: UserRole.SALES_AGENT });
+
+    await service.filterOptions();
+
+    const [args] = groupBy.mock.calls[0] as [{ where: unknown }];
+    expect(JSON.stringify(args.where)).toContain(`"userId":"${USER}"`);
+    expect(JSON.stringify(args.where)).toContain('"deletedAt":null');
+  });
+
+  it('offers a role with no Logistics business nothing', async () => {
+    const { service, groupBy } = makeService({
+      role: UserRole.ACCOUNTS_EXECUTIVE,
+    });
+
+    await service.filterOptions();
+
+    const [args] = groupBy.mock.calls[0] as [{ where: unknown }];
+    expect(args.where).toEqual({ id: { in: [] } });
+  });
+});
+
+/*
+  Delivery dates (ADR-0094): the buckets are measured against the business day in the configured
+  timezone — never the server's own zone or a browser's — and the date is set through the
+  Logistics Manager's existing edit of a QC-verified order.
+*/
+describe('LogisticsOrdersService — delivery dates', () => {
+  // 20:30 UTC on 14 Oct: already the 15th in Dubai and Muscat (UTC+4), still the 14th in Riyadh.
+  beforeEach(() => {
+    jest.useFakeTimers({
+      doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'],
+    });
+    jest.setSystemTime(new Date('2026-10-14T20:30:00.000Z'));
+  });
+  afterEach(() => jest.useRealTimers());
+
+  const day = (ymd: string) => new Date(`${ymd}T00:00:00.000Z`);
+  /** The delivery date's term — its buckets and its day — the last of `orderWhere`'s AND terms. */
+  const DELIVERY_TERM = 6;
+
+  it.each([
+    ['Asia/Dubai', '2026-10-15', '2026-10-16'],
+    ['Asia/Muscat', '2026-10-15', '2026-10-16'],
+    ['Asia/Riyadh', '2026-10-14', '2026-10-15'],
+  ])(
+    'measures Today and Tomorrow in %s, for the list and its counts alike',
+    async (timeZone, today, tomorrow) => {
+      const { service, listFindMany, groupBy } = makeService({ timeZone });
+
+      await service.list(query({ delivery: ['today', 'tomorrow'] }));
+      const summary = await service.summary({
+        delivery: ['today', 'tomorrow'],
+      });
+
+      const [args] = listFindMany.mock.calls[0] as [
+        { where: { AND: unknown[] } },
+      ];
+      expect(args.where.AND[DELIVERY_TERM]).toEqual({
+        OR: [{ deliveryDate: day(today) }, { deliveryDate: day(tomorrow) }],
+      });
+      const [countArgs] = groupBy.mock.calls[0] as [{ where: unknown }];
+      expect(countArgs.where).toEqual(args.where);
+      expect(summary.businessDay).toEqual({ timeZone, today, tomorrow });
+    },
+  );
+
+  it('keeps Overdue to deliveries without an outcome, Future after tomorrow and None to undated orders', async () => {
+    const { service, listFindMany } = makeService();
+
+    await service.list(query({ delivery: ['overdue', 'future', 'none'] }));
+
+    const [args] = listFindMany.mock.calls[0] as [
+      { where: { AND: unknown[] } },
+    ];
+    expect(args.where.AND[DELIVERY_TERM]).toEqual({
+      OR: [
+        {
+          deliveryDate: { lt: day('2026-10-15') },
+          status: { notIn: ['DELIVERED', 'CANCELLED', 'RTO'] },
+        },
+        { deliveryDate: { gt: day('2026-10-16') } },
+        { deliveryDate: null },
+      ],
+    });
+  });
+
+  it('adds the buckets to the status, country and city filters inside the caller’s scope', async () => {
+    const { service, listFindMany } = makeService({
+      role: UserRole.SALES_AGENT,
+    });
+
+    await service.list(
+      query({
+        status: [LogisticsStatus.DISPATCHED],
+        country: ['Oman'],
+        city: ['Muscat'],
+        delivery: ['tomorrow'],
+      }),
+    );
+
+    const [args] = listFindMany.mock.calls[0] as [
+      { where: { AND: unknown[] } },
+    ];
+    expect(JSON.stringify(args.where.AND[0])).toContain(`"userId":"${USER}"`);
+    expect(args.where.AND.slice(1)).toEqual([
+      { status: { in: ['DISPATCHED'] } },
+      { country: { in: ['Oman'] } },
+      { city: { in: ['Muscat'] } },
+      {},
+      {},
+      { OR: [{ deliveryDate: day('2026-10-16') }] },
+    ]);
+  });
+
+  it.each([
+    [LogisticsStatus.QC_VERIFIED, '2026-10-16', 'tomorrow'],
+    [LogisticsStatus.DISPATCHED, '2026-10-15', 'today'],
+    [LogisticsStatus.DISPATCHED, '2026-10-30', 'future'],
+    [LogisticsStatus.DISPATCHED, '2026-10-10', 'overdue'],
+    [LogisticsStatus.QC_REJECTED, '2026-10-10', 'overdue'],
+    [LogisticsStatus.DELIVERED, '2026-10-10', null],
+    [LogisticsStatus.CANCELLED, '2026-10-10', null],
+    [LogisticsStatus.RTO, '2026-10-10', null],
+    [LogisticsStatus.DELIVERED, '2026-10-15', 'today'],
+  ] as const)(
+    'returns a %s order dated %s as that day, in bucket %s',
+    async (status, date, bucket) => {
+      const { service } = makeService({ status, deliveryDate: day(date) });
+
+      expect(await service.get(ORDER)).toMatchObject({
+        status,
+        deliveryDate: date,
+        deliveryBucket: bucket,
+      });
+    },
+  );
+
+  it('returns an undated order with no date, in No Delivery Date', async () => {
+    const { service } = makeService();
+    expect(await service.get(ORDER)).toMatchObject({
+      deliveryDate: null,
+      deliveryBucket: 'none',
+    });
+  });
+
+  it('adds a chosen delivery day to the buckets as one more alternative, for the list and its counts alike', async () => {
+    const { service, listFindMany, groupBy } = makeService();
+
+    await service.list(
+      query({ delivery: ['overdue'], deliveryOn: '2026-10-20' }),
+    );
+    await service.summary({ delivery: ['overdue'], deliveryOn: '2026-10-20' });
+
+    const [args] = listFindMany.mock.calls[0] as [
+      { where: { AND: unknown[] } },
+    ];
+    expect(args.where.AND[DELIVERY_TERM]).toEqual({
+      OR: [
+        {
+          deliveryDate: { lt: day('2026-10-15') },
+          status: { notIn: ['DELIVERED', 'CANCELLED', 'RTO'] },
+        },
+        { deliveryDate: day('2026-10-20') },
+      ],
+    });
+    const [countArgs] = groupBy.mock.calls[0] as [{ where: unknown }];
+    expect(countArgs.where).toEqual(args.where);
+  });
+
+  it('narrows to the chosen day alone when no bucket is chosen', async () => {
+    const { service, listFindMany } = makeService();
+
+    await service.list(query({ deliveryOn: '2026-10-20' }));
+
+    const [args] = listFindMany.mock.calls[0] as [
+      { where: { AND: unknown[] } },
+    ];
+    expect(args.where.AND[DELIVERY_TERM]).toEqual({
+      OR: [{ deliveryDate: day('2026-10-20') }],
+    });
+  });
+
+  it('sorts by delivery date with undated orders last, in either direction', async () => {
+    const { service, listFindMany } = makeService();
+
+    await service.list(query({ sort: 'deliveryDate', direction: 'desc' }));
+
+    const [args] = listFindMany.mock.calls[0] as [{ orderBy: unknown }];
+    expect(args.orderBy).toEqual([
+      { deliveryDate: { sort: 'desc', nulls: 'last' } },
+      { id: 'asc' },
+    ]);
+  });
+
+  it('lets the Manager set a QC-verified order’s date: written as that day, audited, the status unmoved', async () => {
+    const { service, orderUpdate, orderUpdateMany, auditCreateMany } =
+      makeService({ status: LogisticsStatus.QC_VERIFIED });
+
+    const result = await service.edit(ORDER, { deliveryDate: '2026-10-20' });
+
+    expect(orderUpdate).toHaveBeenCalledWith({
+      where: { id: ORDER },
+      data: { deliveryDate: day('2026-10-20') },
+    });
+    expect(orderUpdateMany).not.toHaveBeenCalled();
+    expect(events(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        action: 'UPDATED',
+        before: { deliveryDate: null },
+        after: { deliveryDate: '2026-10-20' },
+      }),
+    ]);
+    expect(result).toMatchObject({
+      status: LogisticsStatus.QC_VERIFIED,
+      deliveryDate: '2026-10-20',
+      deliveryBucket: 'future',
+    });
+  });
+
+  it('clears the date with null, and writes nothing when it is unchanged', async () => {
+    const set = makeService({
+      status: LogisticsStatus.QC_VERIFIED,
+      deliveryDate: day('2026-10-20'),
+    });
+    await set.service.edit(ORDER, { deliveryDate: null });
+    expect(set.orderUpdate).toHaveBeenCalledWith({
+      where: { id: ORDER },
+      data: { deliveryDate: null },
+    });
+    expect(events(set.auditCreateMany)).toEqual([
+      expect.objectContaining({
+        before: { deliveryDate: '2026-10-20' },
+        after: { deliveryDate: null },
+      }),
+    ]);
+
+    const same = makeService({
+      status: LogisticsStatus.QC_VERIFIED,
+      deliveryDate: day('2026-10-20'),
+    });
+    await same.service.edit(ORDER, { deliveryDate: '2026-10-20' });
+    expect(same.orderUpdate).not.toHaveBeenCalled();
+    expect(same.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    LogisticsStatus.INITIAL,
+    LogisticsStatus.DISPATCHED,
+    LogisticsStatus.DELIVERED,
+    LogisticsStatus.CANCELLED,
+    LogisticsStatus.RTO,
+  ])(
+    'refuses a date on a %s order — the edit’s own status rule — and writes nothing',
+    async (status) => {
+      const { service, orderUpdate, auditCreateMany } = makeService({
+        status,
+      });
+
+      await expect(
+        service.edit(ORDER, { deliveryDate: '2026-10-20' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(orderUpdate).not.toHaveBeenCalled();
+      expect(auditCreateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  describe('the delivery schedule', () => {
+    const group = (
+      date: string | null,
+      status: LogisticsStatus,
+      count: number,
+    ) => ({
+      deliveryDate: date === null ? null : day(date),
+      status,
+      _count: { _all: count },
+    });
+    const NO_STATUS = {
+      INITIAL: 0,
+      QC_VERIFIED: 0,
+      QC_REJECTED: 0,
+      DISPATCHED: 0,
+      DELIVERED: 0,
+      CANCELLED: 0,
+      RTO: 0,
+    };
+
+    it('counts each bucket and each of the next 14 days from one grouped query, by the filter’s own rules', async () => {
+      const { service, groupBy } = makeService();
+      groupBy.mockResolvedValue([
+        group('2026-10-15', LogisticsStatus.QC_VERIFIED, 2),
+        group('2026-10-16', LogisticsStatus.DISPATCHED, 3),
+        group('2026-10-16', LogisticsStatus.DELIVERED, 1),
+        group('2026-10-20', LogisticsStatus.QC_VERIFIED, 4),
+        group('2026-11-30', LogisticsStatus.QC_VERIFIED, 5),
+        group('2026-10-01', LogisticsStatus.DISPATCHED, 6),
+        group(null, LogisticsStatus.INITIAL, 7),
+        // A past delivery with an outcome is in no bucket, so it is counted nowhere.
+        group('2026-10-01', LogisticsStatus.DELIVERED, 8),
+      ]);
+
+      const schedule = await service.deliverySchedule({});
+
+      expect(schedule.businessDay).toEqual({
+        timeZone: 'Asia/Dubai',
+        today: '2026-10-15',
+        tomorrow: '2026-10-16',
+      });
+      expect(schedule.buckets).toEqual({
+        today: 2,
+        tomorrow: 4,
+        future: 9,
+        overdue: 6,
+        none: 7,
+      });
+      expect(schedule.days.map((each) => each.date)).toEqual(
+        Array.from({ length: 14 }, (_, index) => `2026-10-${15 + index}`),
+      );
+      expect(schedule.days.map((each) => each.total)).toEqual([
+        2, 4, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0,
+      ]);
+      expect(schedule.days[1]).toEqual({
+        date: '2026-10-16',
+        total: 4,
+        counts: { ...NO_STATUS, DISPATCHED: 3, DELIVERED: 1 },
+      });
+
+      const [args] = groupBy.mock.calls[0] as [
+        { by: unknown; where: { AND: unknown[] } },
+      ];
+      expect(args.by).toEqual(['deliveryDate', 'status']);
+      expect(args.where.AND[1]).toEqual({
+        OR: [
+          { deliveryDate: day('2026-10-15') },
+          { deliveryDate: day('2026-10-16') },
+          { deliveryDate: { gt: day('2026-10-16') } },
+          {
+            deliveryDate: { lt: day('2026-10-15') },
+            status: { notIn: ['DELIVERED', 'CANCELLED', 'RTO'] },
+          },
+          { deliveryDate: null },
+        ],
+      });
+    });
+
+    it('ignores the delivery bucket and day chosen, and keeps every other filter inside the caller’s scope', async () => {
+      const { service, groupBy } = makeService({ role: UserRole.SALES_AGENT });
+
+      await service.deliverySchedule({
+        status: [LogisticsStatus.DISPATCHED],
+        country: ['Oman'],
+        city: ['Muscat'],
+        search: 'Noor',
+        delivery: ['today'],
+        deliveryOn: '2026-10-20',
+      });
+
+      const [args] = groupBy.mock.calls[0] as [
+        { where: { AND: [{ AND: unknown[] }, unknown] } },
+      ];
+      const terms = args.where.AND[0].AND;
+      expect(JSON.stringify(terms[0])).toContain(`"userId":"${USER}"`);
+      expect(terms.slice(1, 4)).toEqual([
+        { status: { in: ['DISPATCHED'] } },
+        { country: { in: ['Oman'] } },
+        { city: { in: ['Muscat'] } },
+      ]);
+      expect(terms[SEARCH_TERM]).not.toEqual({});
+      expect(terms[DELIVERY_TERM]).toEqual({});
+    });
+
+    it.each([
+      ['Asia/Dubai', '2026-10-15', '2026-10-28'],
+      ['Asia/Muscat', '2026-10-15', '2026-10-28'],
+      ['Asia/Riyadh', '2026-10-14', '2026-10-27'],
+    ])(
+      'starts the days at the business day’s today in %s',
+      async (timeZone, first, last) => {
+        const { service } = makeService({ timeZone });
+
+        const schedule = await service.deliverySchedule({});
+
+        expect(schedule.businessDay.today).toBe(first);
+        expect(schedule.days[0].date).toBe(first);
+        expect(schedule.days.at(-1)?.date).toBe(last);
+      },
+    );
+
+    it('runs the days across a month end on the calendar', async () => {
+      jest.setSystemTime(new Date('2026-10-25T08:00:00.000Z'));
+      const { service } = makeService();
+
+      const schedule = await service.deliverySchedule({});
+
+      expect(schedule.days.slice(5, 9).map((each) => each.date)).toEqual([
+        '2026-10-30',
+        '2026-10-31',
+        '2026-11-01',
+        '2026-11-02',
+      ]);
+    });
+
+    it('returns every bucket and every day, each status at zero, when nothing matches', async () => {
+      const { service } = makeService();
+
+      const schedule = await service.deliverySchedule({});
+
+      expect(schedule.buckets).toEqual({
+        today: 0,
+        tomorrow: 0,
+        future: 0,
+        overdue: 0,
+        none: 0,
+      });
+      expect(schedule.days).toHaveLength(14);
+      for (const each of schedule.days) {
+        expect(each).toEqual({ date: each.date, total: 0, counts: NO_STATUS });
+      }
+    });
   });
 });
 
@@ -1297,5 +2117,154 @@ describe('Logistics DTOs — what the routes refuse before the service runs', ()
     });
     expect(await validate(dto)).toEqual([]);
     expect(dto).toMatchObject({ street: null, email: null });
+  });
+
+  it.each(['awbNumber', 'id', 'convertedAt; DROP TABLE logistics_orders', ''])(
+    'refuses sorting by %j — only the whitelisted columns',
+    async (sort) => {
+      expect(await invalid(ListLogisticsOrdersDto, { sort })).toEqual(['sort']);
+    },
+  );
+
+  it('sorts newest first unless told otherwise, and reads the direction in any case', async () => {
+    expect(plainToInstance(ListLogisticsOrdersDto, {})).toMatchObject({
+      sort: 'convertedAt',
+      direction: 'desc',
+    });
+    const dto = plainToInstance(ListLogisticsOrdersDto, {
+      sort: 'orderNumber',
+      direction: 'ASC',
+    });
+    expect(await validate(dto)).toEqual([]);
+    expect(dto).toMatchObject({ sort: 'orderNumber', direction: 'asc' });
+    expect(
+      await invalid(ListLogisticsOrdersDto, { direction: 'sideways' }),
+    ).toEqual(['direction']);
+  });
+
+  /*
+    The platform's list search limit, which the frontend's search box also stops at — a term the
+    box allows can never come back as a 400.
+  */
+  it.each([
+    ['the list', ListLogisticsOrdersDto],
+    ['the counts', LogisticsOrderFiltersDto],
+  ] as const)(
+    'takes a search of up to 200 characters for %s',
+    async (_label, dto) => {
+      expect(await invalid(dto, { search: 'a'.repeat(200) })).toEqual([]);
+      expect(await invalid(dto, { search: 'a'.repeat(201) })).toEqual([
+        'search',
+      ]);
+    },
+  );
+
+  /*
+    The list and its counts take the same filters, read the way the Leads list reads its own:
+    `?status=A&status=B`, a single value, or a blank one, which is no filter at all.
+  */
+  describe.each([
+    ['the list', ListLogisticsOrdersDto],
+    ['the counts', LogisticsOrderFiltersDto],
+  ] as const)('the filters of %s', (_label, dto) => {
+    it('reads one value or several, trimmed, and a blank one as no filter', async () => {
+      const parsed = plainToInstance(dto, {
+        status: 'DISPATCHED',
+        country: [' Oman ', 'United Arab Emirates'],
+        city: ['', '  '],
+      });
+      expect(await validate(parsed)).toEqual([]);
+      expect(parsed).toMatchObject({
+        status: ['DISPATCHED'],
+        country: ['Oman', 'United Arab Emirates'],
+      });
+      expect(parsed.city).toBeUndefined();
+    });
+
+    it.each([
+      { status: 'SHIPPED' },
+      { status: ['DISPATCHED', 'dispatched'] },
+      { country: 'a'.repeat(65) },
+      { city: 'a'.repeat(121) },
+      { city: Array.from({ length: 101 }, (_, i) => `City ${i}`) },
+      { delivery: 'someday' },
+      { delivery: ['today', 'Today'] },
+      { deliveryOn: '2026-02-30' },
+      { deliveryOn: '15-10-2026' },
+      { deliveryOn: '2026-10-15T00:00:00.000Z' },
+      { deliveryOn: ['2026-10-15', '2026-10-16'] },
+      { deliveryOn: '' },
+    ])('refuses %j', async (body) => {
+      expect(await invalid(dto, body)).toEqual(Object.keys(body));
+    });
+
+    it('reads one delivery day, written YYYY-MM-DD', async () => {
+      const parsed = plainToInstance(dto, { deliveryOn: '2026-10-20' });
+      expect(await validate(parsed)).toEqual([]);
+      expect(parsed.deliveryOn).toBe('2026-10-20');
+    });
+
+    it('takes a country and a city as long as their columns', async () => {
+      expect(
+        await invalid(dto, {
+          country: 'a'.repeat(64),
+          city: 'a'.repeat(120),
+          status: Object.values(LogisticsStatus),
+        }),
+      ).toEqual([]);
+    });
+
+    it('reads one delivery bucket or several', async () => {
+      const one = plainToInstance(dto, { delivery: 'tomorrow' });
+      const all = plainToInstance(dto, {
+        delivery: ['today', 'tomorrow', 'future', 'overdue', 'none'],
+      });
+      expect([await validate(one), await validate(all)]).toEqual([[], []]);
+      expect(one.delivery).toEqual(['tomorrow']);
+    });
+  });
+
+  /*
+    A delivery date is a calendar day written YYYY-MM-DD: a date-time, another layout or an
+    impossible day is refused before it can reach the column, so nothing is shifted or rolled
+    over (2026-02-30 is not quietly 2 March).
+  */
+  it.each([
+    '2026-02-30',
+    '2027-02-29',
+    '2026-2-3',
+    '15-10-2026',
+    '2026-10-15T00:00:00.000Z',
+    '1999-12-31',
+    '2100-01-01',
+    'tomorrow',
+    20261015,
+  ])('refuses the delivery date %j', async (deliveryDate) => {
+    expect(await invalid(UpdateLogisticsOrderDto, { deliveryDate })).toEqual([
+      'deliveryDate',
+    ]);
+  });
+
+  it.each(['2026-10-15', '2028-02-29', '2000-01-01', '2099-12-31'])(
+    'accepts the delivery date %j',
+    async (deliveryDate) => {
+      expect(await invalid(UpdateLogisticsOrderDto, { deliveryDate })).toEqual(
+        [],
+      );
+    },
+  );
+
+  it('turns a blank delivery date into null — a clear', async () => {
+    const dto = plainToInstance(UpdateLogisticsOrderDto, {
+      deliveryDate: '  ',
+    });
+    expect(await validate(dto)).toEqual([]);
+    expect(dto.deliveryDate).toBeNull();
+  });
+
+  it('sorts by delivery date, still from the whitelist', async () => {
+    expect(
+      await invalid(ListLogisticsOrdersDto, { sort: 'deliveryDate' }),
+    ).toEqual([]);
   });
 });
