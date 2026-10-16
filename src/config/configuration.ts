@@ -24,7 +24,19 @@ export interface AppConfig {
    * single pinned origin means every such move breaks login until the env is edited.
    */
   corsOrigin: string[];
+  /**
+   * The IANA timezone whose calendar day is the business day — which delivery dates are today,
+   * tomorrow or overdue (ADR-0094). One per deployment until organisation settings hold it.
+   */
+  businessTimeZone: string;
 }
+
+/**
+ * The business timezone when `BUSINESS_TIME_ZONE` is not set — the one place it is named. GCC
+ * countries do not share a clock (UAE Asia/Dubai, Oman Asia/Muscat, Saudi Arabia, Qatar, Kuwait
+ * and Bahrain Asia/Riyadh), so a deployment for another country sets its own.
+ */
+export const DEFAULT_BUSINESS_TIME_ZONE = 'Asia/Dubai';
 
 const VALID_ENVIRONMENTS: AppEnvironment[] = [
   'development',
@@ -82,10 +94,30 @@ function resolveCorsOrigins(): string[] {
     : ['http://localhost:3000', 'http://localhost:3001'];
 }
 
+/**
+ * `BUSINESS_TIME_ZONE`, which must be an IANA name ("Asia/Riyadh"), never an offset ("+03:00"):
+ * a named zone follows any change to that country's clock.
+ */
+export function resolveBusinessTimeZone(
+  raw = process.env.BUSINESS_TIME_ZONE,
+): string {
+  const timeZone = raw?.trim() || DEFAULT_BUSINESS_TIME_ZONE;
+  if (
+    timeZone !== 'UTC' &&
+    !Intl.supportedValuesOf('timeZone').includes(timeZone)
+  ) {
+    throw new Error(
+      `Invalid BUSINESS_TIME_ZONE "${timeZone}". Expected an IANA timezone such as Asia/Dubai, Asia/Riyadh or Asia/Muscat.`,
+    );
+  }
+  return timeZone;
+}
+
 export default registerAs('app', (): AppConfig => ({
   name: process.env.APP_NAME ?? 'Emarath Backend',
   environment: resolveEnvironment(),
   port: resolvePort(),
   apiPrefix: process.env.API_PREFIX ?? 'api',
   corsOrigin: resolveCorsOrigins(),
+  businessTimeZone: resolveBusinessTimeZone(),
 }));

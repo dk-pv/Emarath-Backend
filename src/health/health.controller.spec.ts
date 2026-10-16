@@ -13,6 +13,7 @@ describe('HealthController', () => {
     port: 5001,
     apiPrefix: 'api',
     corsOrigin: ['http://localhost:3000'],
+    businessTimeZone: 'Asia/Dubai',
   };
 
   beforeEach(async () => {
