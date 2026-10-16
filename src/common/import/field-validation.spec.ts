@@ -52,6 +52,26 @@ describe('validateField', () => {
     if (!result.ok) expect(result.failure.errorCode).toBe('INVALID_NUMBER');
   });
 
+  it('rejects a negative amount as a row error, not a failed batch', () => {
+    for (const value of ['-5', '-1,250.00', '-0.5']) {
+      const result = validateField(
+        field({ type: 'decimal', label: 'Actual Amount' }),
+        value,
+      );
+      expect(result).toEqual({
+        ok: false,
+        failure: {
+          errorCode: 'INVALID_NUMBER',
+          reason: 'Actual Amount cannot be negative',
+        },
+      });
+    }
+    expect(validateField(field({ type: 'decimal' }), '0')).toEqual({
+      ok: true,
+      value: '0',
+    });
+  });
+
   it('accepts an integer but rejects a fractional int', () => {
     expect(validateField(field({ type: 'int' }), '3')).toEqual({
       ok: true,

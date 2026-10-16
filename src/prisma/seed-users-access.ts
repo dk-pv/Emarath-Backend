@@ -13,6 +13,7 @@ import 'dotenv/config';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient, UserRole } from '../generated/prisma/client';
 import { LEAD_SYSTEM_FIELDS } from '../lead-forms/lead-system-fields';
+import { assertSeedTarget } from './database-target';
 
 /**
  * The built-in role names, one per UserRole: AUTH-01.1's five user types and the four
@@ -44,6 +45,10 @@ async function main(): Promise<void> {
 
   const connectionString = process.env['DATABASE_URL_UNPOOLED'];
   if (!connectionString) throw new Error('DATABASE_URL_UNPOOLED is not set.');
+  // Reference data a fresh environment needs: a remote target needs SEED_ALLOW_REMOTE_DATABASE.
+  assertSeedTarget('seed-users-access', connectionString, {
+    overridable: true,
+  });
 
   const prisma = new PrismaClient({
     adapter: new PrismaPg({ connectionString }),

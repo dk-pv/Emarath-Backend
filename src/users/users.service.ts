@@ -26,7 +26,7 @@ import {
 const BCRYPT_ROUNDS = 10;
 
 /** The reference's profile-picture rule: PNG/JPG up to 5MB. */
-const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
+export const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
 const AVATAR_EXTENSIONS = new Set(['png', 'jpg', 'jpeg']);
 
 /**

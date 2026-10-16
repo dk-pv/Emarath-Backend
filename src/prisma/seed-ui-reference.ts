@@ -27,6 +27,7 @@ import 'dotenv/config';
 import bcrypt from 'bcryptjs';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient, UserRole } from '../generated/prisma/client';
+import { assertSeedTarget } from './database-target';
 
 /** Matches the app and the main seed (auth.service.ts BCRYPT_ROUNDS). */
 const BCRYPT_ROUNDS = 10;
@@ -52,6 +53,10 @@ async function main(): Promise<void> {
   if (!connectionString) {
     throw new Error('DATABASE_URL_UNPOOLED is not set.');
   }
+  // A fixture: only ever a disposable database on this machine.
+  assertSeedTarget('seed-ui-reference', connectionString, {
+    overridable: false,
+  });
 
   const prisma = new PrismaClient({
     adapter: new PrismaPg({ connectionString }),

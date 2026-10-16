@@ -29,6 +29,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { ActivityType, PrismaClient } from '../generated/prisma/client';
 import { LOOKUP_DATA } from '../lookups/lookups.data';
 import { DEFAULT_PIPELINE } from '../stages/stage.constants';
+import { assertSeedTarget } from './database-target';
 
 const LEAD_COUNT = 280;
 /**
@@ -219,6 +220,11 @@ async function main(): Promise<void> {
 
   const connectionString = process.env['DATABASE_URL_UNPOOLED'];
   if (!connectionString) throw new Error('DATABASE_URL_UNPOOLED is not set.');
+  // It soft-deletes every other live lead, so it never runs anywhere but this machine — the
+  // row-count valve below is a second line, not the guard.
+  assertSeedTarget('seed-dev-dataset', connectionString, {
+    overridable: false,
+  });
 
   const prisma = new PrismaClient({
     adapter: new PrismaPg({ connectionString }),

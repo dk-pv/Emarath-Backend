@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Param, Patch, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Query,
+} from '@nestjs/common';
 import { CallSummary, CallSummaryService } from './call-summary.service';
 import {
   CallLeaderboardService,
@@ -52,7 +60,7 @@ export class CallsController {
   /** PATCH /api/calls/:id/flag — the log's Flag row action. */
   @Patch(':id/flag')
   setFlagged(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() body: FlagCallDto,
   ): Promise<{ flagged: boolean }> {
     return this.log.setFlagged(id, body.flagged);

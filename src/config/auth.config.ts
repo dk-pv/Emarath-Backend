@@ -1,13 +1,16 @@
 import { registerAs } from '@nestjs/config';
+import { resolveEnvironment } from './configuration';
+import { assertStrongSecret } from './secret-strength';
 
 /**
  * Authentication configuration (ADR-0029). Kept in its own `auth` namespace and
  * consumed via `ConfigService.get<AuthConfig>('auth')` so application code never
  * reads `process.env` directly (CLAUDE.md §5).
  *
- * The JWT secret is required in production and refuses to boot without one; in
- * development it falls back to a clearly-insecure default so local work needs no
- * setup, mirroring how the dev auth shim fails closed in production.
+ * Outside development (staging and production) the JWT secret must be set and strong,
+ * or the app refuses to boot, and the session cookies are `Secure` (ADR-0095). In
+ * development it falls back to a clearly-insecure default so local work needs no setup;
+ * the hosted rule refuses that default, so a token it signed never verifies there.
  */
 export interface AuthConfig {
   /** HS256 signing secret for the access token. */
@@ -28,14 +31,12 @@ export interface AuthConfig {
   cookieSameSite: 'lax' | 'strict' | 'none';
 }
 
-const DEV_INSECURE_SECRET = 'dev-insecure-access-secret-change-me';
+export const DEV_INSECURE_SECRET = 'dev-insecure-access-secret-change-me';
 
 export default registerAs('auth', (): AuthConfig => {
-  const isProduction = (process.env.NODE_ENV ?? 'development') === 'production';
+  const hosted = resolveEnvironment() !== 'development';
   const secret = process.env.JWT_ACCESS_SECRET;
-  if (isProduction && !secret) {
-    throw new Error('JWT_ACCESS_SECRET must be set in production.');
-  }
+  if (hosted) assertStrongSecret('JWT_ACCESS_SECRET', secret);
 
   const sameSite = (process.env.COOKIE_SAMESITE ?? 'lax').toLowerCase();
   if (sameSite !== 'lax' && sameSite !== 'strict' && sameSite !== 'none') {
@@ -58,7 +59,7 @@ export default registerAs('auth', (): AuthConfig => {
       process.env.LOGIN_RATE_TTL_MS ?? '60000',
       10,
     ),
-    cookieSecure: isProduction,
+    cookieSecure: hosted,
     cookieSameSite: sameSite,
   };
 });

@@ -338,3 +338,48 @@ describe('LeadsExportService — XLSX', () => {
     expect(sheet.rowCount).toBe(3);
   });
 });
+
+describe('LeadsExportService — a formula typed into a lead never runs (ADR-0095)', () => {
+  const formula = '=HYPERLINK("http://example.test","open")';
+  const lead = () =>
+    row(
+      formula,
+      { cf_notes: '-urgent call back', cf_size: '-5' },
+      { primaryPhone: '+971501234567', street: 'Al Wasl Road' },
+    );
+  const columns = 'name,primaryPhone,cf_notes,cf_size,street';
+
+  it('neutralises it in the CSV, and leaves numbers, phones and text as they are', async () => {
+    const { service } = setup([lead()]);
+    const { lines } = await csv(service, { columns });
+    expect(lines).toEqual([
+      `"'=HYPERLINK(""http://example.test"",""open"")",+971501234567,'-urgent call back,-5,Al Wasl Road`,
+    ]);
+  });
+
+  it('writes the XLSX cells unchanged, as text rather than a formula', async () => {
+    const { service } = setup([lead()]);
+    const out = new PassThrough();
+    const buffers: Buffer[] = [];
+    out.on('data', (chunk: Buffer) => buffers.push(chunk));
+    Object.assign(out, { status: () => out, setHeader: () => out });
+
+    await service.export(
+      query({ format: 'xlsx', columns }),
+      out as unknown as Response,
+    );
+    await finished(out);
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(Buffer.concat(buffers) as unknown as ArrayBuffer);
+    const data = workbook.getWorksheet('Leads')!.getRow(2);
+    expect((data.values as unknown[]).slice(1)).toEqual([
+      formula,
+      '+971501234567',
+      '-urgent call back',
+      '-5',
+      'Al Wasl Road',
+    ]);
+    expect(data.getCell(1).type).toBe(ExcelJS.ValueType.String);
+  });
+});

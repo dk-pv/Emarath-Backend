@@ -24,6 +24,7 @@
 import 'dotenv/config';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client';
+import { assertSeedTarget } from './database-target';
 
 /**
  * The reference set, in the order the library grid shows it.
@@ -231,6 +232,10 @@ async function main(): Promise<void> {
 
   const connectionString = process.env['DATABASE_URL_UNPOOLED'];
   if (!connectionString) throw new Error('DATABASE_URL_UNPOOLED is not set.');
+  // Reference data a real environment may need: a remote target needs SEED_ALLOW_REMOTE_DATABASE.
+  assertSeedTarget('seed-integrations', connectionString, {
+    overridable: true,
+  });
 
   const prisma = new PrismaClient({
     adapter: new PrismaPg({ connectionString }),

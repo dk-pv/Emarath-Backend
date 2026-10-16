@@ -84,6 +84,11 @@ export function validateField(field: ImportField, raw: string): FieldResult {
       if (cleaned === null || !/^-?\d+(\.\d+)?$/.test(cleaned)) {
         return fail('INVALID_NUMBER', `${field.label} must be a number`);
       }
+      // Every decimal column is an amount or quantity that refuses a negative value (a
+      // database CHECK); one would fail its whole batch, so the row is rejected here instead.
+      if (cleaned.startsWith('-')) {
+        return fail('INVALID_NUMBER', `${field.label} cannot be negative`);
+      }
       // Every decimal column is Decimal(12,2); a wider value would fail its whole batch.
       if (!/^-?\d{1,10}(\.\d{1,2})?$/.test(cleaned)) {
         return fail(

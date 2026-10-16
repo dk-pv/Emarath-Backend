@@ -14,7 +14,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { UserRole } from '../generated/prisma/client';
 import { Roles } from '../auth/roles.decorator';
-import { UsersService } from './users.service';
+import { AVATAR_MAX_BYTES, UsersService } from './users.service';
 import {
   CreateUserDto,
   ListUsersQueryDto,
@@ -77,9 +77,14 @@ export class UsersController {
     return this.service.create(dto);
   }
 
-  /** POST /api/users/:id/avatar — store the profile picture (PNG/JPG ≤ 5MB). */
+  /**
+   * POST /api/users/:id/avatar — store the profile picture (PNG/JPG ≤ 5MB). A larger file is
+   * a 413 while it streams in, before it is buffered (ADR-0095).
+   */
   @Post(':id/avatar')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(
+    FileInterceptor('file', { limits: { fileSize: AVATAR_MAX_BYTES } }),
+  )
   setAvatar(
     @Param('id', ParseUUIDPipe) id: string,
     @UploadedFile() file: Express.Multer.File | undefined,

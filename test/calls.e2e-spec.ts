@@ -33,4 +33,12 @@ describe('Call summary (e2e)', () => {
   it('rejects a call log read with an out-of-range page size', async () => {
     await api.get('/api/calls/log?size=0').expect(400);
   });
+
+  // A malformed id is a 400 from the pipe, not a 500 from the uuid column (ADR-0095).
+  it('rejects a flag change for a non-uuid id', async () => {
+    await api
+      .patch('/api/calls/not-a-uuid/flag')
+      .send({ flagged: true })
+      .expect(400);
+  });
 });

@@ -1,4 +1,5 @@
 import { LeadCustomFieldType, Prisma } from '../../generated/prisma/client';
+import { escapeCsv } from '../../common/import/errors-to-csv';
 
 /**
  * The columns available to an export, and how each renders to a cell.
@@ -308,9 +309,9 @@ export function resolveExportColumns(
 }
 
 /**
- * One CSV field, RFC 4180: quote when the value carries a comma, quote or newline,
- * doubling any embedded quote. Everything else passes through untouched.
+ * One CSV field of the lead and report exports: the app's one CSV rule (`escapeCsv`), which
+ * also keeps a cell from running as a spreadsheet formula.
  */
 export function csvCell(value: string): string {
-  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+  return escapeCsv(value);
 }

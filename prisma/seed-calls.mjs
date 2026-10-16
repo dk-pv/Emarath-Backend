@@ -23,6 +23,7 @@
  */
 import 'dotenv/config';
 import pg from 'pg';
+import { assertLocalDatabase } from './database-target.mjs';
 
 const PREFIX = 'seed-call-';
 const TOTAL = 620;
@@ -107,11 +108,12 @@ function startedAt(index) {
   return d;
 }
 
-const client = new pg.Client({
-  connectionString:
-    process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+// Demo rows only ever go to a disposable database on this machine (ADR-0095), checked before
+// connecting; a local database needs no TLS, so none is configured.
+const connectionString =
+  process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
+assertLocalDatabase('seed-calls', connectionString);
+const client = new pg.Client({ connectionString });
 await client.connect();
 
 if (process.argv.includes('--purge')) {

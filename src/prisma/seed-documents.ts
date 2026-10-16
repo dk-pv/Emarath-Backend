@@ -21,6 +21,7 @@ import 'dotenv/config';
 import { createHash } from 'node:crypto';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client';
+import { assertSeedTarget } from './database-target';
 
 const NAMESPACE = 'emarath.documents-fixture.v1';
 
@@ -112,6 +113,8 @@ async function main(): Promise<void> {
 
   const connectionString = process.env['DATABASE_URL_UNPOOLED'];
   if (!connectionString) throw new Error('DATABASE_URL_UNPOOLED is not set.');
+  // A fixture: only ever a disposable database on this machine.
+  assertSeedTarget('seed-documents', connectionString, { overridable: false });
 
   const prisma = new PrismaClient({
     adapter: new PrismaPg({ connectionString }),

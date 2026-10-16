@@ -41,10 +41,27 @@ function collectValueColumns(errors: RowError[]): string[] {
   return columns;
 }
 
-/** Quotes a field when it contains a comma, quote or newline; doubles inner quotes. */
+/** A signed number ("-5", "+12.50") or an international phone number ("+1 (555) 123-4567"). */
+const NUMBER_OR_PHONE = /^(?:[+-]?\d+(?:\.\d+)?|\+\d[\d ()-]*\d)$/;
+
+/**
+ * One CSV field, as every CSV this app writes — the lead export, the report exports, the import
+ * error file and sample — spells it.
+ *
+ * A spreadsheet runs a cell that starts with = + - @, a tab or a carriage return as a formula,
+ * so untrusted text could plant one (CSV injection, ADR-0095). Such a cell gets a leading
+ * apostrophe, which spreadsheets read as "this is text". A plain number or phone number holds
+ * no formula — "-5", "+971501234567", "+971 50 123 4567" — and is written as it is.
+ *
+ * Then RFC 4180: quoted when it contains a comma, quote or newline, inner quotes doubled.
+ */
 export function escapeCsv(value: string): string {
-  if (/[",\r\n]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
+  const cell =
+    /^[=+\-@\t\r]/.test(value) && !NUMBER_OR_PHONE.test(value)
+      ? `'${value}`
+      : value;
+  if (/[",\r\n]/.test(cell)) {
+    return `"${cell.replace(/"/g, '""')}"`;
   }
-  return value;
+  return cell;
 }

@@ -81,12 +81,9 @@ export class DocumentsController {
   /**
    * POST /api/documents — upload a company-wide document (DOC-02.1). Multipart: the `file`
    * part is buffered in memory (multer default) and handed to the shared StorageService; the
-   * text parts (File name, Select Users, category) validate through CreateDocumentDto.
+   * text parts (File name, Select Users, category) validate through CreateDocumentDto. A file
+   * over the storage limit is refused with a 413 while it streams in (DocumentsModule).
    */
-  // ponytail: memory-buffered, so the size limit is enforced by StorageService.put
-  // after the body is read (the single authoritative gate). Add a multer
-  // limits.fileSize edge cap (via MulterModule.registerAsync off storage config) if
-  // this foundation faces untrusted upload scale.
   @Post()
   @UseInterceptors(FileInterceptor('file'))
   create(

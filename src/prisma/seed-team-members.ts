@@ -26,6 +26,7 @@ import bcrypt from 'bcryptjs';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client';
 import { PERMISSION_CATALOG } from '../users/permission-catalog';
+import { assertSeedTarget } from './database-target';
 
 const BCRYPT_ROUNDS = 10;
 const HOUR_MS = 60 * 60 * 1000;
@@ -337,6 +338,10 @@ async function main(): Promise<void> {
 
   const connectionString = process.env['DATABASE_URL_UNPOOLED'];
   if (!connectionString) throw new Error('DATABASE_URL_UNPOOLED is not set.');
+  // A fixture: only ever a disposable database on this machine.
+  assertSeedTarget('seed-team-members', connectionString, {
+    overridable: false,
+  });
 
   const prisma = new PrismaClient({
     adapter: new PrismaPg({ connectionString }),

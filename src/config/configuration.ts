@@ -44,7 +44,7 @@ const VALID_ENVIRONMENTS: AppEnvironment[] = [
   'production',
 ];
 
-function resolveEnvironment(): AppEnvironment {
+export function resolveEnvironment(): AppEnvironment {
   const raw = (process.env.NODE_ENV ?? 'development').toLowerCase();
   // Jest and other tooling use NODE_ENV=test; map it to development.
   const normalized = raw === 'test' ? 'development' : raw;

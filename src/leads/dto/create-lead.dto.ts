@@ -10,6 +10,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -41,6 +42,12 @@ const emptyToUndefined = ({ value }: { value: unknown }): unknown => {
 
 /** No sane lead has more attempts than this; guards the int column from abuse. */
 const MAX_ATTEMPTS = 1000;
+
+/**
+ * The amount and quantity columns refuse a negative value (a database CHECK), so it is a 400
+ * here rather than a 500 from the write.
+ */
+const NOT_NEGATIVE = /^(?!-)/;
 
 export class CreateLeadDto {
   @Transform(trim)
@@ -123,6 +130,7 @@ export class CreateLeadDto {
 
   @Transform(emptyToUndefined)
   @IsNumberString({}, { message: 'QTY must be a number' })
+  @Matches(NOT_NEGATIVE, { message: 'QTY cannot be negative' })
   @IsOptional()
   productQty?: string;
 
@@ -134,6 +142,7 @@ export class CreateLeadDto {
 
   @Transform(emptyToUndefined)
   @IsNumberString({}, { message: 'QTY of Product 2 must be a number' })
+  @Matches(NOT_NEGATIVE, { message: 'QTY of Product 2 cannot be negative' })
   @IsOptional()
   product2Qty?: string;
 
@@ -213,11 +222,13 @@ export class CreateLeadDto {
 
   @Transform(emptyToUndefined)
   @IsNumberString({}, { message: 'Actual Amount must be a number' })
+  @Matches(NOT_NEGATIVE, { message: 'Actual Amount cannot be negative' })
   @IsOptional()
   actualAmount?: string;
 
   @Transform(emptyToUndefined)
   @IsNumberString({}, { message: 'Forecasted Amount must be a number' })
+  @Matches(NOT_NEGATIVE, { message: 'Forecasted Amount cannot be negative' })
   @IsOptional()
   forecastedAmount?: string;
 

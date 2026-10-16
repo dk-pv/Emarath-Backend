@@ -19,6 +19,7 @@ import bcrypt from 'bcryptjs';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient, UserRole } from '../generated/prisma/client';
 import { SOURCE } from '../lookups/lookups.data';
+import { assertSeedTarget } from './database-target';
 
 /**
  * The initial stage catalogue for the default board (KAN-05.1). Transcribed from
@@ -214,6 +215,8 @@ async function main(): Promise<void> {
   if (!connectionString) {
     throw new Error('DATABASE_URL_UNPOOLED is not set.');
   }
+  // It resets the role accounts it seeds, so a remote target needs SEED_ALLOW_REMOTE_DATABASE.
+  assertSeedTarget('seed', connectionString, { overridable: true });
 
   const prisma = new PrismaClient({
     adapter: new PrismaPg({ connectionString }),

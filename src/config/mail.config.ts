@@ -1,4 +1,5 @@
 import { registerAs } from '@nestjs/config';
+import { resolveEnvironment } from './configuration';
 
 /**
  * Mail configuration (AUTH-03.1, ADR-0031). Its own `mail` namespace, consumed via
@@ -9,7 +10,9 @@ import { registerAs } from '@nestjs/config';
  * transport so a reset link needs no network, credentials or verified domain; staging and
  * production use Resend. When Resend is selected the API key and from-address are required
  * and the app refuses to boot without them — mirroring how the JWT secret fails closed in
- * production. `webAppUrl` is the frontend origin the reset link points at.
+ * production. The log transport writes each reset link, token included, to the log, so it
+ * is refused outside development (ADR-0095). `webAppUrl` is the frontend origin the reset
+ * link points at.
  */
 export type MailProvider = 'log' | 'resend';
 
@@ -24,16 +27,20 @@ export interface MailConfig {
 }
 
 export default registerAs('mail', (): MailConfig => {
-  const rawEnv = (process.env.NODE_ENV ?? 'development').toLowerCase();
-  const isDevelopment = rawEnv === 'development' || rawEnv === 'test';
+  const isDevelopment = resolveEnvironment() === 'development';
 
-  // Log transport in development/test; Resend everywhere else. An explicit MAIL_PROVIDER
-  // overrides, so staging can force `log` (or a dev box can smoke-test `resend`).
+  // Log transport in development/test; Resend everywhere else. A dev box may set
+  // MAIL_PROVIDER=resend to smoke-test real delivery; `log` never leaves development.
   const rawProvider =
     process.env.MAIL_PROVIDER?.toLowerCase() ??
     (isDevelopment ? 'log' : 'resend');
   if (rawProvider !== 'log' && rawProvider !== 'resend') {
     throw new Error(`Invalid MAIL_PROVIDER "${rawProvider}".`);
+  }
+  if (rawProvider === 'log' && !isDevelopment) {
+    throw new Error(
+      'MAIL_PROVIDER "log" is only allowed in development: it writes password-reset links to the log. Outside development use "resend" with RESEND_API_KEY and MAIL_FROM.',
+    );
   }
   const provider: MailProvider = rawProvider;
 

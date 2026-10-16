@@ -1,4 +1,6 @@
 import { registerAs } from '@nestjs/config';
+import { resolveEnvironment } from './configuration';
+import { assertStrongSecret } from './secret-strength';
 
 /**
  * File storage configuration (FND-05.2). Its own `storage` namespace, consumed via
@@ -54,11 +56,26 @@ const DEFAULT_ALLOWED_EXTENSIONS = [
 ];
 
 const DEFAULT_MAX_BYTES = 25 * 1024 * 1024;
-const DEV_INSECURE_SIGNING_SECRET = 'dev-insecure-storage-signing-secret';
+export const DEV_INSECURE_SIGNING_SECRET =
+  'dev-insecure-storage-signing-secret';
+
+/**
+ * `STORAGE_MAX_BYTES` when set: a positive whole number of bytes, or the app refuses to boot.
+ * `parseInt` would read an empty value as NaN, breaking the upload limit, and "25MB" as 25.
+ */
+function resolveMaxBytes(): number {
+  const raw = process.env.STORAGE_MAX_BYTES;
+  if (raw === undefined) return DEFAULT_MAX_BYTES;
+  if (!/^[1-9]\d*$/.test(raw)) {
+    throw new Error(
+      `Invalid STORAGE_MAX_BYTES "${raw}". Expected a positive whole number of bytes, such as ${DEFAULT_MAX_BYTES}.`,
+    );
+  }
+  return Number(raw);
+}
 
 export default registerAs('storage', (): StorageConfig => {
-  const rawEnv = (process.env.NODE_ENV ?? 'development').toLowerCase();
-  const isDevelopment = rawEnv === 'development' || rawEnv === 'test';
+  const isDevelopment = resolveEnvironment() === 'development';
 
   const rawProvider =
     process.env.STORAGE_PROVIDER?.toLowerCase() ??
@@ -76,6 +93,13 @@ export default registerAs('storage', (): StorageConfig => {
     throw new Error(
       'STORAGE_BUCKET, STORAGE_ACCESS_KEY_ID and STORAGE_SECRET_ACCESS_KEY must be set when STORAGE_PROVIDER is "s3".',
     );
+  }
+
+  // Only the local adapter signs its own download links (S3 presigns with its keys). Outside
+  // development such a link must not be forgeable, so it needs a strong secret (ADR-0095).
+  const signingSecret = process.env.STORAGE_SIGNING_SECRET;
+  if (provider === 'local' && !isDevelopment) {
+    assertStrongSecret('STORAGE_SIGNING_SECRET', signingSecret);
   }
 
   const allowedExtensions = (
@@ -99,15 +123,11 @@ export default registerAs('storage', (): StorageConfig => {
       process.env.STORAGE_SIGNED_URL_TTL_SEC ?? '300',
       10,
     ),
-    maxBytes: Number.parseInt(
-      process.env.STORAGE_MAX_BYTES ?? String(DEFAULT_MAX_BYTES),
-      10,
-    ),
+    maxBytes: resolveMaxBytes(),
     allowedExtensions,
     localDir: process.env.STORAGE_LOCAL_DIR ?? '.storage',
     localBaseUrl:
       process.env.STORAGE_LOCAL_BASE_URL ?? 'http://localhost:5001/api',
-    localSigningSecret:
-      process.env.STORAGE_SIGNING_SECRET ?? DEV_INSECURE_SIGNING_SECRET,
+    localSigningSecret: signingSecret ?? DEV_INSECURE_SIGNING_SECRET,
   };
 });
