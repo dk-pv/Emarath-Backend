@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '../generated/prisma/client';
+import { Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { leadScopeWhere } from '../leads/lead-scope';
@@ -46,6 +46,28 @@ export function convertedInPeriodWhere(
   };
 }
 
+/**
+ * The members whose monthly goals make up the caller's target: the same people whose leads the
+ * revenue counts (`leadScopeWhere`) — everyone for the admin and the org-wide Customer Service
+ * and Marketing roles, the manager's team (or only themselves without one), and a sales agent
+ * alone. Active, non-deleted members only.
+ */
+export function targetMembersWhere(user: CurrentUser): Prisma.UserWhereInput {
+  const active = { deletedAt: null, isActive: true };
+  switch (user.role) {
+    case UserRole.SUPERADMIN:
+    case UserRole.CUSTOMER_SERVICE_AGENT:
+    case UserRole.MARKETING_ANALYST:
+      return active;
+    case UserRole.SALES_MANAGER:
+      return user.team ? { ...active, team: user.team } : { id: user.id };
+    case UserRole.SALES_AGENT:
+      return { id: user.id };
+    default:
+      return { id: { in: [] } };
+  }
+}
+
 /** Leads **assigned** in the period — the same rule the Todays Leads counter uses. */
 export function assignedInPeriodWhere(
   user: CurrentUser,
@@ -87,7 +109,7 @@ export class TeamRevenueService {
       // see — Target Settings' `monthlyGoalAmount`. A member with no goal set
       // contributes nothing rather than a zero that would distort the percentage.
       this.prisma.user.aggregate({
-        where: { deletedAt: null, isActive: true },
+        where: targetMembersWhere(user),
         _sum: { monthlyGoalAmount: true },
       }),
     ]);

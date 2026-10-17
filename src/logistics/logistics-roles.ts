@@ -54,15 +54,32 @@ export const RESUBMIT_ROLES: readonly UserRole[] = [
   UserRole.SUPERADMIN,
 ];
 
-/** Reading an order: the sales roles (their own leads only), both Logistics roles and QC. */
+/**
+ * Setting the requested delivery date until QC verifies the order (Phase 2D, ADR-0094): the
+ * sales agent on their own leads' orders and the Sales Manager on their team's — the service
+ * reads the order through `logisticsOrderScopeWhere`, so anyone else's is a 404. Customer
+ * Service and Marketing keep read access only. Provisional default P1, pending open client
+ * question D1.
+ */
+export const DELIVERY_DATE_ROLES: readonly UserRole[] = [
+  UserRole.SALES_AGENT,
+  UserRole.SALES_MANAGER,
+  UserRole.SUPERADMIN,
+];
+
+/**
+ * Reading an order: the sales roles (their own leads only), both Logistics roles, QC, and
+ * Accounts — Delivered orders only (`logisticsOrderScopeWhere`), read-only: no action names it.
+ */
 export const LOGISTICS_READ_ROLES: readonly UserRole[] = [
   ...SALES_MODULE_ROLES,
   UserRole.LOGISTICS_MANAGER,
   UserRole.LOGISTICS_EXECUTIVE,
   UserRole.QC,
+  UserRole.ACCOUNTS_EXECUTIVE,
 ];
 
-/** Everything a caller can do to an order: the status moves, and the two edits. */
+/** Everything a caller can do to an order: the status moves, and the edits. */
 export type OrderAction = LogisticsAction | OrderEdit;
 
 /**
@@ -80,16 +97,26 @@ export const ACTION_ROLES: Readonly<Record<OrderAction, readonly UserRole[]>> =
     RTO: MANAGER_ROLES,
     EDIT: MANAGER_ROLES,
     CORRECT_AWB: MANAGER_ROLES,
+    SET_DELIVERY_DATE: DELIVERY_DATE_ROLES,
   };
+
+const isOrderEdit = (action: OrderAction): action is OrderEdit =>
+  action in ORDER_EDIT_STATUSES;
 
 /** The statuses an action may be taken from: a move's sources, or an edit's statuses. */
 export function actionStatuses(
   action: OrderAction,
 ): readonly LogisticsStatus[] {
-  return action === 'EDIT' || action === 'CORRECT_AWB'
+  return isOrderEdit(action)
     ? ORDER_EDIT_STATUSES[action]
     : LOGISTICS_TRANSITIONS[action].from;
 }
+
+/**
+ * The actions that change an order on its lead's behalf, which a caller may view but not take
+ * on a lead in a pipeline closed to them (ADR-0093 B2): the service answers them with a 403.
+ */
+const LEAD_CHANGE_ACTIONS: readonly OrderAction[] = ['SET_DELIVERY_DATE'];
 
 /**
  * What the caller may do to an order in `status` right now — advisory, for the UI to render,
@@ -97,18 +124,22 @@ export function actionStatuses(
  * the authority, and this can only ever be a subset of what they accept.
  *
  * An action is offered when both hold: it may be taken from this status, and the caller's role
- * is one its route admits. Nothing else is consulted and nothing is special-cased — SUPERADMIN
- * gets what the tables give it, not a bypass. Visibility needs no check of its own: an order
- * reaches a caller only through their scope.
+ * is one its route admits. Nothing else is special-cased — SUPERADMIN gets what the tables give
+ * it, not a bypass. Visibility needs no check of its own: an order reaches a caller only through
+ * their scope. The one thing a scope cannot say is that the order's lead sits in a pipeline
+ * closed to the caller (`leadClosed`), which a sales agent can see but not change, so the date
+ * action is not offered there.
  */
 export function allowedActions(
   status: LogisticsStatus,
   role: UserRole,
+  leadClosed = false,
 ): OrderAction[] {
   return (Object.keys(ACTION_ROLES) as OrderAction[]).filter(
     (action) =>
       actionStatuses(action).includes(status) &&
-      ACTION_ROLES[action].includes(role),
+      ACTION_ROLES[action].includes(role) &&
+      !(leadClosed && LEAD_CHANGE_ACTIONS.includes(action)),
   );
 }
 
@@ -118,8 +149,10 @@ export function allowedActions(
  *
  * Logistics works every order, so its two roles, QC and the admin are unrestricted. A sales caller
  * sees an order only when its lead is one they can already see, which reuses `leadScopeWhere`
- * verbatim: a sales agent reads their own converted leads' orders and no one else's. Any other
- * role (Accounts today) matches nothing, so a route opened to it by mistake still returns none.
+ * verbatim: a sales agent reads their own converted leads' orders and no one else's. Accounts
+ * reads the Delivered orders only — the client's "display logistics status with Delivered data
+ * only" — until its own payment pipeline exists. Any other role matches nothing, so a route
+ * opened to it by mistake still returns none.
  */
 export function logisticsOrderScopeWhere(
   user: CurrentUser,
@@ -138,6 +171,6 @@ export function logisticsOrderScopeWhere(
       return { lead: leadScopeWhere(user) };
 
     case UserRole.ACCOUNTS_EXECUTIVE:
-      return { id: { in: [] } };
+      return { status: LogisticsStatus.DELIVERED };
   }
 }

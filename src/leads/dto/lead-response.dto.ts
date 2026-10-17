@@ -3,6 +3,7 @@ import {
   LogisticsStatus,
   Prisma,
 } from '../../generated/prisma/client';
+import { fromDbDate } from '../../logistics/delivery-date';
 
 /**
  * The Logistics order a lead converted into (ADR-0085), as a lead response carries it. Once it
@@ -10,16 +11,28 @@ import {
  * deleted (`guardConvertedLeads`, `retainedLeads`), so the lead screens read this to stop
  * offering those actions. `orderNumber` is the order's own sequence value, unformatted; `id`
  * lets a lead screen open the order itself, which the order route still scopes.
+ * `deliveryDate` is the order's planned delivery day (ADR-0094), `YYYY-MM-DD`, or null.
  */
 export interface LeadLogisticsOrder {
   id: string;
   orderNumber: number;
   status: LogisticsStatus;
+  deliveryDate: string | null;
 }
 
 const LEAD_LOGISTICS_ORDER_SELECT = {
-  select: { id: true, orderNumber: true, status: true },
+  select: { id: true, orderNumber: true, status: true, deliveryDate: true },
 } satisfies Prisma.Lead$logisticsOrderArgs;
+
+/** The order's DATE column as the day it holds, never a `Date` a timezone could move. */
+function toLeadLogisticsOrder(
+  order: Prisma.LogisticsOrderGetPayload<typeof LEAD_LOGISTICS_ORDER_SELECT>,
+): LeadLogisticsOrder {
+  return {
+    ...order,
+    deliveryDate: order.deliveryDate && fromDbDate(order.deliveryDate),
+  };
+}
 
 /**
  * The shape the list endpoint returns for one lead.
@@ -326,7 +339,9 @@ export function toLeadEditData(row: LeadEditRow): LeadEditData {
     customFields: Object.fromEntries(
       row.customFieldValues.map((v) => [v.customField.key, v.value]),
     ),
-    logisticsOrder: row.logisticsOrder ?? null,
+    logisticsOrder: row.logisticsOrder
+      ? toLeadLogisticsOrder(row.logisticsOrder)
+      : null,
   };
 }
 
@@ -538,6 +553,8 @@ export function toLeadListItem(row: LeadRow, isPinned = false): LeadListItem {
     hasActivity: row._count.activities > 0 || row._count.calls > 0,
     isPinned,
     isDuplicate: row.duplicateOfId !== null,
-    logisticsOrder: row.logisticsOrder ?? null,
+    logisticsOrder: row.logisticsOrder
+      ? toLeadLogisticsOrder(row.logisticsOrder)
+      : null,
   };
 }

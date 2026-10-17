@@ -132,6 +132,53 @@ export class LogisticsOrderFiltersDto {
   @IsOptional()
   city?: string[];
 
+  /**
+   * Areas: the order's State — the lead form's first-level region of its country (an Emirate, a
+   * Saudi province) — matched exactly as stored. The column's length is the cap.
+   */
+  @Transform(toFilterValues)
+  @IsArray({ message: 'state must be one or more values' })
+  @IsString({ each: true, message: 'each state must be a string' })
+  @MaxLength(120, {
+    each: true,
+    message: 'each state must be at most 120 characters',
+  })
+  @ArrayMaxSize(MAX_FILTER_VALUES, {
+    message: `state accepts at most ${MAX_FILTER_VALUES} values`,
+  })
+  @IsOptional()
+  state?: string[];
+
+  /** Delivery partners: the courier recorded at dispatch, matched exactly as stored. */
+  @Transform(toFilterValues)
+  @IsArray({ message: 'courier must be one or more values' })
+  @IsString({ each: true, message: 'each courier must be a string' })
+  @MaxLength(64, {
+    each: true,
+    message: 'each courier must be at most 64 characters',
+  })
+  @ArrayMaxSize(MAX_FILTER_VALUES, {
+    message: `courier accepts at most ${MAX_FILTER_VALUES} values`,
+  })
+  @IsOptional()
+  courier?: string[];
+
+  /**
+   * Sales executives: the users the order's lead is assigned to now (`LeadAssignment`), the same
+   * relation and parameter name as the Leads list's `assignedAgent` filter.
+   */
+  @Transform(toFilterValues)
+  @IsArray({ message: 'assignedAgent must be one or more values' })
+  @IsUUID('all', {
+    each: true,
+    message: 'each assignedAgent must be a user id',
+  })
+  @ArrayMaxSize(MAX_FILTER_VALUES, {
+    message: `assignedAgent accepts at most ${MAX_FILTER_VALUES} values`,
+  })
+  @IsOptional()
+  assignedAgent?: string[];
+
   /** Delivery-date buckets, measured against the business day (ADR-0094). */
   @Transform(toFilterValues)
   @IsArray({ message: 'delivery must be one or more values' })
@@ -252,6 +299,19 @@ export class CorrectAwbDto {
   @IsNotEmpty({ message: 'awbNumber is required' })
   @MaxLength(64)
   awbNumber!: string;
+}
+
+/**
+ * Sales' requested delivery day, before QC verifies the order (Phase 2D, ADR-0094): a real
+ * calendar day written `YYYY-MM-DD`, or null — sent blank too — to clear it. The key must be
+ * sent, so an empty body is refused rather than read as a clear. Whether the day may be before
+ * today is the service's rule, because "today" is the business timezone's.
+ */
+export class SetDeliveryDateDto {
+  @Transform(blankToNull)
+  @ValidateIf((dto: SetDeliveryDateDto) => dto.deliveryDate !== null)
+  @Validate(DeliveryDay)
+  deliveryDate!: string | null;
 }
 
 /**
@@ -485,10 +545,19 @@ export interface LogisticsDeliveryScheduleResponse {
   days: DeliveryScheduleDay[];
 }
 
-/** The country and city values the caller's own orders hold — the filter's choices. */
+/** A sales executive the filter offers: a user one of the caller's orders' leads is assigned to. */
+export interface LogisticsAssigneeOption {
+  id: string;
+  name: string;
+}
+
+/** The values the caller's own orders hold — the filter's choices. */
 export interface LogisticsOrderFilterOptions {
   countries: string[];
   cities: string[];
+  states: string[];
+  couriers: string[];
+  assignees: LogisticsAssigneeOption[];
 }
 
 /** Everything the response needs, declared once so query and mapper cannot drift. */
@@ -533,20 +602,22 @@ export type LogisticsOrderRow = Prisma.LogisticsOrderGetPayload<{
 }>;
 
 /**
- * The order as `role` receives it — its actions depend on who is asking — with its delivery date
- * placed on `day`, the business day of the request.
+ * The order as `role` receives it — its actions depend on who is asking, and on whether its lead
+ * sits in a pipeline closed to them (`leadClosed`) — with its delivery date placed on `day`, the
+ * business day of the request.
  */
 export function toLogisticsOrderResponse(
   row: LogisticsOrderRow,
   role: UserRole,
   day: BusinessDay,
+  leadClosed = false,
 ): LogisticsOrderResponse {
   const deliveryDate = row.deliveryDate ? fromDbDate(row.deliveryDate) : null;
   return {
     ...row,
     deliveryDate,
     deliveryBucket: deliveryBucketOf(deliveryDate, row.status, day),
-    allowedActions: allowedActions(row.status, role),
+    allowedActions: allowedActions(row.status, role, leadClosed),
     statusChangedAt: row.statusChangedAt.toISOString(),
     convertedAt: row.convertedAt.toISOString(),
     productQty: row.productQty?.toString() ?? null,

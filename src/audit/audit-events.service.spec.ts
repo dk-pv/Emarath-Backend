@@ -267,7 +267,8 @@ describe('AuditEventsService authorization', () => {
     {
       role: UserRole.ACCOUNTS_EXECUTIVE,
       lead: NO_LEADS,
-      order: { id: { in: [] } },
+      // A Delivered order's own events only — never the lead's (journeyWhere).
+      order: { status: 'DELIVERED' },
     },
   ])(
     '$role reaches a journey only through its own scopes',

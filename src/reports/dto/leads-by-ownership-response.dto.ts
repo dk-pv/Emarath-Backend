@@ -38,20 +38,48 @@ export interface OwnerCountRow {
   convertedCount: number;
   /** Leads in the LOST stage. */
   lostCount: number;
+  /**
+   * Orders: the owner's leads in this report (same filters and date window) that have a
+   * Logistics order — converted to Logistics, whatever the order's status since. It differs from
+   * `convertedCount`, which reads the lead's current stage: a QC-rejected order's lead is no
+   * longer WON but still has its order.
+   */
+  ordersCount: number;
   /** convertedCount / count, as a percentage 0–100. */
   conversionRatio: number;
   /** Emarath has no lead-qualification stage or flag, so this is null (rendered "—"). */
   qualifiedRatio: number | null;
-  /** Emarath has no sales-target model, so this is null (rendered "No Target Set"). */
+  /**
+   * Σ actualAmount of the owner's WON leads in this report ÷ the owner's monthly goal (Target
+   * Settings' `monthlyGoalAmount`), as a percentage, uncapped like the dashboard's. The goal is
+   * monthly and is not pro-rated to the report's window. Null — "No Target Set" — when the owner
+   * has no goal or a zero one, and for the Unassigned bucket.
+   */
   targetAchievement: number | null;
   /** Σ actualAmount of the owner's leads, AED, as a Decimal string. */
   leadValue: string;
+}
+
+/**
+ * One team's subtotal: the sum of its owners' rows (so a lead co-assigned within the team counts
+ * once per owner, as in the rows), grouped by the owner's `User.team`; `team` null gathers the
+ * owners with no team. Its target is the sum of the monthly goals of the team's active members.
+ */
+export interface TeamSubtotalRow extends Omit<
+  OwnerCountRow,
+  'ownerId' | 'ownerName' | 'qualifiedRatio'
+> {
+  team: string | null;
+  /** How many owner rows the subtotal adds up. */
+  owners: number;
 }
 
 export interface LeadsByOwnershipSummaryResponse {
   rows: OwnerCountRow[];
   /** Distinct leads in the scoped set. Per-owner counts can exceed this when leads are co-assigned. */
   total: number;
+  /** Per-team subtotals of `rows` (the Unassigned bucket excluded); empty for a sales agent. */
+  teams: TeamSubtotalRow[];
 }
 
 /** The values the report's team filter offers (AC3). */

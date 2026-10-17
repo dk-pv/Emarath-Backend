@@ -70,6 +70,7 @@ describe('Logistics write routes (e2e)', () => {
     ['post', 'rto', [UserRole.LOGISTICS_MANAGER]],
     ['patch', '', [UserRole.LOGISTICS_MANAGER]],
     ['patch', 'awb', [UserRole.LOGISTICS_MANAGER]],
+    ['patch', 'delivery-date', [UserRole.SALES_AGENT, UserRole.SALES_MANAGER]],
   ];
 
   /*
@@ -161,6 +162,31 @@ describe('Logistics write routes (e2e)', () => {
     expect(response.status).toBe(400);
   });
 
+  /*
+    Phase 2D: the Sales date is a calendar day or null. Anything else — no key at all, a day that
+    does not exist, another format, an instant, a number, a year out of range, or a field the
+    route does not take — is refused by the pipe, before the service or a query runs.
+  */
+  it.each([
+    {},
+    { deliveryDate: '2026-02-30' },
+    { deliveryDate: '15-10-2026' },
+    { deliveryDate: '2026-10-15T00:00:00.000Z' },
+    { deliveryDate: 20261015 },
+    { deliveryDate: '1999-12-31' },
+    { deliveryDate: '2026-10-20', status: 'QC_VERIFIED' },
+  ])('refuses the Sales delivery date %j → 400', async (body) => {
+    for (const role of [UserRole.SALES_AGENT, UserRole.SALES_MANAGER]) {
+      const response = await send(
+        role,
+        'patch',
+        `${ORDER}/delivery-date`,
+        body,
+      );
+      expect(response.status).toBe(400);
+    }
+  });
+
   it('refuses a blank corrected AWB → 400', async () => {
     const response = await send(
       UserRole.LOGISTICS_MANAGER,
@@ -179,16 +205,13 @@ describe('Logistics write routes (e2e)', () => {
   /*
     The counts route sits beside `:id`. A search one character over the limit tells them apart
     without a query: only the counts route's DTO answers with the search rule, where `:id`
-    would refuse "summary" as an id. Every reader is admitted; Accounts is not.
+    would refuse "summary" as an id. Every role is a reader — Accounts too, its order scope
+    narrowing it to Delivered orders.
   */
   it.each(Object.values(UserRole))(
     'GET /summary as %s reaches the counts route, not :id',
     async (role) => {
       const response = await read(role, `/summary?search=${'a'.repeat(201)}`);
-      if (role === UserRole.ACCOUNTS_EXECUTIVE) {
-        expect(response.status).toBe(403);
-        return;
-      }
       expect(response.status).toBe(400);
       expect(JSON.stringify(response.body)).toContain(
         'search must be at most 200 characters',
@@ -197,8 +220,8 @@ describe('Logistics write routes (e2e)', () => {
   );
 
   /*
-    The delivery schedule sits beside `:id` too, and is told apart the same way. Every reader is
-    admitted; Accounts is not.
+    The delivery schedule sits beside `:id` too, and is told apart the same way. Every role is
+    admitted.
   */
   it.each(Object.values(UserRole))(
     'GET /delivery-schedule as %s reaches the schedule route, not :id',
@@ -207,10 +230,6 @@ describe('Logistics write routes (e2e)', () => {
         role,
         `/delivery-schedule?search=${'a'.repeat(201)}`,
       );
-      if (role === UserRole.ACCOUNTS_EXECUTIVE) {
-        expect(response.status).toBe(403);
-        return;
-      }
       expect(response.status).toBe(400);
       expect(JSON.stringify(response.body)).toContain(
         'search must be at most 200 characters',
@@ -237,6 +256,21 @@ describe('Logistics write routes (e2e)', () => {
       'a city longer than its column',
       `?city=${'a'.repeat(121)}`,
       'each city must be at most 120 characters',
+    ],
+    [
+      'a state longer than its column',
+      `?state=${'a'.repeat(121)}`,
+      'each state must be at most 120 characters',
+    ],
+    [
+      'a delivery partner longer than its column',
+      `?courier=${'a'.repeat(65)}`,
+      'each courier must be at most 64 characters',
+    ],
+    [
+      'a sales executive that is not a user id',
+      '?assignedAgent=not-a-uuid',
+      'each assignedAgent must be a user id',
     ],
     [
       'a delivery bucket that does not exist',

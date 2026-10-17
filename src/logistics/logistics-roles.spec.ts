@@ -7,6 +7,7 @@ import { RolesGuard } from '../auth/roles.guard';
 import { LogisticsOrdersController } from './logistics-orders.controller';
 import {
   ACTION_ROLES,
+  DELIVERY_DATE_ROLES,
   LOGISTICS_READ_ROLES,
   MANAGER_ROLES,
   OrderAction,
@@ -56,11 +57,36 @@ describe('the Logistics permission split', () => {
     ]);
   });
 
-  it('lets Sales and QC read, and keeps Accounts out until its own phase', () => {
+  it('lets the sales agent and the Sales Manager set the delivery date, not Customer Service, Marketing or Logistics (Phase 2D, P1)', () => {
+    expect([...DELIVERY_DATE_ROLES]).toEqual([
+      UserRole.SALES_AGENT,
+      UserRole.SALES_MANAGER,
+      UserRole.SUPERADMIN,
+    ]);
+    for (const role of [
+      UserRole.CUSTOMER_SERVICE_AGENT,
+      UserRole.MARKETING_ANALYST,
+      UserRole.LOGISTICS_MANAGER,
+      UserRole.LOGISTICS_EXECUTIVE,
+      UserRole.QC,
+      UserRole.ACCOUNTS_EXECUTIVE,
+    ]) {
+      expect(DELIVERY_DATE_ROLES).not.toContain(role);
+    }
+  });
+
+  it('lets Sales, QC and Accounts read', () => {
     expect(LOGISTICS_READ_ROLES).toContain(UserRole.SALES_AGENT);
     expect(LOGISTICS_READ_ROLES).toContain(UserRole.SALES_MANAGER);
     expect(LOGISTICS_READ_ROLES).toContain(UserRole.QC);
-    expect(LOGISTICS_READ_ROLES).not.toContain(UserRole.ACCOUNTS_EXECUTIVE);
+    expect(LOGISTICS_READ_ROLES).toContain(UserRole.ACCOUNTS_EXECUTIVE);
+  });
+
+  // The client's "Accounts: display logistics status with Delivered data only" — read-only.
+  it('names Accounts on no action, so every Logistics write refuses it', () => {
+    for (const roles of Object.values(ACTION_ROLES)) {
+      expect(roles).not.toContain(UserRole.ACCOUNTS_EXECUTIVE);
+    }
   });
 });
 
@@ -104,9 +130,9 @@ describe('logisticsOrderScopeWhere', () => {
     );
   });
 
-  it('matches nothing for a role with no Logistics business', () => {
+  it('gives Accounts the Delivered orders only', () => {
     expect(logisticsOrderScopeWhere(user(UserRole.ACCOUNTS_EXECUTIVE))).toEqual(
-      { id: { in: [] } },
+      { status: LogisticsStatus.DELIVERED },
     );
   });
 });
@@ -134,7 +160,14 @@ const BY_ROLE: Partial<
     [S.DISPATCHED]: ['DELIVER', 'CANCEL'],
     [S.RTO]: ['CANCEL'],
   },
-  [UserRole.SALES_MANAGER]: { [S.QC_REJECTED]: ['RESUBMIT'] },
+  [UserRole.SALES_MANAGER]: {
+    [S.INITIAL]: ['SET_DELIVERY_DATE'],
+    [S.QC_REJECTED]: ['RESUBMIT', 'SET_DELIVERY_DATE'],
+  },
+  [UserRole.SALES_AGENT]: {
+    [S.INITIAL]: ['SET_DELIVERY_DATE'],
+    [S.QC_REJECTED]: ['SET_DELIVERY_DATE'],
+  },
 };
 
 describe('allowedActions — by role and status', () => {
@@ -192,6 +225,15 @@ describe('allowedActions — never offers what the confirmed rules forbid', () =
     },
   );
 
+  // Phase 2D (P2): Sales' date is for the order QC has not verified yet; after that the
+  // Logistics Manager's edit owns it, and from dispatch nobody changes it.
+  it.each(except(S.INITIAL, S.QC_REJECTED))(
+    'offers no one the Sales delivery date from %s',
+    (status) => {
+      expect(offeredAnywhere('SET_DELIVERY_DATE', status)).toBe(false);
+    },
+  );
+
   // Q8: once cancelled, no further status. Delivered stays terminal too.
   it.each([S.CANCELLED, S.DELIVERED])(
     'offers no one a status move from %s',
@@ -222,6 +264,7 @@ describe('allowedActions — agrees with the routes that enforce them', () => {
     RTO: 'rto',
     EDIT: 'edit',
     CORRECT_AWB: 'correctAwb',
+    SET_DELIVERY_DATE: 'setDeliveryDate',
   };
 
   function routeAdmits(action: OrderAction, role: UserRole): boolean {
@@ -261,8 +304,9 @@ describe('allowedActions — agrees with the routes that enforce them', () => {
       }
     }
     // Not vacuous: QC 2×1 each for verify and reject, resubmit 2, dispatch 3, deliver 3,
-    // cancel 3 roles × 2 statuses, RTO 2, edit 2, AWB correction 2 roles × 4 statuses.
-    expect(offered).toBe(30);
+    // cancel 3 roles × 2 statuses, RTO 2, edit 2, AWB correction 2 roles × 4 statuses, and the
+    // Sales delivery date 3 roles × 2 statuses.
+    expect(offered).toBe(36);
   });
 
   it('gates every route by the one table', () => {
@@ -276,6 +320,7 @@ describe('allowedActions — agrees with the routes that enforce them', () => {
       RTO: MANAGER_ROLES,
       EDIT: MANAGER_ROLES,
       CORRECT_AWB: MANAGER_ROLES,
+      SET_DELIVERY_DATE: DELIVERY_DATE_ROLES,
     });
   });
 
@@ -292,7 +337,42 @@ describe('allowedActions — agrees with the routes that enforce them', () => {
     ['RESUBMIT', UserRole.SALES_MANAGER, true],
     ['RESUBMIT', UserRole.SALES_AGENT, false],
     ['QC_VERIFY', UserRole.LOGISTICS_MANAGER, false],
+    ['SET_DELIVERY_DATE', UserRole.SALES_AGENT, true],
+    ['SET_DELIVERY_DATE', UserRole.SALES_MANAGER, true],
+    ['SET_DELIVERY_DATE', UserRole.SUPERADMIN, true],
+    ['SET_DELIVERY_DATE', UserRole.CUSTOMER_SERVICE_AGENT, false],
+    ['SET_DELIVERY_DATE', UserRole.MARKETING_ANALYST, false],
+    ['SET_DELIVERY_DATE', UserRole.LOGISTICS_MANAGER, false],
+    ['SET_DELIVERY_DATE', UserRole.LOGISTICS_EXECUTIVE, false],
+    ['SET_DELIVERY_DATE', UserRole.QC, false],
+    ['SET_DELIVERY_DATE', UserRole.ACCOUNTS_EXECUTIVE, false],
   ] as const)('the %s route admits %s: %s', (action, role, admitted) => {
     expect(routeAdmits(action, role)).toBe(admitted);
+  });
+});
+
+/*
+  ADR-0093 B2: a sales agent sees the order of a lead assigned to them in a pipeline closed to
+  them, but may not change it — the service answers the date action with a 403 — so it is not
+  offered there. Nothing else on the list depends on the lead's pipeline.
+*/
+describe('allowedActions — a lead in a pipeline closed to the caller', () => {
+  it('drops the Sales delivery date and nothing else', () => {
+    for (const role of ALL_ROLES) {
+      for (const status of ALL_STATUSES) {
+        expect(allowedActions(status, role, true)).toEqual(
+          allowedActions(status, role).filter(
+            (action) => action !== 'SET_DELIVERY_DATE',
+          ),
+        );
+      }
+    }
+  });
+
+  it('leaves a view-only sales agent no action, and a Sales Manager their resubmit', () => {
+    expect(allowedActions(S.INITIAL, UserRole.SALES_AGENT, true)).toEqual([]);
+    expect(allowedActions(S.QC_REJECTED, UserRole.SALES_MANAGER, true)).toEqual(
+      ['RESUBMIT'],
+    );
   });
 });

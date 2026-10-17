@@ -97,8 +97,11 @@ export const TERMINAL_STATUSES: readonly LogisticsStatus[] = [
  *   "After dispatch" is read literally: every status an order can only have reached through
  *   DISPATCHED. That reading is provisional, pending open client question Q16 (only while
  *   DISPATCHED, or after Delivered / RTO / Cancelled too?); the answer changes this list only.
+ * - SET_DELIVERY_DATE (Phase 2D, ADR-0094): Sales sets or clears the requested delivery day
+ *   until QC verifies the order. From QC_VERIFIED the Logistics Manager's EDIT owns the date, and
+ *   from dispatch nobody changes it. Provisional default P2, pending open client question D4.
  */
-export type OrderEdit = 'EDIT' | 'CORRECT_AWB';
+export type OrderEdit = 'EDIT' | 'CORRECT_AWB' | 'SET_DELIVERY_DATE';
 
 export const ORDER_EDIT_STATUSES: Readonly<
   Record<OrderEdit, readonly LogisticsStatus[]>
@@ -110,6 +113,7 @@ export const ORDER_EDIT_STATUSES: Readonly<
     LogisticsStatus.RTO,
     LogisticsStatus.CANCELLED,
   ],
+  SET_DELIVERY_DATE: [LogisticsStatus.INITIAL, LogisticsStatus.QC_REJECTED],
 };
 
 /**

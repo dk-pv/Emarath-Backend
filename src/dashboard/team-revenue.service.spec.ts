@@ -20,6 +20,7 @@ interface Options {
   assignments?: number;
   calls?: number;
   role?: UserRole;
+  team?: string | null;
 }
 
 function makeService(options: Options = {}) {
@@ -29,6 +30,7 @@ function makeService(options: Options = {}) {
     assignments = 20,
     calls = 37,
     role = UserRole.SUPERADMIN,
+    team = null,
   } = options;
 
   const assignmentCount = jest.fn().mockResolvedValue(assignments);
@@ -48,7 +50,7 @@ function makeService(options: Options = {}) {
   } as unknown as PrismaService;
 
   const currentUser = {
-    resolve: jest.fn().mockResolvedValue({ id: USER_ID, role }),
+    resolve: jest.fn().mockResolvedValue({ id: USER_ID, role, team }),
   } as unknown as CurrentUserService;
 
   return {
@@ -188,19 +190,33 @@ describe('TeamRevenueService.getTeamRevenue — the figures', () => {
   });
 
   /*
-    Current behaviour, pinned because it surprises: the target is organisation-wide even
-    for a sales agent, whose numerator is their own leads only — the percentage is not a
-    like-for-like ratio for that caller.
+    The target is the goals of the members whose leads the numerator counts (fixed 2026-10-17:
+    it used to be every active member's, whoever asked, so an agent's own revenue was measured
+    against the whole organisation's goal).
   */
-  it('takes the target from every active member, whoever is asking', async () => {
-    const { service, userAggregate } = makeService({
-      role: UserRole.SALES_AGENT,
-    });
+  const ACTIVE = { deletedAt: null, isActive: true };
+  it.each([
+    { role: UserRole.SUPERADMIN, team: null, where: ACTIVE },
+    { role: UserRole.CUSTOMER_SERVICE_AGENT, team: null, where: ACTIVE },
+    { role: UserRole.MARKETING_ANALYST, team: null, where: ACTIVE },
+    {
+      role: UserRole.SALES_MANAGER,
+      team: 'Dubai',
+      where: { ...ACTIVE, team: 'Dubai' },
+    },
+    { role: UserRole.SALES_MANAGER, team: null, where: { id: USER_ID } },
+    { role: UserRole.SALES_AGENT, team: 'Dubai', where: { id: USER_ID } },
+    { role: UserRole.LOGISTICS_MANAGER, team: null, where: { id: { in: [] } } },
+  ])(
+    'takes the target from the members $role (team $team) can see',
+    async ({ role, team, where }) => {
+      const { service, userAggregate } = makeService({ role, team });
 
-    await service.getTeamRevenue(PERIOD);
+      await service.getTeamRevenue(PERIOD);
 
-    expect(whereOf(userAggregate)).toEqual({ deletedAt: null, isActive: true });
-  });
+      expect(whereOf(userAggregate)).toEqual(where);
+    },
+  );
 
   it('keeps a one-sided period one-sided, on whichever bound was given', async () => {
     const open = makeService();

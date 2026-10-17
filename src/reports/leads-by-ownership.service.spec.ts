@@ -19,7 +19,8 @@ type MetricKey =
   | 'contactedCount'
   | 'noActivityCount'
   | 'convertedCount'
-  | 'lostCount';
+  | 'lostCount'
+  | 'ordersCount';
 
 type Counts = Record<MetricKey, number>;
 const counts = (over: Partial<Counts> = {}): Counts => ({
@@ -28,6 +29,7 @@ const counts = (over: Partial<Counts> = {}): Counts => ({
   noActivityCount: 0,
   convertedCount: 0,
   lostCount: 0,
+  ordersCount: 0,
   ...over,
 });
 
@@ -43,17 +45,19 @@ function readWhere(where: unknown): {
   return {
     // Only the Unassigned bucket ANDs an empty `none` — noEngagementWhere's are filled.
     unassigned: json.includes('"assignments":{"none":{}}'),
-    metric: json.includes('"status":"New"')
-      ? 'newCount'
-      : json.includes('"status":"WON"')
-        ? 'convertedCount'
-        : json.includes('"status":"LOST"')
-          ? 'lostCount'
-          : json.includes('"outcome":"ANSWERED"')
-            ? 'contactedCount'
-            : json.includes('"activities":{"none"')
-              ? 'noActivityCount'
-              : null,
+    metric: json.includes('"logisticsOrder":{"isNot":null}')
+      ? 'ordersCount'
+      : json.includes('"status":"New"')
+        ? 'newCount'
+        : json.includes('"status":"WON"')
+          ? 'convertedCount'
+          : json.includes('"status":"LOST"')
+            ? 'lostCount'
+            : json.includes('"outcome":"ANSWERED"')
+              ? 'contactedCount'
+              : json.includes('"activities":{"none"')
+                ? 'noActivityCount'
+                : null,
   };
 }
 
@@ -66,9 +70,23 @@ interface Options {
   unassigned?: number;
   unassignedMetrics?: Counts;
   unassignedValue?: Prisma.Decimal | null;
-  /** The per-assignment amounts the service sums in-app. */
-  values?: { userId: string; lead: { actualAmount: Prisma.Decimal | null } }[];
-  names?: { id: string; name: string }[];
+  /** The per-assignment amounts (and the lead's stage) the service sums in-app. */
+  values?: {
+    userId: string;
+    lead: { actualAmount: Prisma.Decimal | null; status?: string };
+  }[];
+  names?: {
+    id: string;
+    name: string;
+    team?: string | null;
+    monthlyGoalAmount?: Prisma.Decimal | null;
+  }[];
+  /** Σ monthly goals per team, as `user.groupBy` returns them. */
+  teamGoals?: {
+    team: string;
+    _sum: { monthlyGoalAmount: Prisma.Decimal | null };
+  }[];
+  agentGoal?: Prisma.Decimal | null;
   agentMetrics?: Counts;
   role?: UserRole;
 }
@@ -83,6 +101,7 @@ function makeService(options: Options = {}) {
       noActivityCount: [group(A, 1)],
       convertedCount: [group(A, 3), group(B, 1)],
       lostCount: [group(B, 2)],
+      ordersCount: [group(A, 4)],
     },
     unassigned = 2,
     unassignedMetrics = counts({ newCount: 2, convertedCount: 1 }),
@@ -96,6 +115,8 @@ function makeService(options: Options = {}) {
       { id: A, name: 'Ansar' },
       { id: B, name: 'Beth' },
     ],
+    teamGoals = [],
+    agentGoal = null,
     agentMetrics = counts({ convertedCount: 3 }),
     role = UserRole.SUPERADMIN,
   } = options;
@@ -114,17 +135,22 @@ function makeService(options: Options = {}) {
       );
     return Promise.resolve(read.unassigned ? unassigned : total);
   });
-  const aggregate = jest.fn((args: { where: unknown }) =>
-    Promise.resolve({
+  const aggregate = jest.fn((args: { where: unknown }) => {
+    const read = readWhere(args.where);
+    return Promise.resolve({
       _sum: {
-        actualAmount: readWhere(args.where).unassigned
+        actualAmount: read.unassigned
           ? unassignedValue
-          : dec('9999'),
+          : // An agent's WON leads hold 4000 of their 9999.
+            read.metric === 'convertedCount'
+            ? dec('4000')
+            : dec('9999'),
       },
-    }),
-  );
+    });
+  });
 
   const findMany = jest.fn().mockResolvedValue([]);
+  const userGroupBy = jest.fn().mockResolvedValue(teamGoals);
   const prisma = {
     lead: { count, aggregate, findMany },
     leadAssignment: {
@@ -133,9 +159,12 @@ function makeService(options: Options = {}) {
     },
     user: {
       findMany: jest.fn().mockResolvedValue(names),
-      findUnique: jest
-        .fn()
-        .mockResolvedValue({ id: AGENT_ID, name: 'Agent Zero' }),
+      findUnique: jest.fn().mockResolvedValue({
+        id: AGENT_ID,
+        name: 'Agent Zero',
+        monthlyGoalAmount: agentGoal,
+      }),
+      groupBy: userGroupBy,
     },
     stage: { findMany: jest.fn().mockResolvedValue([]) },
     $transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
@@ -150,6 +179,7 @@ function makeService(options: Options = {}) {
     groupBy,
     count,
     findMany,
+    userGroupBy,
   };
 }
 
@@ -221,7 +251,7 @@ describe('LeadsByOwnershipReportService.summary — the metrics', () => {
     expect(rows[1].conversionRatio).toBeCloseTo((1 / 5) * 100, 10);
   });
 
-  it('leaves qualifiedRatio and targetAchievement null — neither exists in Emarath', async () => {
+  it('leaves qualifiedRatio null — no qualification exists in Emarath — and targetAchievement null without a goal', async () => {
     const { service } = makeService();
 
     const { rows } = await service.summary(query());
@@ -341,6 +371,7 @@ describe('LeadsByOwnershipReportService — the shared filters', () => {
     await expect(service.summary(query())).resolves.toEqual({
       rows: [],
       total: 0,
+      teams: [],
     });
   });
 
@@ -384,6 +415,119 @@ describe('LeadsByOwnershipReportService.summary — a sales agent', () => {
     await expect(service.summary(query())).resolves.toEqual({
       rows: [],
       total: 0,
+      teams: [],
     });
+  });
+
+  it('measures their target from their own WON leads against their monthly goal, with no team subtotals', async () => {
+    const { service } = makeService({
+      role: UserRole.SALES_AGENT,
+      agentGoal: dec('8000'),
+    });
+
+    const { rows, teams } = await service.summary(query());
+
+    // 4000 of WON value against an 8000 goal.
+    expect(rows[0].targetAchievement).toBe(50);
+    expect(teams).toEqual([]);
+  });
+});
+
+/*
+  Orders, target achievement and team subtotals (2026-10-17 sprint). Orders counts the report's
+  leads that have a Logistics order; the target is WON value against the owner's monthly goal;
+  a team's subtotal adds up its owners' rows and measures them against its members' goals.
+*/
+describe('LeadsByOwnershipReportService.summary — orders, targets and teams', () => {
+  const owners = [
+    {
+      id: A,
+      name: 'Ansar',
+      team: 'Alpha',
+      monthlyGoalAmount: dec('3000'),
+    },
+    { id: B, name: 'Beth', team: null, monthlyGoalAmount: dec('0') },
+  ];
+  const values = [
+    { userId: A, lead: { actualAmount: dec('1500.50'), status: 'WON' } },
+    { userId: A, lead: { actualAmount: dec('700'), status: 'New' } },
+    { userId: B, lead: { actualAmount: dec('2000'), status: 'WON' } },
+  ];
+
+  it('counts each owner’s leads that have a Logistics order, the Unassigned bucket’s too', async () => {
+    const { service, groupBy } = makeService({
+      unassignedMetrics: counts({ ordersCount: 1 }),
+    });
+
+    const { rows } = await service.summary(query());
+
+    expect(
+      wheres(groupBy).some((json) =>
+        json.includes('"logisticsOrder":{"isNot":null}'),
+      ),
+    ).toBe(true);
+    expect(rows.map((row) => [row.ownerName, row.ordersCount])).toEqual([
+      ['Ansar', 4],
+      ['Beth', 0],
+      ['Unassigned', 1],
+    ]);
+  });
+
+  it('gives an owner with a goal their WON value as a percentage of it, and no target to a zero goal, a missing one or Unassigned', async () => {
+    const { service } = makeService({ names: owners, values });
+
+    const { rows } = await service.summary(query());
+
+    // 1500.50 of WON value (the 700 New lead is not converted) against 3000, to 2 places.
+    expect(rows[0]).toMatchObject({
+      ownerName: 'Ansar',
+      targetAchievement: 50.02,
+    });
+    expect(rows[1]).toMatchObject({
+      ownerName: 'Beth',
+      targetAchievement: null,
+    });
+    expect(rows[2]).toMatchObject({
+      ownerName: 'Unassigned',
+      targetAchievement: null,
+    });
+    // The lead value still counts every lead, converted or not.
+    expect(rows[0].leadValue).toBe('2200.5');
+  });
+
+  it('subtotals the owner rows per team — no-team owners last, Unassigned left out — against each team’s members’ goals', async () => {
+    const { service, userGroupBy } = makeService({
+      names: owners,
+      values,
+      teamGoals: [{ team: 'Alpha', _sum: { monthlyGoalAmount: dec('6000') } }],
+    });
+
+    const { teams } = await service.summary(query());
+
+    expect(userGroupBy).toHaveBeenCalledWith({
+      by: ['team'],
+      where: { team: { in: ['Alpha'] }, deletedAt: null, isActive: true },
+      _sum: { monthlyGoalAmount: true },
+    });
+    expect(teams).toEqual([
+      expect.objectContaining({
+        team: 'Alpha',
+        owners: 1,
+        count: 7,
+        convertedCount: 3,
+        ordersCount: 4,
+        leadValue: '2200.5',
+        // 1500.50 of WON value against the team's 6000.
+        targetAchievement: 25.01,
+      }),
+      expect.objectContaining({
+        team: null,
+        owners: 1,
+        count: 5,
+        convertedCount: 1,
+        targetAchievement: null,
+      }),
+    ]);
+    expect(teams[0].conversionRatio).toBeCloseTo((3 / 7) * 100, 10);
   });
 });

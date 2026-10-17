@@ -39,17 +39,15 @@ describe('Audit journey (e2e)', () => {
     means the guard refused the role, 400 means it admitted the role and the pipe then refused
     the id — before the service, so no query ever ran with it.
   */
-  it.each(
-    Object.values(UserRole).map(
-      (role) =>
-        [role, role === UserRole.ACCOUNTS_EXECUTIVE ? 403 : 400] as const,
-    ),
-  )('%s gets %i for a malformed leadId', async (role, status) => {
-    await request(app.getHttpServer())
-      .get('/api/audit/events?leadId=not-a-uuid')
-      .set('Cookie', await cookieFor(role))
-      .expect(status);
-  });
+  it.each(Object.values(UserRole))(
+    '%s gets 400 for a malformed leadId',
+    async (role) => {
+      await request(app.getHttpServer())
+        .get('/api/audit/events?leadId=not-a-uuid')
+        .set('Cookie', await cookieFor(role))
+        .expect(400);
+    },
+  );
 
   it('refuses a read with no leadId', async () => {
     await request(app.getHttpServer())

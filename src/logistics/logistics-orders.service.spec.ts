@@ -1,4 +1,9 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
@@ -19,6 +24,7 @@ import {
   OrderReasonDto,
   QcDecisionDto,
   QcRejectDto,
+  SetDeliveryDateDto,
   UpdateLogisticsOrderDto,
 } from './dto/logistics-order.dto';
 
@@ -44,6 +50,10 @@ interface Options {
   deliveryDate?: Date;
   /** BUSINESS_TIME_ZONE; Asia/Dubai when not given. */
   timeZone?: string;
+  /** The pipelines closed to the caller (ADR-0093), as `CurrentUserService` attaches them. */
+  deniedPipelines?: string[];
+  /** The lead's pipeline; Lead Pipeline when not given. */
+  leadPipeline?: string;
 }
 
 /**
@@ -126,10 +136,18 @@ function makeService(options: Options = {}) {
       );
     },
   );
+  const leadPipeline = options.leadPipeline ?? 'Lead Pipeline';
   // The lead's audit row, built from the lead as it stands, so the change core's before/after
-  // reads differ exactly when the write-back moved it.
-  const leadFindMany = jest.fn(() =>
-    Promise.resolve([
+  // reads differ exactly when the write-back moved it. Asked which leads sit in some pipelines
+  // — the closed-pipeline check — it answers for this lead's own.
+  const leadFindMany = jest.fn((args?: { where?: { pipeline?: unknown } }) => {
+    const pipeline = args?.where?.pipeline as { in: string[] } | undefined;
+    if (pipeline) {
+      return Promise.resolve(
+        pipeline.in.includes(leadPipeline) ? [{ id: LEAD }] : [],
+      );
+    }
+    return Promise.resolve([
       {
         id: LEAD,
         name: 'Acme Trading',
@@ -142,7 +160,7 @@ function makeService(options: Options = {}) {
         source: null,
         status: lead.status,
         lostReason: null,
-        pipeline: 'Lead Pipeline',
+        pipeline: leadPipeline,
         product: null,
         productQty: null,
         product2: null,
@@ -165,15 +183,15 @@ function makeService(options: Options = {}) {
         customFieldValues: [],
         complaints: [],
       },
-    ]),
-  );
+    ]);
+  });
   const leadUpdate = jest.fn((args: { data: { status: string } }) => {
     lead.status = args.data.status;
     return Promise.resolve({ id: LEAD });
   });
   const leadFindUnique = jest
     .fn()
-    .mockResolvedValue({ pipeline: 'Lead Pipeline' });
+    .mockResolvedValue({ pipeline: leadPipeline });
   const stageFindUnique = jest.fn(
     (args: { where: { pipeline_name: { name: string } } }) =>
       Promise.resolve(
@@ -203,6 +221,7 @@ function makeService(options: Options = {}) {
     lead: {
       findMany: leadFindMany,
       findUnique: leadFindUnique,
+      findUniqueOrThrow: leadFindUnique,
       update: leadUpdate,
     },
     stage: { findUnique: stageFindUnique },
@@ -212,6 +231,7 @@ function makeService(options: Options = {}) {
   const listCount = jest.fn().mockResolvedValue(1);
   const findFirst = jest.fn().mockResolvedValue({ ...order });
   const groupBy = jest.fn().mockResolvedValue([]);
+  const userFindMany = jest.fn().mockResolvedValue([]);
   const prisma = {
     $transaction: jest.fn(
       (arg: ((client: typeof tx) => Promise<unknown>) | Promise<unknown>[]) =>
@@ -223,6 +243,8 @@ function makeService(options: Options = {}) {
       findFirst,
       groupBy,
     },
+    lead: { findMany: leadFindMany },
+    user: { findMany: userFindMany },
   } as unknown as PrismaService;
 
   // The business timezone, as configuration.ts reads it from BUSINESS_TIME_ZONE.
@@ -230,21 +252,27 @@ function makeService(options: Options = {}) {
     getOrThrow: () => ({ businessTimeZone: options.timeZone ?? 'Asia/Dubai' }),
   } as unknown as ConfigService;
 
-  const currentUser = {
-    resolve: jest.fn().mockResolvedValue({
+  const resolve = jest.fn();
+  /** Who the next calls come from — one order, worked by several roles in turn. */
+  const as = (role: UserRole) =>
+    resolve.mockResolvedValue({
       id: USER,
-      role: options.role ?? UserRole.LOGISTICS_MANAGER,
+      role,
       team: options.team ?? null,
-    }),
-  } as unknown as CurrentUserService;
+      deniedPipelines: options.deniedPipelines,
+    });
+  as(options.role ?? UserRole.LOGISTICS_MANAGER);
+  const currentUser = { resolve } as unknown as CurrentUserService;
 
   return {
     service: new LogisticsOrdersService(prisma, currentUser, config),
+    as,
     order,
     lead,
     orderUpdateMany,
     orderUpdate,
     orderFindFirst,
+    leadFindMany,
     leadUpdate,
     auditCreateMany,
     createManyAndReturn,
@@ -253,6 +281,7 @@ function makeService(options: Options = {}) {
     listCount,
     findFirst,
     groupBy,
+    userFindMany,
     stageFindUnique,
   };
 }
@@ -1336,7 +1365,7 @@ describe('LogisticsOrdersService — reading', () => {
     },
   );
 
-  it('narrows by any of the chosen statuses, countries and cities — each filter one more AND term', async () => {
+  it('narrows by any of the chosen statuses, countries, cities, areas, delivery partners and sales executives — each filter one more AND term', async () => {
     const { service, listFindMany } = makeService();
 
     await service.list(
@@ -1344,6 +1373,9 @@ describe('LogisticsOrdersService — reading', () => {
         status: [LogisticsStatus.DISPATCHED, LogisticsStatus.RTO],
         country: ['United Arab Emirates', 'Oman'],
         city: ['Dubai'],
+        state: ['Dubai', 'Sharjah'],
+        courier: ['Aramex'],
+        assignedAgent: [USER],
       }),
     );
 
@@ -1358,7 +1390,37 @@ describe('LogisticsOrdersService — reading', () => {
       {},
       {},
       {},
+      { state: { in: ['Dubai', 'Sharjah'] } },
+      { courier: { in: ['Aramex'] } },
+      // The lead's current assignees — the Leads list's own `assignedAgent` relation.
+      { lead: { assignments: { some: { userId: { in: [USER] } } } } },
     ]);
+  });
+
+  it('applies the area, delivery partner and sales executive filters to the counts and the schedule as to the list', async () => {
+    const { service, listFindMany, groupBy } = makeService();
+    const filters = {
+      state: ['Dubai'],
+      courier: ['Aramex'],
+      assignedAgent: [USER],
+    };
+
+    await service.list(query(filters));
+    await service.summary(filters);
+    await service.deliverySchedule(filters);
+
+    const [listArgs] = listFindMany.mock.calls[0] as [
+      { where: { AND: unknown[] } },
+    ];
+    const [summaryArgs] = groupBy.mock.calls[0] as [
+      { where: { AND: unknown[] } },
+    ];
+    const [scheduleArgs] = groupBy.mock.calls[1] as [
+      { where: { AND: [{ AND: unknown[] }, unknown] } },
+    ];
+    const tail = listArgs.where.AND.slice(-3);
+    expect(summaryArgs.where.AND.slice(-3)).toEqual(tail);
+    expect(scheduleArgs.where.AND[0].AND.slice(-3)).toEqual(tail);
   });
 
   it('keeps a sales agent’s scope beside the filters, so they can only narrow it', async () => {
@@ -1526,17 +1588,36 @@ describe('LogisticsOrdersService — the counts', () => {
     expect(columnArgs.where).toEqual(countArgs.where);
   });
 
-  it('counts nothing for a role with no Logistics business', async () => {
-    const { service, groupBy } = makeService({
+  it('counts only the Delivered orders for Accounts', async () => {
+    const { service, groupBy, listFindMany } = makeService({
       role: UserRole.ACCOUNTS_EXECUTIVE,
     });
 
     await service.summary({});
+    await service.list(query({ status: [LogisticsStatus.INITIAL] }));
 
     const [countArgs] = groupBy.mock.calls[0] as [
       { where: { AND: unknown[] } },
     ];
-    expect(countArgs.where.AND[0]).toEqual({ id: { in: [] } });
+    expect(countArgs.where.AND[0]).toEqual({ status: 'DELIVERED' });
+    // A status filter can only narrow that scope: QC Pending under it matches nothing.
+    const [listArgs] = listFindMany.mock.calls[0] as [
+      { where: { AND: unknown[] } },
+    ];
+    expect(listArgs.where.AND.slice(0, 2)).toEqual([
+      { status: 'DELIVERED' },
+      { status: { in: ['INITIAL'] } },
+    ]);
+  });
+
+  it('gives Accounts no action on a Delivered order: read-only', async () => {
+    const { service } = makeService({
+      role: UserRole.ACCOUNTS_EXECUTIVE,
+      status: LogisticsStatus.DELIVERED,
+    });
+
+    expect((await service.get(ORDER)).allowedActions).toEqual([]);
+    expect((await service.list(query())).rows[0].allowedActions).toEqual([]);
   });
 });
 
@@ -1545,45 +1626,99 @@ describe('LogisticsOrdersService — the counts', () => {
   orders outside their scope carry — and the whole scope, so choosing one value hides no other.
 */
 describe('LogisticsOrdersService — the filter’s choices', () => {
-  it('offers each country and city once, in name order, blanks left out', async () => {
+  it('offers each country, city, state and courier once, in name order, blanks left out', async () => {
     const { service, groupBy } = makeService();
     groupBy.mockResolvedValue([
-      { country: 'United Arab Emirates', city: 'Dubai' },
-      { country: 'United Arab Emirates', city: 'Abu Dhabi' },
-      { country: 'Oman', city: null },
-      { country: null, city: 'Dubai' },
-      { country: ' ', city: '' },
+      {
+        country: 'United Arab Emirates',
+        city: 'Dubai',
+        state: 'Dubai',
+        courier: 'Aramex',
+      },
+      {
+        country: 'United Arab Emirates',
+        city: 'Abu Dhabi',
+        state: 'Abu Dhabi',
+        courier: null,
+      },
+      { country: 'Oman', city: null, state: null, courier: 'DHL' },
+      { country: null, city: 'Dubai', state: 'Dubai', courier: 'Aramex' },
+      { country: ' ', city: '', state: ' ', courier: '' },
     ]);
 
     expect(await service.filterOptions()).toEqual({
       countries: ['Oman', 'United Arab Emirates'],
       cities: ['Abu Dhabi', 'Dubai'],
+      states: ['Abu Dhabi', 'Dubai'],
+      couriers: ['Aramex', 'DHL'],
+      assignees: [],
     });
     expect(groupBy).toHaveBeenCalledWith({
-      by: ['country', 'city'],
+      by: ['country', 'city', 'state', 'courier'],
       where: {},
     });
   });
 
-  it('reads a sales agent’s choices from their own leads’ orders only', async () => {
-    const { service, groupBy } = makeService({ role: UserRole.SALES_AGENT });
+  it('offers as sales executives the users the orders’ leads are assigned to now, by name', async () => {
+    const { service, userFindMany } = makeService({
+      role: UserRole.SALES_MANAGER,
+      team: 'Sales A',
+    });
+    userFindMany.mockResolvedValue([{ id: USER, name: 'Aisha' }]);
+
+    expect((await service.filterOptions()).assignees).toEqual([
+      { id: USER, name: 'Aisha' },
+    ]);
+    expect(userFindMany).toHaveBeenCalledWith({
+      where: {
+        assignments: {
+          some: {
+            lead: {
+              logisticsOrder: {
+                is: {
+                  lead: {
+                    deletedAt: null,
+                    assignments: { some: { user: { team: 'Sales A' } } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      select: { id: true, name: true },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+    });
+  });
+
+  it('reads a sales agent’s choices from their own leads’ orders only, and offers them only themselves', async () => {
+    const { service, groupBy, userFindMany } = makeService({
+      role: UserRole.SALES_AGENT,
+    });
 
     await service.filterOptions();
 
     const [args] = groupBy.mock.calls[0] as [{ where: unknown }];
     expect(JSON.stringify(args.where)).toContain(`"userId":"${USER}"`);
     expect(JSON.stringify(args.where)).toContain('"deletedAt":null');
+    const [assignees] = userFindMany.mock.calls[0] as [
+      { where: { id?: string } },
+    ];
+    expect(assignees.where.id).toBe(USER);
   });
 
-  it('offers a role with no Logistics business nothing', async () => {
-    const { service, groupBy } = makeService({
+  it('offers Accounts the choices of the Delivered orders only', async () => {
+    const { service, groupBy, userFindMany } = makeService({
       role: UserRole.ACCOUNTS_EXECUTIVE,
     });
 
     await service.filterOptions();
 
     const [args] = groupBy.mock.calls[0] as [{ where: unknown }];
-    expect(args.where).toEqual({ id: { in: [] } });
+    expect(args.where).toEqual({ status: 'DELIVERED' });
+    expect(JSON.stringify(userFindMany.mock.calls[0])).toContain(
+      '"is":{"status":"DELIVERED"}',
+    );
   });
 });
 
@@ -1677,6 +1812,9 @@ describe('LogisticsOrdersService — delivery dates', () => {
       {},
       {},
       { OR: [{ deliveryDate: day('2026-10-16') }] },
+      {},
+      {},
+      {},
     ]);
   });
 
@@ -1988,6 +2126,547 @@ describe('LogisticsOrdersService — delivery dates', () => {
 });
 
 /*
+  Phase 2D (ADR-0094): Sales sets or clears the delivery date the customer asked for until QC
+  verifies the order. The provisional defaults it rests on — who (P1), until when (P2), never a
+  past day (P4), in the business timezone (P5) — are each pinned here.
+*/
+describe('LogisticsOrdersService — the Sales delivery date (Phase 2D)', () => {
+  // 20:30 UTC on 14 Oct: already the 15th in Dubai and Muscat (UTC+4), still the 14th in Riyadh.
+  beforeEach(() => {
+    jest.useFakeTimers({
+      doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'],
+    });
+    jest.setSystemTime(new Date('2026-10-14T20:30:00.000Z'));
+  });
+  afterEach(() => jest.useRealTimers());
+
+  const day = (ymd: string) => new Date(`${ymd}T00:00:00.000Z`);
+  const set = (deliveryDate: string | null): SetDeliveryDateDto => ({
+    deliveryDate,
+  });
+
+  it.each([
+    [UserRole.SALES_AGENT, LogisticsStatus.INITIAL],
+    [UserRole.SALES_AGENT, LogisticsStatus.QC_REJECTED],
+    [UserRole.SALES_MANAGER, LogisticsStatus.INITIAL],
+    [UserRole.SALES_MANAGER, LogisticsStatus.QC_REJECTED],
+    [UserRole.SUPERADMIN, LogisticsStatus.INITIAL],
+    [UserRole.SUPERADMIN, LogisticsStatus.QC_REJECTED],
+  ])(
+    'lets a %s set the date of a %s order, audited before and after, and nothing else changes',
+    async (role, status) => {
+      const {
+        service,
+        order,
+        orderUpdate,
+        orderUpdateMany,
+        leadUpdate,
+        auditCreateMany,
+      } = makeService({ role, status });
+
+      const result = await service.setDeliveryDate(ORDER, set('2026-10-20'));
+
+      expect(orderUpdate).toHaveBeenCalledWith({
+        where: { id: ORDER },
+        data: { deliveryDate: day('2026-10-20') },
+      });
+      expect(result.deliveryDate).toBe('2026-10-20');
+      expect(result.deliveryBucket).toBe('future');
+      // The date is the only write: the status never moves and the lead is not touched.
+      expect(order.status).toBe(status);
+      expect(result.status).toBe(status);
+      expect(orderUpdateMany).not.toHaveBeenCalled();
+      expect(leadUpdate).not.toHaveBeenCalled();
+      expect(events(auditCreateMany)).toEqual([
+        expect.objectContaining({
+          entityType: 'LOGISTICS_ORDER',
+          entityId: ORDER,
+          leadId: LEAD,
+          action: 'UPDATED',
+          actorType: 'USER',
+          actorId: USER,
+          source: 'logistics.delivery_date',
+          before: { deliveryDate: null },
+          after: { deliveryDate: '2026-10-20' },
+        }),
+      ]);
+    },
+  );
+
+  it('changes a date it already has, recording the day it replaced', async () => {
+    const { service, auditCreateMany } = makeService({
+      role: UserRole.SALES_AGENT,
+      deliveryDate: day('2026-10-18'),
+    });
+
+    const result = await service.setDeliveryDate(ORDER, set('2026-10-22'));
+
+    expect(result.deliveryDate).toBe('2026-10-22');
+    expect(events(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        before: { deliveryDate: '2026-10-18' },
+        after: { deliveryDate: '2026-10-22' },
+      }),
+    ]);
+  });
+
+  it('clears the date with null, so the order is undated again', async () => {
+    const { service, orderUpdate, auditCreateMany } = makeService({
+      role: UserRole.SALES_MANAGER,
+      deliveryDate: day('2026-10-18'),
+    });
+
+    const result = await service.setDeliveryDate(ORDER, set(null));
+
+    expect(orderUpdate).toHaveBeenCalledWith({
+      where: { id: ORDER },
+      data: { deliveryDate: null },
+    });
+    expect(result.deliveryDate).toBeNull();
+    expect(result.deliveryBucket).toBe('none');
+    expect(events(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        before: { deliveryDate: '2026-10-18' },
+        after: { deliveryDate: null },
+      }),
+    ]);
+  });
+
+  it.each([
+    ['the date it has', '2026-10-18', day('2026-10-18')],
+    ['a clear of an undated order', null, undefined],
+  ])(
+    'writes nothing and records nothing for %s',
+    async (_label, value, stored) => {
+      const { service, orderUpdate, auditCreateMany } = makeService({
+        role: UserRole.SALES_AGENT,
+        deliveryDate: stored,
+      });
+
+      const result = await service.setDeliveryDate(ORDER, set(value));
+
+      expect(result.deliveryDate).toBe(value);
+      expect(orderUpdate).not.toHaveBeenCalled();
+      expect(events(auditCreateMany)).toEqual([]);
+    },
+  );
+
+  it('refuses a day before the business day’s today with a 400, and accepts today itself (P4)', async () => {
+    const past = makeService({ role: UserRole.SALES_AGENT });
+    const attempt = past.service.setDeliveryDate(ORDER, set('2026-10-14'));
+    await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+    await expect(attempt).rejects.toThrow(
+      'The delivery date can’t be before today, 15-10-2026 (Asia/Dubai).',
+    );
+    expect(past.orderUpdate).not.toHaveBeenCalled();
+    expect(events(past.auditCreateMany)).toEqual([]);
+
+    const today = makeService({ role: UserRole.SALES_AGENT });
+    await expect(
+      today.service.setDeliveryDate(ORDER, set('2026-10-15')),
+    ).resolves.toMatchObject({
+      deliveryDate: '2026-10-15',
+      deliveryBucket: 'today',
+    });
+  });
+
+  it.each([
+    ['Asia/Dubai', false],
+    ['Asia/Muscat', false],
+    ['Asia/Riyadh', true],
+  ])(
+    'at 20:30 UTC on 14 Oct, under %s, the 14th is still a day Sales may choose: %s (P5)',
+    async (timeZone, accepted) => {
+      const { service, orderUpdate } = makeService({
+        role: UserRole.SALES_AGENT,
+        timeZone,
+      });
+
+      const attempt = service.setDeliveryDate(ORDER, set('2026-10-14'));
+
+      if (accepted) {
+        await expect(attempt).resolves.toMatchObject({
+          deliveryDate: '2026-10-14',
+          deliveryBucket: 'today',
+        });
+      } else {
+        await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+        expect(orderUpdate).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it.each([
+    LogisticsStatus.QC_VERIFIED,
+    LogisticsStatus.DISPATCHED,
+    LogisticsStatus.DELIVERED,
+    LogisticsStatus.CANCELLED,
+    LogisticsStatus.RTO,
+  ])(
+    'refuses the date of a %s order with a 409 naming its status, whoever asks (P2)',
+    async (status) => {
+      for (const role of [
+        UserRole.SALES_AGENT,
+        UserRole.SALES_MANAGER,
+        UserRole.SUPERADMIN,
+      ]) {
+        const { service, orderUpdate, auditCreateMany } = makeService({
+          role,
+          status,
+        });
+
+        const attempt = service.setDeliveryDate(ORDER, set('2026-10-20'));
+
+        await expect(attempt).rejects.toBeInstanceOf(ConflictException);
+        await expect(attempt).rejects.toThrow(
+          `This order is ${status}; its delivery date can only be set while INITIAL or QC_REJECTED.`,
+        );
+        expect(orderUpdate).not.toHaveBeenCalled();
+        expect(events(auditCreateMany)).toEqual([]);
+      }
+    },
+  );
+
+  it('leaves a QC-verified order’s date to the Manager’s edit, which may still correct it to a past day', async () => {
+    const { service, auditCreateMany } = makeService({
+      role: UserRole.LOGISTICS_MANAGER,
+      status: LogisticsStatus.QC_VERIFIED,
+    });
+
+    const result = await service.edit(ORDER, { deliveryDate: '2026-10-01' });
+
+    expect(result.deliveryDate).toBe('2026-10-01');
+    expect(result.status).toBe(LogisticsStatus.QC_VERIFIED);
+    expect(events(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        source: 'logistics.edit',
+        before: { deliveryDate: null },
+        after: { deliveryDate: '2026-10-01' },
+      }),
+    ]);
+  });
+
+  it.each([UserRole.SALES_AGENT, UserRole.SALES_MANAGER])(
+    'gives a %s an order outside their scope as a 404, and writes nothing',
+    async (role) => {
+      const { service, orderUpdate, auditCreateMany } = makeService({
+        role,
+        inScope: false,
+      });
+
+      await expect(
+        service.setDeliveryDate(ORDER, set('2026-10-20')),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(orderUpdate).not.toHaveBeenCalled();
+      expect(events(auditCreateMany)).toEqual([]);
+    },
+  );
+
+  it('reads the order through the caller’s lead scope: an agent’s own leads, a manager’s team', async () => {
+    const agent = makeService({ role: UserRole.SALES_AGENT });
+    const manager = makeService({
+      role: UserRole.SALES_MANAGER,
+      team: 'Sales A',
+    });
+
+    await agent.service.setDeliveryDate(ORDER, set('2026-10-20'));
+    await manager.service.setDeliveryDate(ORDER, set('2026-10-20'));
+
+    const scopeOf = (findFirst: jest.Mock) =>
+      (findFirst.mock.calls[0] as [{ where: { AND: unknown[] } }])[0].where
+        .AND[0];
+    expect(scopeOf(agent.orderFindFirst)).toEqual({
+      lead: { deletedAt: null, assignments: { some: { userId: USER } } },
+    });
+    // Another team's lead matches nothing here, so its order is the 404 above.
+    expect(scopeOf(manager.orderFindFirst)).toEqual({
+      lead: {
+        deletedAt: null,
+        assignments: { some: { user: { team: 'Sales A' } } },
+      },
+    });
+  });
+
+  it('refuses a view-only agent — their lead sits in a pipeline closed to them — with a 403 in any status, and does not offer the date', async () => {
+    for (const status of [
+      LogisticsStatus.INITIAL,
+      LogisticsStatus.QC_VERIFIED,
+    ]) {
+      const { service, orderUpdate, auditCreateMany } = makeService({
+        role: UserRole.SALES_AGENT,
+        status,
+        deniedPipelines: ['VIP Pipeline'],
+        leadPipeline: 'VIP Pipeline',
+      });
+
+      await expect(
+        service.setDeliveryDate(ORDER, set('2026-10-20')),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(orderUpdate).not.toHaveBeenCalled();
+      expect(events(auditCreateMany)).toEqual([]);
+      // The assignment still lets them read the order, without the action.
+      expect((await service.get(ORDER)).allowedActions).toEqual([]);
+      expect((await service.list(query())).rows[0].allowedActions).toEqual([]);
+    }
+  });
+
+  it('still offers and takes the date when only another pipeline is closed to the agent', async () => {
+    const { service } = makeService({
+      role: UserRole.SALES_AGENT,
+      deniedPipelines: ['VIP Pipeline'],
+    });
+
+    expect((await service.get(ORDER)).allowedActions).toEqual([
+      'SET_DELIVERY_DATE',
+    ]);
+    await expect(
+      service.setDeliveryDate(ORDER, set('2026-10-20')),
+    ).resolves.toMatchObject({
+      deliveryDate: '2026-10-20',
+      allowedActions: ['SET_DELIVERY_DATE'],
+    });
+  });
+
+  it('locks the order row before reading it, and reads it before writing', async () => {
+    const { service, queryRaw, orderFindFirst, orderUpdate } = makeService({
+      role: UserRole.SALES_AGENT,
+    });
+
+    await service.setDeliveryDate(ORDER, set('2026-10-20'));
+
+    expect(queryRaw).toHaveBeenCalledTimes(1);
+    const [strings, id] = queryRaw.mock.calls[0] as [string[], string];
+    expect(strings.join('?')).toContain('FOR UPDATE');
+    expect(id).toBe(ORDER);
+    const [lock] = queryRaw.mock.invocationCallOrder;
+    const [read] = orderFindFirst.mock.invocationCallOrder;
+    const [write] = orderUpdate.mock.invocationCallOrder;
+    expect(lock).toBeLessThan(read);
+    expect(read).toBeLessThan(write);
+  });
+
+  it('keeps one order and its date through a QC rejection, a Sales change and the resubmit', async () => {
+    const kit = makeService({ role: UserRole.SALES_AGENT });
+
+    await kit.service.setDeliveryDate(ORDER, set('2026-10-20'));
+    kit.as(UserRole.QC);
+    await kit.service.qcReject(ORDER, { remarks: 'Wrong address' });
+    kit.as(UserRole.SALES_AGENT);
+    await kit.service.setDeliveryDate(ORDER, set('2026-10-22'));
+    kit.as(UserRole.SALES_MANAGER);
+    const result = await kit.service.resubmit(ORDER, {});
+
+    expect(result).toMatchObject({
+      id: ORDER,
+      status: LogisticsStatus.INITIAL,
+      deliveryDate: '2026-10-22',
+    });
+    // The lead became WON again; the conversion's insert skipped it, so no second order.
+    expect(kit.createManyAndReturn).toHaveBeenCalledTimes(1);
+    const [insert] = kit.createManyAndReturn.mock.calls[0] as [unknown];
+    expect(insert).toMatchObject({ skipDuplicates: true });
+    expect(
+      events(kit.auditCreateMany)
+        .filter((event) => event.entityType === 'LOGISTICS_ORDER')
+        .map((event) => [event.action, event.after]),
+    ).toEqual([
+      ['UPDATED', { deliveryDate: '2026-10-20' }],
+      ['QC_REJECTED', { status: LogisticsStatus.QC_REJECTED }],
+      ['UPDATED', { deliveryDate: '2026-10-22' }],
+      ['RESUBMITTED', { status: LogisticsStatus.INITIAL }],
+    ]);
+  });
+
+  it('puts an order dated for tomorrow while QC Pending into the schedule’s Tomorrow, its day and its QC Pending count (P8)', async () => {
+    const { service, groupBy } = makeService({ role: UserRole.SALES_AGENT });
+
+    const dated = await service.setDeliveryDate(ORDER, set('2026-10-16'));
+    // The schedule's grouped query, as the database now answers it for this order.
+    groupBy.mockResolvedValue([
+      {
+        deliveryDate: day('2026-10-16'),
+        status: LogisticsStatus.INITIAL,
+        _count: { _all: 1 },
+      },
+    ]);
+    const schedule = await service.deliverySchedule({});
+
+    expect(dated.deliveryBucket).toBe('tomorrow');
+    expect(schedule.buckets).toMatchObject({ tomorrow: 1, today: 0, none: 0 });
+    expect(schedule.days[1]).toEqual({
+      date: '2026-10-16',
+      total: 1,
+      counts: expect.objectContaining({ INITIAL: 1 }) as unknown,
+    });
+  });
+});
+
+/*
+  A QC verification and a Sales date racing on one order. Postgres' row lock is modelled: the
+  date's `SELECT … FOR UPDATE` and QC's conditional UPDATE both take it, and it is held until
+  the transaction ends, so whichever comes second waits. A transaction can be held open at a
+  chosen point, still holding the lock, to interleave the two exactly.
+*/
+function lockedOrder() {
+  const { order } = makeService();
+  const audit: Record<string, unknown>[] = [];
+  const pauses = new Map<string, Promise<void>>();
+  let holder: object | null = null;
+  let waiting: (() => void)[] = [];
+
+  const acquire = async (owner: object) => {
+    while (holder !== null && holder !== owner) {
+      await new Promise<void>((wake) => waiting.push(wake));
+    }
+    holder = owner;
+  };
+  const release = (owner: object) => {
+    if (holder !== owner) return;
+    holder = null;
+    const woken = waiting;
+    waiting = [];
+    woken.forEach((wake) => wake());
+  };
+  const pauseIfAsked = async (point: string) => {
+    const pause = pauses.get(point);
+    if (pause) {
+      pauses.delete(point);
+      await pause;
+    }
+  };
+
+  const txFor = (owner: object) => ({
+    $queryRaw: async () => {
+      await acquire(owner);
+      return [];
+    },
+    logisticsOrder: {
+      findFirst: () => Promise.resolve({ ...order }),
+      findUnique: () => Promise.resolve({ ...order }),
+      update: async (args: { data: Record<string, unknown> }) => {
+        await acquire(owner);
+        Object.assign(order, args.data);
+        return { id: ORDER };
+      },
+      updateMany: async (args: {
+        where: { status: LogisticsStatus };
+        data: Record<string, unknown>;
+      }) => {
+        await acquire(owner);
+        if (args.where.status !== order.status) return { count: 0 };
+        Object.assign(order, args.data);
+        await pauseIfAsked('moved');
+        return { count: 1 };
+      },
+    },
+    lead: {
+      findUniqueOrThrow: async () => {
+        await pauseIfAsked('locked');
+        return { pipeline: 'Lead Pipeline' };
+      },
+      findMany: () => Promise.resolve([]),
+    },
+    auditEvent: {
+      createMany: (args: { data: Record<string, unknown>[] }) => {
+        audit.push(...args.data);
+        return Promise.resolve({ count: args.data.length });
+      },
+    },
+  });
+
+  const prisma = {
+    $transaction: async (callback: (tx: unknown) => Promise<unknown>) => {
+      const owner = {};
+      try {
+        return await callback(txFor(owner));
+      } finally {
+        release(owner);
+      }
+    },
+  } as unknown as PrismaService;
+  const config = {
+    getOrThrow: () => ({ businessTimeZone: 'Asia/Dubai' }),
+  } as unknown as ConfigService;
+  const serviceFor = (role: UserRole) =>
+    new LogisticsOrdersService(
+      prisma,
+      { resolve: () => Promise.resolve({ id: USER, role, team: null }) },
+      config,
+    );
+  /** Holds the next transaction to reach `point` there, lock and all, until the returned call. */
+  const pauseAt = (point: 'locked' | 'moved') => {
+    let open!: () => void;
+    pauses.set(point, new Promise<void>((resolve) => (open = resolve)));
+    return () => open();
+  };
+  return { order, audit, serviceFor, pauseAt };
+}
+
+/** Lets every pending callback run, so a waiting transaction shows that it is waiting. */
+const settle = async () => {
+  for (let i = 0; i < 5; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+};
+
+describe('LogisticsOrdersService — a QC verification racing the Sales date', () => {
+  it('makes a verification that arrives while the date is being set wait, then verify the dated order', async () => {
+    const { order, audit, serviceFor, pauseAt } = lockedOrder();
+    const resume = pauseAt('locked');
+
+    const dating = serviceFor(UserRole.SALES_AGENT).setDeliveryDate(ORDER, {
+      deliveryDate: '2099-01-15',
+    });
+    await settle();
+    let verified = false;
+    const verifying = serviceFor(UserRole.QC)
+      .qcVerify(ORDER, {})
+      .then((result) => {
+        verified = true;
+        return result;
+      });
+    await settle();
+
+    // QC's update is waiting on the lock the date holds: nothing has moved yet.
+    expect(verified).toBe(false);
+    expect(order.status).toBe(LogisticsStatus.INITIAL);
+
+    resume();
+    await expect(dating).resolves.toMatchObject({
+      deliveryDate: '2099-01-15',
+    });
+    await expect(verifying).resolves.toMatchObject({
+      status: LogisticsStatus.QC_VERIFIED,
+      deliveryDate: '2099-01-15',
+    });
+    expect(audit.map((event) => event.action)).toEqual([
+      'UPDATED',
+      'QC_VERIFIED',
+    ]);
+  });
+
+  it('refuses the date with a 409 once a verification that took the lock first commits', async () => {
+    const { order, audit, serviceFor, pauseAt } = lockedOrder();
+    const resume = pauseAt('moved');
+
+    const verifying = serviceFor(UserRole.QC).qcVerify(ORDER, {});
+    await settle();
+    const dating = serviceFor(UserRole.SALES_AGENT).setDeliveryDate(ORDER, {
+      deliveryDate: '2099-01-15',
+    });
+    await settle();
+
+    resume();
+    await expect(verifying).resolves.toMatchObject({
+      status: LogisticsStatus.QC_VERIFIED,
+    });
+    await expect(dating).rejects.toBeInstanceOf(ConflictException);
+    expect(order.deliveryDate).toBeNull();
+    expect(audit.map((event) => event.action)).toEqual(['QC_VERIFIED']);
+  });
+});
+
+/*
   Every order the API returns says what its caller may do to it now, from the one calculation
   in logistics-roles.ts — so the UI never has to work permissions out for itself.
 */
@@ -2008,15 +2687,21 @@ describe('LogisticsOrdersService — allowedActions on every response', () => {
     ]);
   });
 
-  it('gives a sales agent reading the list no action at all', async () => {
-    const { service } = makeService({
+  it('gives a sales agent reading the list the delivery date until QC verifies the order, and nothing more', async () => {
+    const rejected = makeService({
       status: LogisticsStatus.QC_REJECTED,
       role: UserRole.SALES_AGENT,
     });
+    const verified = makeService({
+      status: LogisticsStatus.QC_VERIFIED,
+      role: UserRole.SALES_AGENT,
+    });
 
-    const { rows } = await service.list(query());
+    const { rows } = await rejected.service.list(query());
+    const later = await verified.service.list(query());
 
-    expect(rows[0].allowedActions).toEqual([]);
+    expect(rows[0].allowedActions).toEqual(['SET_DELIVERY_DATE']);
+    expect(later.rows[0].allowedActions).toEqual([]);
   });
 
   it('answers a transition with the actions of the status it just reached', async () => {
@@ -2071,6 +2756,31 @@ describe('Logistics DTOs — what the routes refuse before the service runs', ()
     expect(await invalid(CorrectAwbDto, { awbNumber: ' ' })).toEqual([
       'awbNumber',
     ]);
+  });
+
+  it.each([
+    [{ deliveryDate: '2026-10-20' }, '2026-10-20'],
+    [{ deliveryDate: null }, null],
+    [{ deliveryDate: '' }, null],
+    [{ deliveryDate: '  ' }, null],
+  ])(
+    'takes the Sales delivery date %j as %j — a day, or a clear',
+    async (body, expected) => {
+      const dto = plainToInstance(SetDeliveryDateDto, body);
+      expect(await validate(dto)).toEqual([]);
+      expect(dto.deliveryDate).toBe(expected);
+    },
+  );
+
+  it.each([
+    {},
+    { deliveryDate: '2026-02-30' },
+    { deliveryDate: '15-10-2026' },
+    { deliveryDate: '2026-10-15T00:00:00.000Z' },
+    { deliveryDate: '1999-12-31' },
+    { deliveryDate: 20261015 },
+  ])('refuses the Sales delivery date %j', async (body) => {
+    expect(await invalid(SetDeliveryDateDto, body)).toEqual(['deliveryDate']);
   });
 
   it('refuses blanking the customer name or phone, and a non-number value', async () => {

@@ -177,11 +177,15 @@ const LOGISTICS_MANAGER_LABELS = new Set([
 const LOGISTICS_RESUBMIT_LABELS = new Set([
   'POST /api/logistics/orders/:id/resubmit',
 ]);
+/* The sales agent and the Sales Manager, on their own orders, until QC verifies (Phase 2D). */
+const LOGISTICS_DELIVERY_DATE_LABELS = new Set([
+  'PATCH /api/logistics/orders/:id/delivery-date',
+]);
 
 /*
   The journey read (ADR-0083): the same readers as an order — every sales role on their own
-  leads, both Logistics roles and QC on the orders they work — because it returns the history of the
-  records those two scopes already grant. Accounts is not named until its own phase.
+  leads, both Logistics roles and QC on the orders they work, Accounts on the Delivered ones —
+  because it returns the history of the records those scopes already grant.
 */
 const JOURNEY_LABELS = new Set(['GET /api/audit/events']);
 
@@ -192,18 +196,20 @@ function isLogisticsRoute(label: string): boolean {
     LOGISTICS_QC_LABELS.has(label) ||
     LOGISTICS_SHIPMENT_LABELS.has(label) ||
     LOGISTICS_MANAGER_LABELS.has(label) ||
-    LOGISTICS_RESUBMIT_LABELS.has(label)
+    LOGISTICS_RESUBMIT_LABELS.has(label) ||
+    LOGISTICS_DELIVERY_DATE_LABELS.has(label)
   );
 }
 
 /**
  * Who each Logistics route admits: QC checks, both Logistics roles ship, the Manager corrects
- * and records RTO, the Sales Manager resubmits, and every other sales role only reads.
+ * and records RTO, the Sales Manager resubmits, the sales agent and the Sales Manager set the
+ * delivery date, and Customer Service, Marketing and Accounts (Delivered orders) only read.
  */
 function logisticsAdmits(label: string, role: UserRole): boolean {
   if (role === UserRole.SUPERADMIN) return isLogisticsRoute(label);
   if (LOGISTICS_READ_LABELS.has(label) || JOURNEY_LABELS.has(label)) {
-    return role !== UserRole.ACCOUNTS_EXECUTIVE;
+    return true;
   }
   if (LOGISTICS_QC_LABELS.has(label)) return role === UserRole.QC;
   if (LOGISTICS_SHIPMENT_LABELS.has(label)) {
@@ -217,6 +223,9 @@ function logisticsAdmits(label: string, role: UserRole): boolean {
   }
   if (LOGISTICS_RESUBMIT_LABELS.has(label)) {
     return role === UserRole.SALES_MANAGER;
+  }
+  if (LOGISTICS_DELIVERY_DATE_LABELS.has(label)) {
+    return role === UserRole.SALES_AGENT || role === UserRole.SALES_MANAGER;
   }
   return false;
 }

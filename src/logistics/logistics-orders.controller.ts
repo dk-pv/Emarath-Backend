@@ -24,6 +24,7 @@ import {
   OrderReasonDto,
   QcDecisionDto,
   QcRejectDto,
+  SetDeliveryDateDto,
   UpdateLogisticsOrderDto,
 } from './dto/logistics-order.dto';
 
@@ -32,9 +33,10 @@ import {
  * 2026-10-01 (`logistics-roles.ts`). They are enforced here rather than in the UI: QC verifies
  * and rejects; both Logistics roles dispatch, deliver and cancel; the Logistics Manager also
  * records RTO, edits a QC-verified order and corrects an AWB after dispatch; the Sales Manager
- * resubmits a rejected order; every other sales role only reads. `@Roles()` is what admits an
- * operational role to a route in the first place (ADR-0084), so a route that forgets it is
- * closed, not open.
+ * resubmits a rejected order; the sales agent and the Sales Manager set the delivery date until
+ * QC verifies the order (Phase 2D); Customer Service and Marketing only read. `@Roles()` is what
+ * admits an operational role to a route in the first place (ADR-0084), so a route that forgets
+ * it is closed, not open.
  *
  * Every order returned also carries `allowedActions`, computed from the same `ACTION_ROLES`
  * these routes read — advisory for the UI only. These routes, the caller's scope and the
@@ -170,5 +172,15 @@ export class LogisticsOrdersController {
     @Body() dto: CorrectAwbDto,
   ): Promise<LogisticsOrderResponse> {
     return this.orders.correctAwb(id, dto);
+  }
+
+  /** Sales sets or clears the requested delivery date before QC verifies the order (Phase 2D). */
+  @Patch(':id/delivery-date')
+  @Roles(...ACTION_ROLES.SET_DELIVERY_DATE)
+  setDeliveryDate(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetDeliveryDateDto,
+  ): Promise<LogisticsOrderResponse> {
+    return this.orders.setDeliveryDate(id, dto);
   }
 }

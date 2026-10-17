@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -11,6 +12,7 @@ import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { recordAuditEvents, userActor } from '../audit/audit-events';
 import { applyLeadChanges } from '../leads/lead-audit';
 import { escapeLike } from '../leads/lead-search';
+import { assertMayChangeLead } from '../pipelines/pipeline-access';
 import { CONVERTED_STATUS } from '../reports/converted-leads-where';
 import { logisticsOrderScopeWhere } from './logistics-roles';
 import {
@@ -49,6 +51,7 @@ import {
   QcDecisionDto,
   QcRejectDto,
   RegionCount,
+  SetDeliveryDateDto,
   toLogisticsOrderResponse,
   UpdateLogisticsOrderDto,
 } from './dto/logistics-order.dto';
@@ -59,6 +62,14 @@ const DECIMAL_FIELDS: ReadonlySet<string> = new Set([
   'product2Qty',
   'orderValue',
 ]);
+
+/** Why an edit is refused from a status it may not be made in — after "This order is <status>;". */
+const EDIT_REFUSAL: Readonly<Record<OrderEdit, string>> = {
+  EDIT: 'it can only be edited while QC_VERIFIED',
+  CORRECT_AWB: 'its AWB can only be corrected after dispatch',
+  SET_DELIVERY_DATE:
+    'its delivery date can only be set while INITIAL or QC_REJECTED',
+};
 
 /**
  * Free text over what the queue shows — the order number, the customer's name and phone, and
@@ -107,6 +118,15 @@ function orderWhere(
       filters.leadId ? { leadId: filters.leadId } : {},
       orderSearchWhere(filters.search),
       deliveryBucketWhere(filters.delivery, day, filters.deliveryOn),
+      filters.state ? { state: { in: filters.state } } : {},
+      filters.courier ? { courier: { in: filters.courier } } : {},
+      filters.assignedAgent
+        ? {
+            lead: {
+              assignments: { some: { userId: { in: filters.assignedAgent } } },
+            },
+          }
+        : {},
     ],
   };
 }
@@ -215,8 +235,9 @@ async function withAwbClash<T>(write: () => Promise<T>): Promise<T> {
  * The Logistics order lifecycle (ADR-0085, client clarifications of 2026-09-23 and 2026-10-01).
  *
  * Orders are created by conversion, never here: this service moves an existing one along the
- * state machine in `logistics-status.ts`, and makes the Logistics Manager's two corrections (the
- * order's data after QC, the AWB after dispatch). Every move is a conditional update from the
+ * state machine in `logistics-status.ts`, makes the Logistics Manager's two corrections (the
+ * order's data after QC, the AWB after dispatch), and records the delivery date Sales asks for
+ * before QC verifies the order (Phase 2D). Every move is a conditional update from the
  * exact status read, taken only where that table allows it, so an illegal or stale transition
  * changes nothing and comes back as a 409 naming the status the order is really in — a caller
  * cannot reach a state the table does not describe, whatever it sends. Every order is read through the caller's scope first,
@@ -272,8 +293,15 @@ export class LogisticsOrdersService {
       this.prisma.logisticsOrder.count({ where }),
     ]);
 
+    const closed = await this.closedLeadIds(
+      this.prisma,
+      user,
+      rows.map((row) => row.leadId),
+    );
     return {
-      rows: rows.map((row) => toLogisticsOrderResponse(row, user.role, day)),
+      rows: rows.map((row) =>
+        toLogisticsOrderResponse(row, user.role, day, closed.has(row.leadId)),
+      ),
       total,
     };
   }
@@ -364,19 +392,35 @@ export class LogisticsOrdersService {
   }
 
   /**
-   * The country and city values in the caller's scope — every order they may see, whatever the
-   * filters in force, so choosing one value never hides the others. A value only orders outside
-   * the scope hold is never offered.
+   * The country, city, state and courier values, and the sales executives, in the caller's
+   * scope — every order they may see, whatever the filters in force, so choosing one value never
+   * hides the others. A value only orders outside the scope hold is never offered. The sales
+   * executives are the users those orders' leads are assigned to now; a sales agent is offered
+   * only themselves, as the Leads list's own options never name a co-assignee to an agent.
    */
   async filterOptions(): Promise<LogisticsOrderFilterOptions> {
     const user = await this.currentUser.resolve();
-    const groups = await this.prisma.logisticsOrder.groupBy({
-      by: ['country', 'city'],
-      where: logisticsOrderScopeWhere(user),
-    });
+    const scope = logisticsOrderScopeWhere(user);
+    const [groups, assignees] = await Promise.all([
+      this.prisma.logisticsOrder.groupBy({
+        by: ['country', 'city', 'state', 'courier'],
+        where: scope,
+      }),
+      this.prisma.user.findMany({
+        where: {
+          ...(user.role === UserRole.SALES_AGENT ? { id: user.id } : {}),
+          assignments: { some: { lead: { logisticsOrder: { is: scope } } } },
+        },
+        select: { id: true, name: true },
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+      }),
+    ]);
     return {
       countries: distinctValues(groups.map((group) => group.country)),
       cities: distinctValues(groups.map((group) => group.city)),
+      states: distinctValues(groups.map((group) => group.state)),
+      couriers: distinctValues(groups.map((group) => group.courier)),
+      assignees,
     };
   }
 
@@ -388,7 +432,13 @@ export class LogisticsOrdersService {
       select: LOGISTICS_ORDER_SELECT,
     });
     if (!order) throw new NotFoundException('Order not found.');
-    return toLogisticsOrderResponse(order, user.role, this.businessDay());
+    const closed = await this.closedLeadIds(this.prisma, user, [order.leadId]);
+    return toLogisticsOrderResponse(
+      order,
+      user.role,
+      this.businessDay(),
+      closed.has(order.leadId),
+    );
   }
 
   /**
@@ -581,7 +631,7 @@ export class LogisticsOrdersService {
           },
         ]);
       }
-      return this.loadFull(tx, id, user.role);
+      return this.loadFull(tx, id, user);
     });
   }
 
@@ -618,9 +668,62 @@ export class LogisticsOrdersService {
             },
           ]);
         }
-        return this.loadFull(tx, id, user.role);
+        return this.loadFull(tx, id, user);
       }),
     );
+  }
+
+  /**
+   * Sales sets or clears the delivery date the customer asked for, before QC verifies the order
+   * (Phase 2D, ADR-0094 P1–P4): the order's own sales agent or their team's manager, through the
+   * scope every read uses, so anyone else's order is a 404, and only while it is QC Pending or QC
+   * Rejected, otherwise a 409. The row is locked first, as for the Manager's edit, so a QC
+   * verification racing this request either waits for it or commits first and turns it into a
+   * 409: Sales never changes the date of an order QC has verified. A lead in a pipeline closed to
+   * the caller is theirs to view, not to change (ADR-0093 B2): a 403.
+   *
+   * A day before the business day's today is refused (P4). Today and clearing are allowed, and the
+   * Manager's edit stays the way to correct a past date once the order is verified. Resending the
+   * date the order already has writes nothing. A change is the order's `UPDATED` event with its
+   * before and after days, as the Manager's edit records one. The status never moves and the lead
+   * is not touched.
+   */
+  async setDeliveryDate(
+    id: string,
+    dto: SetDeliveryDateDto,
+  ): Promise<LogisticsOrderResponse> {
+    const user = await this.currentUser.resolve();
+    return this.prisma.$transaction(async (tx) => {
+      const order = await this.lockForEdit(tx, id, user, 'SET_DELIVERY_DATE');
+      const before = order.deliveryDate && fromDbDate(order.deliveryDate);
+      const after = dto.deliveryDate;
+      if (before !== after) {
+        const { today, timeZone } = this.businessDay();
+        if (after !== null && after < today) {
+          const shown = today.split('-').reverse().join('-');
+          throw new BadRequestException(
+            `The delivery date can’t be before today, ${shown} (${timeZone}).`,
+          );
+        }
+        await tx.logisticsOrder.update({
+          where: { id },
+          data: { deliveryDate: after === null ? null : toDbDate(after) },
+        });
+        await recordAuditEvents(tx, [
+          {
+            entityType: 'LOGISTICS_ORDER',
+            entityId: id,
+            leadId: order.leadId,
+            action: 'UPDATED',
+            actor: userActor(user),
+            source: 'logistics.delivery_date',
+            before: { deliveryDate: before },
+            after: { deliveryDate: after },
+          },
+        ]);
+      }
+      return this.loadFull(tx, id, user);
+    });
   }
 
   /** A transition that touches only the order. `check` runs inside its transaction first. */
@@ -637,7 +740,7 @@ export class LogisticsOrdersService {
         const order = await this.loadState(tx, id, user);
         await check?.(tx);
         await this.move(tx, order, action, fields, user, details);
-        return this.loadFull(tx, id, user.role);
+        return this.loadFull(tx, id, user);
       }),
     );
   }
@@ -676,7 +779,7 @@ export class LogisticsOrdersService {
         },
         { logisticsWriteBack: true },
       );
-      return this.loadFull(tx, id, user.role);
+      return this.loadFull(tx, id, user);
     });
   }
 
@@ -750,8 +853,10 @@ export class LogisticsOrdersService {
 
   /**
    * An edit's starting point: the row locked for the rest of the transaction, so the before
-   * values recorded are the ones overwritten; read through the caller's scope; and in a status
-   * the edit may be made in, or a 409 naming the status it is in.
+   * values recorded are the ones overwritten and a concurrent move waits for this one; read
+   * through the caller's scope; and in a status the edit may be made in, or a 409 naming the
+   * status it is in. Sales' date is also a change to the lead's order, so a lead in a pipeline
+   * closed to the caller refuses it with a 403, whatever the order's status.
    */
   private async lockForEdit(
     tx: Prisma.TransactionClient,
@@ -765,11 +870,18 @@ export class LogisticsOrdersService {
       select: LOGISTICS_ORDER_SELECT,
     });
     if (!order) throw new NotFoundException('Order not found.');
+    if (edit === 'SET_DELIVERY_DATE') {
+      assertMayChangeLead(
+        user,
+        await tx.lead.findUniqueOrThrow({
+          where: { id: order.leadId },
+          select: { pipeline: true },
+        }),
+      );
+    }
     if (!ORDER_EDIT_STATUSES[edit].includes(order.status)) {
       throw new ConflictException(
-        edit === 'EDIT'
-          ? `This order is ${order.status}; it can only be edited while QC_VERIFIED.`
-          : `This order is ${order.status}; its AWB can only be corrected after dispatch.`,
+        `This order is ${order.status}; ${EDIT_REFUSAL[edit]}.`,
       );
     }
     return order;
@@ -782,13 +894,43 @@ export class LogisticsOrdersService {
   private async loadFull(
     tx: Prisma.TransactionClient,
     id: string,
-    role: UserRole,
+    user: CurrentUser,
   ): Promise<LogisticsOrderResponse> {
     const order = await tx.logisticsOrder.findUnique({
       where: { id },
       select: LOGISTICS_ORDER_SELECT,
     });
     if (!order) throw new NotFoundException('Order not found.');
-    return toLogisticsOrderResponse(order, role, this.businessDay());
+    const closed = await this.closedLeadIds(tx, user, [order.leadId]);
+    return toLogisticsOrderResponse(
+      order,
+      user.role,
+      this.businessDay(),
+      closed.has(order.leadId),
+    );
+  }
+
+  /**
+   * Which of `leadIds` sit in a pipeline closed to the caller (ADR-0093 B2). A sales agent sees
+   * the order of a lead assigned to them there but may not change it, so its date action is not
+   * offered. No query at all for a caller with every pipeline open — the admin and the Logistics
+   * roles always are.
+   */
+  private async closedLeadIds(
+    client: Pick<Prisma.TransactionClient, 'lead'>,
+    user: CurrentUser,
+    leadIds: string[],
+  ): Promise<ReadonlySet<string>> {
+    if (!user.deniedPipelines?.length || leadIds.length === 0) {
+      return new Set();
+    }
+    const rows = await client.lead.findMany({
+      where: {
+        id: { in: leadIds },
+        pipeline: { in: [...user.deniedPipelines] },
+      },
+      select: { id: true },
+    });
+    return new Set(rows.map((row) => row.id));
   }
 }

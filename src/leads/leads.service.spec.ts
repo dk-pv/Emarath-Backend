@@ -789,13 +789,48 @@ describe('LeadsService.findById', () => {
     expect((await service.findById('lead-1')).logisticsOrder).toBeNull();
   });
 
-  it('reads only the order’s id, number and status into the lead', () => {
+  it('reads only the order’s id, number, status and delivery date into the lead', () => {
     expect(LEAD_LIST_SELECT.logisticsOrder).toEqual({
-      select: { id: true, orderNumber: true, status: true },
+      select: { id: true, orderNumber: true, status: true, deliveryDate: true },
     });
     expect(LEAD_EDIT_SELECT.logisticsOrder).toEqual({
-      select: { id: true, orderNumber: true, status: true },
+      select: { id: true, orderNumber: true, status: true, deliveryDate: true },
     });
+  });
+
+  // Phase 2D: the lead screens show the order's delivery date, as the day it is (ADR-0094).
+  it('carries the order’s delivery date as YYYY-MM-DD, or null when it has none', async () => {
+    const { service, findById } = makeService();
+    findById.mockResolvedValue({
+      ...FAKE_ROW,
+      status: 'WON',
+      logisticsOrder: {
+        id: 'order-42',
+        orderNumber: 42,
+        status: 'INITIAL',
+        deliveryDate: new Date('2026-10-20T00:00:00.000Z'),
+      },
+    });
+    expect((await service.findById('lead-1')).logisticsOrder).toEqual({
+      id: 'order-42',
+      orderNumber: 42,
+      status: 'INITIAL',
+      deliveryDate: '2026-10-20',
+    });
+
+    findById.mockResolvedValue({
+      ...FAKE_ROW,
+      status: 'WON',
+      logisticsOrder: {
+        id: 'order-42',
+        orderNumber: 42,
+        status: 'INITIAL',
+        deliveryDate: null,
+      },
+    });
+    expect(
+      (await service.findById('lead-1')).logisticsOrder?.deliveryDate,
+    ).toBeNull();
   });
 
   it('queries within the caller scope AND the id', async () => {

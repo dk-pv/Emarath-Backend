@@ -178,6 +178,42 @@ describe('convertLeadsToOrders', () => {
     expect(orderIdByLead.get(LEAD_B)).toBe(`kept-${LEAD_B}`);
   });
 
+  /*
+    Phase 2D (ADR-0094): the delivery date is set on the order, never at conversion. A new order
+    starts undated; a lead won again keeps its order — and the date Sales gave it — because the
+    only write here is the insert that skips it. The double has no update method, so any other
+    write to an existing order would fail these tests.
+  */
+  it('starts every new order undated', async () => {
+    const { tx, createManyAndReturn } = makeTx();
+
+    await convertLeadsToOrders(tx, [{ id: LEAD_A, state: state() }], context);
+
+    const [args] = createManyAndReturn.mock.calls[0] as unknown as [
+      { data: Record<string, unknown>[] },
+    ];
+    expect(args.data[0]).not.toHaveProperty('deliveryDate');
+  });
+
+  it('gives a converted duplicate its own undated order and leaves the original’s order alone', async () => {
+    const { tx, createManyAndReturn } = makeTx([LEAD_A]);
+
+    const { events, orderIdByLead } = await convertLeadsToOrders(
+      tx,
+      [{ id: LEAD_B, state: state() }],
+      context,
+    );
+
+    const [args] = createManyAndReturn.mock.calls[0] as unknown as [
+      { data: Record<string, unknown>[]; skipDuplicates: boolean },
+    ];
+    expect(args.data.map((row) => row.leadId)).toEqual([LEAD_B]);
+    expect(args.data[0]).not.toHaveProperty('deliveryDate');
+    expect(args.skipDuplicates).toBe(true);
+    expect(events.map((event) => event.leadId)).toEqual([LEAD_B]);
+    expect(orderIdByLead.has(LEAD_A)).toBe(false);
+  });
+
   it('records a system conversion with no converting user', async () => {
     const { tx, createManyAndReturn } = makeTx();
 
