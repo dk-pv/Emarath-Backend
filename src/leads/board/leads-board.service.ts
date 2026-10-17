@@ -3,6 +3,8 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { requestedDeliveryDate } from '../../logistics/logistics-conversion';
 import { Prisma } from '../../generated/prisma/client';
 import { CurrentUserService } from '../../auth/current-user';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -43,6 +45,7 @@ export class LeadsBoardService {
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
     private readonly stages: StagesService,
+    private readonly config: ConfigService,
   ) {}
 
   async board(query: LeadWhereQuery): Promise<LeadBoardResponse> {
@@ -114,7 +117,11 @@ export class LeadsBoardService {
     const updated = await auditLeadChanges(
       this.prisma,
       [id],
-      { actor: userActor(user), source: 'leads.stage' },
+      {
+        actor: userActor(user),
+        source: 'leads.stage',
+        deliveryDate: requestedDeliveryDate(dto.deliveryDate, this.config),
+      },
       (tx) =>
         tx.lead.update({
           where: { id },

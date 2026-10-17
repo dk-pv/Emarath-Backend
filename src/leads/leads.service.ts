@@ -4,6 +4,8 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { requestedDeliveryDate } from '../logistics/logistics-conversion';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { ASSIGNABLE_USER_WHERE, REASSIGN_ROLES } from '../auth/role-groups';
@@ -115,6 +117,7 @@ export class LeadsService {
     private readonly settings: SettingsService,
     private readonly assignment: LeadAssignmentEngine,
     private readonly tagAccess: TagAccessService,
+    private readonly config: ConfigService,
   ) {}
 
   async list(query: ListLeadsQueryDto): Promise<LeadListResponse> {
@@ -346,6 +349,7 @@ export class LeadsService {
           actor: userActor(user),
           source: 'leads.create',
           metadata: autoAssigned ? { autoAssigned: true } : undefined,
+          deliveryDate: requestedDeliveryDate(dto.deliveryDate, this.config),
         });
         return withLogisticsOrder(tx, created);
       });
@@ -628,7 +632,11 @@ export class LeadsService {
       const lead = await auditLeadChanges(
         this.prisma,
         [id],
-        { actor: userActor(user), source: 'leads.update' },
+        {
+          actor: userActor(user),
+          source: 'leads.update',
+          deliveryDate: requestedDeliveryDate(dto.deliveryDate, this.config),
+        },
         (tx) =>
           this.repository.update(
             id,

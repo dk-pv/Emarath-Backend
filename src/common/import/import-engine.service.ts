@@ -235,7 +235,7 @@ export class ImportEngineService {
     return row;
   }
 
-  private summarise(rows: EvaluatedRow[]): EvaluationSummary {
+  summarise(rows: EvaluatedRow[]): EvaluationSummary {
     let valid = 0;
     let invalid = 0;
     let duplicates = 0;

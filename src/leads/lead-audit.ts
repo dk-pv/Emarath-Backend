@@ -11,6 +11,7 @@ import { CONVERTED_STATUS } from '../reports/converted-leads-where';
 import {
   becameConverted,
   convertLeadsToOrders,
+  RequestedDeliveryDate,
 } from '../logistics/logistics-conversion';
 import { LEAD_LIST_SELECT, LeadRow } from './dto/lead-response.dto';
 
@@ -27,6 +28,8 @@ export interface LeadAuditContext {
   actor: AuditActor;
   source: string;
   metadata?: Prisma.InputJsonObject;
+  /** The requested delivery day a converting request carries (`convertLeadsToOrders`). */
+  deliveryDate?: RequestedDeliveryDate;
 }
 
 export interface LeadChangeOptions {

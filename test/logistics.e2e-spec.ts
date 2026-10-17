@@ -71,6 +71,11 @@ describe('Logistics write routes (e2e)', () => {
     ['patch', '', [UserRole.LOGISTICS_MANAGER]],
     ['patch', 'awb', [UserRole.LOGISTICS_MANAGER]],
     ['patch', 'delivery-date', [UserRole.SALES_AGENT, UserRole.SALES_MANAGER]],
+    [
+      'patch',
+      'delivery-date-correction',
+      [UserRole.LOGISTICS_MANAGER, UserRole.LOGISTICS_EXECUTIVE],
+    ],
   ];
 
   /*
@@ -163,12 +168,16 @@ describe('Logistics write routes (e2e)', () => {
   });
 
   /*
-    Phase 2D: the Sales date is a calendar day or null. Anything else — no key at all, a day that
-    does not exist, another format, an instant, a number, a year out of range, or a field the
-    route does not take — is refused by the pipe, before the service or a query runs.
+    Phase 2D: the Sales date is a calendar day. Anything else — no key at all, null or blank (a
+    clear: every order must have a date, client 2026-10-17), a day that does not exist, another
+    format, an instant, a number, a year out of range, or a field the route does not take — is
+    refused by the pipe, before the service or a query runs.
   */
   it.each([
     {},
+    { deliveryDate: null },
+    { deliveryDate: '' },
+    { deliveryDate: '   ' },
     { deliveryDate: '2026-02-30' },
     { deliveryDate: '15-10-2026' },
     { deliveryDate: '2026-10-15T00:00:00.000Z' },
@@ -181,6 +190,36 @@ describe('Logistics write routes (e2e)', () => {
         role,
         'patch',
         `${ORDER}/delivery-date`,
+        body,
+      );
+      expect(response.status).toBe(400);
+    }
+  });
+
+  /*
+    The Logistics date correction (client, 2026-10-17): a real day and a reason, both required —
+    no key, a cleared or malformed date, a blank reason or a field the route does not take is
+    refused by the pipe, before the service or a query runs.
+  */
+  it.each([
+    {},
+    { deliveryDate: '2026-10-20' },
+    { deliveryDate: '2026-10-20', reason: '   ' },
+    { deliveryDate: null, reason: 'Moved' },
+    { deliveryDate: '', reason: 'Moved' },
+    { deliveryDate: '2026-02-30', reason: 'Moved' },
+    { deliveryDate: '20-10-2026', reason: 'Moved' },
+    { deliveryDate: '2026-10-20', reason: 'x'.repeat(501) },
+    { deliveryDate: '2026-10-20', reason: 'Moved', status: 'DELIVERED' },
+  ])('refuses the Logistics date correction %j → 400', async (body) => {
+    for (const role of [
+      UserRole.LOGISTICS_MANAGER,
+      UserRole.LOGISTICS_EXECUTIVE,
+    ]) {
+      const response = await send(
+        role,
+        'patch',
+        `${ORDER}/delivery-date-correction`,
         body,
       );
       expect(response.status).toBe(400);
@@ -319,7 +358,7 @@ describe('Logistics write routes (e2e)', () => {
     },
   );
 
-  it('refuses an edit that blanks the customer name, sends a field the order does not have, a value its column cannot hold, or a delivery date that is not a calendar day', async () => {
+  it('refuses an edit that blanks the customer name, sends a field the order does not have, a value its column cannot hold, or a delivery date that is not a calendar day or is cleared', async () => {
     for (const body of [
       { customerName: ' ' },
       { status: 'DELIVERED' },
@@ -328,6 +367,9 @@ describe('Logistics write routes (e2e)', () => {
       { deliveryDate: '2026-02-30' },
       { deliveryDate: '15-10-2026' },
       { deliveryDate: '2026-10-15T00:00:00.000Z' },
+      { deliveryDate: null },
+      { deliveryDate: '' },
+      { deliveryDate: '  ' },
     ]) {
       const response = await send(
         UserRole.LOGISTICS_MANAGER,

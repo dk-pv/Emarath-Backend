@@ -1,3 +1,4 @@
+import { ConfigService } from '@nestjs/config';
 import {
   ConflictException,
   InternalServerErrorException,
@@ -71,6 +72,11 @@ function auditRow(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+/** The business timezone the services read (`BUSINESS_TIME_ZONE`). */
+const config = {
+  getOrThrow: () => ({ businessTimeZone: 'Asia/Dubai' }),
+} as unknown as ConfigService;
 
 function makeService(
   role: UserRole = UserRole.SUPERADMIN,
@@ -174,6 +180,7 @@ function makeService(
     bulk,
     mailer,
     tagAccess,
+    config,
   );
   return {
     handleable,
@@ -480,9 +487,9 @@ describe('LeadRowActionsService.duplicate', () => {
       ).toBe(false);
     });
 
-    // A reordered board can put WON first, so the copy itself converts (ADR-0085 B8); its
-    // response must then carry the order its own create made.
-    it('returns a copy that starts in WON with the order its create made', async () => {
+    // A reordered board can put WON first, so the copy itself would convert (ADR-0085 B8) — and a
+    // converted lead's order needs a delivery date this request cannot carry (client, 2026-10-17).
+    it('refuses a copy into a pipeline whose first stage is WON with a 409, creating nothing', async () => {
       const kit = makeService();
       kit.leadFindFirst.mockResolvedValue({
         id: LEAD_ID,
@@ -492,29 +499,15 @@ describe('LeadRowActionsService.duplicate', () => {
         tags: [],
       });
       kit.stageFindFirst.mockResolvedValue({ name: 'WON' });
-      kit.leadCreate.mockResolvedValue(
-        listRow({ id: 'new-id', status: 'WON', logisticsOrder: null }),
-      );
-      kit.txLeadFindUnique.mockResolvedValue(
-        listRow({
-          id: 'new-id',
-          status: 'WON',
-          logisticsOrder: { orderNumber: 1000, status: 'INITIAL' },
-        }),
-      );
-      kit.auditFindMany.mockResolvedValue([
-        auditRow({ id: 'new-id', status: 'WON' }),
-      ]);
 
-      const item = await kit.service.duplicate(LEAD_ID);
+      const attempt = kit.service.duplicate(LEAD_ID);
 
-      expect(kit.txLeadFindUnique).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: 'new-id' } }),
+      await expect(attempt).rejects.toBeInstanceOf(ConflictException);
+      await expect(attempt).rejects.toThrow(
+        'The “Lead Pipeline” pipeline’s first stage is WON, so a copy would be a converted lead without a Delivery Date.',
       );
-      expect(item.logisticsOrder).toEqual({
-        orderNumber: 1000,
-        status: 'INITIAL',
-      });
+      expect(kit.leadCreate).not.toHaveBeenCalled();
+      expect(kit.auditCreateMany).not.toHaveBeenCalled();
     });
 
     it('is recorded as created from its source, as a duplicate of it, in its own status', async () => {
@@ -677,7 +670,10 @@ describe('LeadRowActionsService.setStatus', () => {
       .mockResolvedValueOnce([auditRow({ status: 'HOT' })])
       .mockResolvedValueOnce([auditRow({ status: 'WON' })]);
 
-    await service.setStatus(LEAD_ID, { status: 'WON' });
+    await service.setStatus(LEAD_ID, {
+      status: 'WON',
+      deliveryDate: '2099-01-15',
+    });
 
     expect(recorded(auditCreateMany)).toEqual([
       expect.objectContaining({
@@ -697,7 +693,48 @@ describe('LeadRowActionsService.setStatus', () => {
         action: 'CREATED',
         leadId: LEAD_ID,
       }),
+      expect.objectContaining({
+        entityType: 'LOGISTICS_ORDER',
+        action: 'UPDATED',
+        actorId: 'u1',
+        source: 'logistics.delivery_date',
+        before: { deliveryDate: null },
+        after: { deliveryDate: '2099-01-15' },
+      }),
     ]);
+  });
+
+  it('refuses Convert without a delivery date, recording nothing', async () => {
+    const { service, leadFindFirst, auditFindMany, auditCreateMany } =
+      makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    auditFindMany
+      .mockResolvedValueOnce([auditRow({ status: 'HOT' })])
+      .mockResolvedValueOnce([auditRow({ status: 'WON' })]);
+
+    await expect(service.setStatus(LEAD_ID, { status: 'WON' })).rejects.toThrow(
+      'A Delivery Date is required to convert a lead to WON.',
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses a delivery date on a status change that converts nothing', async () => {
+    const { service, leadFindFirst, auditFindMany, auditCreateMany } =
+      makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    auditFindMany
+      .mockResolvedValueOnce([auditRow({ status: 'HOT' })])
+      .mockResolvedValueOnce([auditRow({ status: 'LOST' })]);
+
+    await expect(
+      service.setStatus(LEAD_ID, {
+        status: 'LOST',
+        deliveryDate: '2099-01-15',
+      }),
+    ).rejects.toThrow(
+      'A Delivery Date is only accepted when the request converts a lead to WON.',
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 
   // Regression: Convert answered with `logisticsOrder: null` — the row was read before the
@@ -882,66 +919,54 @@ describe('LeadRowActionsService.changePipeline', () => {
   });
 
   /*
-    Current behaviour: the move writes the target pipeline's first stage as the lead's status,
-    so a pipeline whose first stage is named WON converts the lead through this route too
-    (ADR-0085 A2 path 5). Pinned because a Logistics order would follow the CONVERTED event.
+    The move writes the target pipeline's first stage as the lead's status, so a pipeline whose
+    first stage is named WON would convert the lead through this route (ADR-0085 A2 path 5). A
+    converted lead's order needs a delivery date (client, 2026-10-17) this request cannot carry,
+    so such a move is refused — unless the lead is WON already and so does not convert again.
   */
-  it('records CONVERTED when the target pipeline’s first stage is WON', async () => {
+  it('refuses a move onto a WON first stage with a 409, before anything is written', async () => {
+    const {
+      service,
+      leadFindFirst,
+      leadUpdate,
+      stageFindFirst,
+      auditCreateMany,
+    } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID, status: 'HOT' });
+    stageFindFirst.mockResolvedValue({ name: 'WON' });
+
+    const attempt = service.changePipeline(LEAD_ID, { pipeline: 'Fulfilment' });
+
+    await expect(attempt).rejects.toBeInstanceOf(ConflictException);
+    await expect(attempt).rejects.toThrow(
+      'The “Fulfilment” pipeline’s first stage is WON, so moving the lead there would convert it without a Delivery Date.',
+    );
+    expect(leadUpdate).not.toHaveBeenCalled();
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('still moves a lead that is already WON onto a WON first stage — it does not convert again', async () => {
     const {
       service,
       leadFindFirst,
       leadUpdate,
       stageFindFirst,
       auditFindMany,
-      auditCreateMany,
     } = makeService();
-    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID, status: 'WON' });
     stageFindFirst.mockResolvedValue({ name: 'WON' });
-    leadUpdate.mockResolvedValue(listRow({ status: 'WON' }));
+    leadUpdate.mockResolvedValue(
+      listRow({ status: 'WON', pipeline: 'Fulfilment' }),
+    );
     auditFindMany
-      .mockResolvedValueOnce([auditRow({ status: 'HOT' })])
+      .mockResolvedValueOnce([auditRow({ status: 'WON' })])
       .mockResolvedValueOnce([
         auditRow({ status: 'WON', pipeline: 'Fulfilment' }),
       ]);
 
     await service.changePipeline(LEAD_ID, { pipeline: 'Fulfilment' });
 
-    expect(recorded(auditCreateMany)).toMatchObject([
-      { action: 'CONVERTED', after: { status: 'WON' } },
-      { action: 'PIPELINE_CHANGED', after: { pipeline: 'Fulfilment' } },
-      { entityType: 'LOGISTICS_ORDER', action: 'CREATED' },
-    ]);
-  });
-
-  it('returns a lead moved onto a WON first stage with the order the move created', async () => {
-    const {
-      service,
-      leadFindFirst,
-      leadUpdate,
-      leadFindUnique,
-      stageFindFirst,
-    } = makeService();
-    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
-    stageFindFirst.mockResolvedValue({ name: 'WON' });
-    leadUpdate.mockResolvedValue(
-      listRow({ status: 'WON', pipeline: 'Fulfilment', logisticsOrder: null }),
-    );
-    leadFindUnique.mockResolvedValue(
-      listRow({
-        status: 'WON',
-        pipeline: 'Fulfilment',
-        logisticsOrder: { orderNumber: 1001, status: 'INITIAL' },
-      }),
-    );
-
-    const item = await service.changePipeline(LEAD_ID, {
-      pipeline: 'Fulfilment',
-    });
-
-    expect(item.logisticsOrder).toEqual({
-      orderNumber: 1001,
-      status: 'INITIAL',
-    });
+    expect(leadUpdate).toHaveBeenCalled();
   });
 });
 

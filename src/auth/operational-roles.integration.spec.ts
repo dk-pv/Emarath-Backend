@@ -181,6 +181,10 @@ const LOGISTICS_RESUBMIT_LABELS = new Set([
 const LOGISTICS_DELIVERY_DATE_LABELS = new Set([
   'PATCH /api/logistics/orders/:id/delivery-date',
 ]);
+/* Both Logistics roles correct the date once QC has verified the order (client, 2026-10-17). */
+const LOGISTICS_DATE_CORRECTION_LABELS = new Set([
+  'PATCH /api/logistics/orders/:id/delivery-date-correction',
+]);
 
 /*
   The journey read (ADR-0083): the same readers as an order — every sales role on their own
@@ -197,7 +201,8 @@ function isLogisticsRoute(label: string): boolean {
     LOGISTICS_SHIPMENT_LABELS.has(label) ||
     LOGISTICS_MANAGER_LABELS.has(label) ||
     LOGISTICS_RESUBMIT_LABELS.has(label) ||
-    LOGISTICS_DELIVERY_DATE_LABELS.has(label)
+    LOGISTICS_DELIVERY_DATE_LABELS.has(label) ||
+    LOGISTICS_DATE_CORRECTION_LABELS.has(label)
   );
 }
 
@@ -226,6 +231,12 @@ function logisticsAdmits(label: string, role: UserRole): boolean {
   }
   if (LOGISTICS_DELIVERY_DATE_LABELS.has(label)) {
     return role === UserRole.SALES_AGENT || role === UserRole.SALES_MANAGER;
+  }
+  if (LOGISTICS_DATE_CORRECTION_LABELS.has(label)) {
+    return (
+      role === UserRole.LOGISTICS_MANAGER ||
+      role === UserRole.LOGISTICS_EXECUTIVE
+    );
   }
   return false;
 }

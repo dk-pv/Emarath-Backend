@@ -1,8 +1,10 @@
 import { readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { LogisticsStatus, Prisma } from '../generated/prisma/client';
+import { BadRequestException } from '@nestjs/common';
 import {
   addDays,
+  assertRequestedDeliveryDay,
   BusinessDay,
   businessDay,
   DELIVERY_BUCKETS,
@@ -42,6 +44,86 @@ describe('the business day', () => {
       today,
       tomorrow,
     });
+  });
+});
+
+/*
+  The one rule for a day someone asks for (Sales' date, and later the conversion's): a real
+  YYYY-MM-DD day, not before the business day's today — the UAE's (Asia/Dubai, UTC+4, no daylight
+  saving), worked out from the instant, never the server's clock or timezone.
+*/
+describe('a requested delivery day', () => {
+  const at = (instant: string) => businessDay('Asia/Dubai', new Date(instant));
+  const refusal = (day: string, business: BusinessDay) => {
+    try {
+      assertRequestedDeliveryDay(day, business);
+      return null;
+    } catch (error) {
+      expect(error).toBeInstanceOf(BadRequestException);
+      return (error as Error).message;
+    }
+  };
+
+  it.each([
+    // A millisecond before Dubai's midnight (19:59:59.999 UTC) it is still the 14th there.
+    ['2026-10-14T19:59:59.999Z', '2026-10-14', null],
+    [
+      '2026-10-14T19:59:59.999Z',
+      '2026-10-13',
+      'The delivery date can’t be before today, 14-10-2026 (Asia/Dubai).',
+    ],
+    // At Dubai's midnight (20:00 UTC) the 14th becomes a past day — though UTC still says the 14th.
+    [
+      '2026-10-14T20:00:00.000Z',
+      '2026-10-14',
+      'The delivery date can’t be before today, 15-10-2026 (Asia/Dubai).',
+    ],
+    ['2026-10-14T20:00:00.000Z', '2026-10-15', null],
+    ['2026-10-14T20:00:00.000Z', '2026-10-16', null],
+    // Year end: 20:30 UTC on 31 December is already New Year's Day in Dubai.
+    [
+      '2026-12-31T20:30:00.000Z',
+      '2026-12-31',
+      'The delivery date can’t be before today, 01-01-2027 (Asia/Dubai).',
+    ],
+    ['2026-12-31T20:30:00.000Z', '2027-01-01', null],
+    // Midday: far from either edge.
+    ['2026-10-15T08:00:00.000Z', '2026-10-15', null],
+    ['2026-10-15T08:00:00.000Z', '2099-12-31', null],
+  ])('at %s, %s is refused with %j', (instant, day, expected) => {
+    expect(refusal(day, at(instant))).toBe(expected);
+  });
+
+  it.each([
+    '2026-02-30',
+    '2027-02-29',
+    '2026-13-01',
+    '2026-2-3',
+    '15-10-2026',
+    '2026-10-15T00:00:00.000Z',
+    '1999-12-31',
+    '2100-01-01',
+    '',
+    ' 2026-10-20',
+  ])('refuses %j, which is not a real YYYY-MM-DD day', (day) => {
+    expect(refusal(day, at('2026-10-15T08:00:00.000Z'))).toBe(
+      'Delivery Date must be a real date written YYYY-MM-DD (years 2000-2099)',
+    );
+  });
+
+  it('accepts a leap day in a leap year', () => {
+    expect(refusal('2028-02-29', at('2028-02-28T10:00:00.000Z'))).toBeNull();
+  });
+
+  it('names the timezone the day was measured in', () => {
+    expect(
+      refusal(
+        '2026-10-14',
+        businessDay('Asia/Riyadh', new Date('2026-10-15T08:00:00.000Z')),
+      ),
+    ).toBe(
+      'The delivery date can’t be before today, 15-10-2026 (Asia/Riyadh).',
+    );
   });
 });
 

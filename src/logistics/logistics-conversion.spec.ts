@@ -1,17 +1,35 @@
 import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
+import { BadRequestException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Prisma } from '../generated/prisma/client';
 import { userActor } from '../audit/audit-events';
 import {
   ConvertibleLeadState,
+  DELIVERY_DATE_NOT_CONVERTING_MESSAGE,
+  DELIVERY_DATE_REQUIRED_MESSAGE,
   becameConverted,
   convertLeadsToOrders,
+  requestedDeliveryDate,
 } from './logistics-conversion';
 
 const LEAD_A = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const LEAD_B = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
-const context = { actor: userActor({ id: 'user-1' }), source: 'leads.status' };
+/** The business day the requests below are measured on: 17 Oct 2026 in Dubai. */
+const BUSINESS_DAY = {
+  timeZone: 'Asia/Dubai',
+  today: '2026-10-17',
+  tomorrow: '2026-10-18',
+};
+/** A converting request: it carries the requested delivery day (client, 2026-10-17). */
+const context = {
+  actor: userActor({ id: 'user-1' }),
+  source: 'leads.status',
+  deliveryDate: { day: '2026-10-20', businessDay: BUSINESS_DAY },
+};
+/** A request that carries no date — the Logistics write-backs, and every non-converting write. */
+const undated = { actor: userActor({ id: 'user-1' }), source: 'leads.status' };
 
 const state = (
   overrides: Partial<ConvertibleLeadState> = {},
@@ -114,7 +132,7 @@ describe('convertLeadsToOrders', () => {
     expect(args.skipDuplicates).toBe(true);
   });
 
-  it('records the order’s creation, once per order actually inserted', async () => {
+  it('records the order’s creation and its requested date, once per order actually inserted', async () => {
     const { tx } = makeTx();
 
     const { events, orderIdByLead } = await convertLeadsToOrders(
@@ -127,7 +145,12 @@ describe('convertLeadsToOrders', () => {
     );
 
     expect(orderIdByLead.get(LEAD_A)).toBe('order-1');
-    expect(events).toHaveLength(2);
+    expect(events.map((event) => [event.leadId, event.action])).toEqual([
+      [LEAD_A, 'CREATED'],
+      [LEAD_A, 'UPDATED'],
+      [LEAD_B, 'CREATED'],
+      [LEAD_B, 'UPDATED'],
+    ]);
     expect(events[0]).toMatchObject({
       entityType: 'LOGISTICS_ORDER',
       entityId: 'order-1',
@@ -141,12 +164,25 @@ describe('convertLeadsToOrders', () => {
         customerName: 'Acme Trading',
       },
     });
+    // The snapshot stays the lead's copy; the date is Sales' own event, not part of it.
+    expect(events[0].after).not.toHaveProperty('deliveryDate');
+    expect(events[1]).toEqual({
+      entityType: 'LOGISTICS_ORDER',
+      entityId: 'order-1',
+      leadId: LEAD_A,
+      action: 'UPDATED',
+      actor: { type: 'USER', id: 'user-1' },
+      source: 'logistics.delivery_date',
+      before: { deliveryDate: null },
+      after: { deliveryDate: '2026-10-20' },
+    });
   });
 
   /*
     CD-2: one lead, one order, ever. `skipDuplicates` over the UNIQUE lead_id is what makes a
     repeated conversion — a retry, a re-conversion after a QC rejection, two writers racing —
-    keep the order the lead already has instead of creating a second one or failing.
+    keep the order the lead already has instead of creating a second one or failing. The
+    Logistics write-backs that make a lead WON again carry no date, and need none.
   */
   it('keeps the order a lead already has, and records no second creation', async () => {
     const { tx, findMany } = makeTx([LEAD_A]);
@@ -154,7 +190,7 @@ describe('convertLeadsToOrders', () => {
     const { events, orderIdByLead } = await convertLeadsToOrders(
       tx,
       [{ id: LEAD_A, state: state() }],
-      context,
+      undated,
     );
 
     expect(events).toEqual([]);
@@ -174,17 +210,16 @@ describe('convertLeadsToOrders', () => {
       context,
     );
 
-    expect(events.map((event) => event.leadId)).toEqual([LEAD_A]);
+    expect([...new Set(events.map((event) => event.leadId))]).toEqual([LEAD_A]);
     expect(orderIdByLead.get(LEAD_B)).toBe(`kept-${LEAD_B}`);
   });
 
   /*
-    Phase 2D (ADR-0094): the delivery date is set on the order, never at conversion. A new order
-    starts undated; a lead won again keeps its order — and the date Sales gave it — because the
-    only write here is the insert that skips it. The double has no update method, so any other
-    write to an existing order would fail these tests.
+    Every new order must have a delivery date (client, 2026-10-17): the day the converting request
+    carries is stored on the order in the same insert — never the Booking Date, never today by
+    default. The double has no update method, so a second write would fail these tests.
   */
-  it('starts every new order undated', async () => {
+  it('stores the requested day on the new order, in the insert itself', async () => {
     const { tx, createManyAndReturn } = makeTx();
 
     await convertLeadsToOrders(tx, [{ id: LEAD_A, state: state() }], context);
@@ -192,10 +227,13 @@ describe('convertLeadsToOrders', () => {
     const [args] = createManyAndReturn.mock.calls[0] as unknown as [
       { data: Record<string, unknown>[] },
     ];
-    expect(args.data[0]).not.toHaveProperty('deliveryDate');
+    expect(args.data[0].deliveryDate).toEqual(
+      new Date('2026-10-20T00:00:00.000Z'),
+    );
+    expect(args.data[0]).not.toHaveProperty('bookingDate');
   });
 
-  it('gives a converted duplicate its own undated order and leaves the original’s order alone', async () => {
+  it('gives a converted duplicate its own dated order and leaves the original’s order alone', async () => {
     const { tx, createManyAndReturn } = makeTx([LEAD_A]);
 
     const { events, orderIdByLead } = await convertLeadsToOrders(
@@ -208,9 +246,8 @@ describe('convertLeadsToOrders', () => {
       { data: Record<string, unknown>[]; skipDuplicates: boolean },
     ];
     expect(args.data.map((row) => row.leadId)).toEqual([LEAD_B]);
-    expect(args.data[0]).not.toHaveProperty('deliveryDate');
     expect(args.skipDuplicates).toBe(true);
-    expect(events.map((event) => event.leadId)).toEqual([LEAD_B]);
+    expect([...new Set(events.map((event) => event.leadId))]).toEqual([LEAD_B]);
     expect(orderIdByLead.has(LEAD_A)).toBe(false);
   });
 
@@ -220,6 +257,7 @@ describe('convertLeadsToOrders', () => {
     await convertLeadsToOrders(tx, [{ id: LEAD_A, state: state() }], {
       actor: { type: 'SYSTEM' },
       source: 'leads.import',
+      deliveryDate: context.deliveryDate,
     });
 
     const [args] = createManyAndReturn.mock.calls[0] as unknown as [
@@ -231,11 +269,97 @@ describe('convertLeadsToOrders', () => {
   it('asks the database nothing when no lead converted', async () => {
     const { tx, createManyAndReturn, findMany } = makeTx();
 
-    const result = await convertLeadsToOrders(tx, [], context);
+    const result = await convertLeadsToOrders(tx, [], undated);
 
     expect(result).toEqual({ orderIdByLead: new Map(), events: [] });
     expect(createManyAndReturn).not.toHaveBeenCalled();
     expect(findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('convertLeadsToOrders — the delivery date a new order must have', () => {
+  it('refuses a new order without a date with a 400, so the transaction rolls back', async () => {
+    const { tx } = makeTx();
+
+    const attempt = convertLeadsToOrders(
+      tx,
+      [{ id: LEAD_A, state: state() }],
+      undated,
+    );
+
+    await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+    await expect(attempt).rejects.toThrow(DELIVERY_DATE_REQUIRED_MESSAGE);
+  });
+
+  it.each([
+    [
+      'a day before today in Dubai',
+      '2026-10-16',
+      'The delivery date can’t be before today, 17-10-2026 (Asia/Dubai).',
+    ],
+    [
+      'a day that does not exist',
+      '2026-02-30',
+      'Delivery Date must be a real date written YYYY-MM-DD (years 2000-2099)',
+    ],
+    [
+      'another format',
+      '20-10-2026',
+      'Delivery Date must be a real date written YYYY-MM-DD (years 2000-2099)',
+    ],
+  ])('refuses %s before inserting anything', async (_label, day, message) => {
+    const { tx, createManyAndReturn } = makeTx();
+
+    const attempt = convertLeadsToOrders(tx, [{ id: LEAD_A, state: state() }], {
+      ...undated,
+      deliveryDate: { day, businessDay: BUSINESS_DAY },
+    });
+
+    await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+    await expect(attempt).rejects.toThrow(message);
+    expect(createManyAndReturn).not.toHaveBeenCalled();
+  });
+
+  it('accepts today itself', async () => {
+    const { tx, createManyAndReturn } = makeTx();
+
+    await convertLeadsToOrders(tx, [{ id: LEAD_A, state: state() }], {
+      ...undated,
+      deliveryDate: { day: '2026-10-17', businessDay: BUSINESS_DAY },
+    });
+
+    expect(createManyAndReturn).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a date on a request that converts nothing', async () => {
+    const empty = makeTx();
+    await expect(convertLeadsToOrders(empty.tx, [], context)).rejects.toThrow(
+      DELIVERY_DATE_NOT_CONVERTING_MESSAGE,
+    );
+    expect(empty.createManyAndReturn).not.toHaveBeenCalled();
+
+    // Every lead already has its order: no new order, so the date has nowhere to go.
+    const kept = makeTx([LEAD_A]);
+    await expect(
+      convertLeadsToOrders(kept.tx, [{ id: LEAD_A, state: state() }], context),
+    ).rejects.toThrow(DELIVERY_DATE_NOT_CONVERTING_MESSAGE);
+  });
+});
+
+describe('requestedDeliveryDate', () => {
+  const config = {
+    getOrThrow: () => ({ businessTimeZone: 'Asia/Dubai' }),
+  } as unknown as ConfigService;
+
+  it('is nothing when the request carries no date', () => {
+    expect(requestedDeliveryDate(undefined, config)).toBeUndefined();
+  });
+
+  it('measures the day against today in the business timezone', () => {
+    const requested = requestedDeliveryDate('2026-10-20', config);
+    expect(requested?.day).toBe('2026-10-20');
+    expect(requested?.businessDay.timeZone).toBe('Asia/Dubai');
+    expect(requested?.businessDay.today).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });
 

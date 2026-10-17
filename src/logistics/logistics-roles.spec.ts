@@ -7,6 +7,8 @@ import { RolesGuard } from '../auth/roles.guard';
 import { LogisticsOrdersController } from './logistics-orders.controller';
 import {
   ACTION_ROLES,
+  DATE_REQUIRED_ACTIONS,
+  DELIVERY_DATE_CORRECTION_ROLES,
   DELIVERY_DATE_ROLES,
   LOGISTICS_READ_ROLES,
   MANAGER_ROLES,
@@ -149,15 +151,21 @@ const BY_ROLE: Partial<
 > = {
   [UserRole.QC]: { [S.INITIAL]: ['QC_VERIFY', 'QC_REJECT'] },
   [UserRole.LOGISTICS_MANAGER]: {
-    [S.QC_VERIFIED]: ['DISPATCH', 'EDIT'],
-    [S.DISPATCHED]: ['DELIVER', 'CANCEL', 'RTO', 'CORRECT_AWB'],
+    [S.QC_VERIFIED]: ['DISPATCH', 'EDIT', 'CORRECT_DELIVERY_DATE'],
+    [S.DISPATCHED]: [
+      'DELIVER',
+      'CANCEL',
+      'RTO',
+      'CORRECT_AWB',
+      'CORRECT_DELIVERY_DATE',
+    ],
     [S.DELIVERED]: ['CORRECT_AWB'],
     [S.CANCELLED]: ['CORRECT_AWB'],
     [S.RTO]: ['CANCEL', 'CORRECT_AWB'],
   },
   [UserRole.LOGISTICS_EXECUTIVE]: {
-    [S.QC_VERIFIED]: ['DISPATCH'],
-    [S.DISPATCHED]: ['DELIVER', 'CANCEL'],
+    [S.QC_VERIFIED]: ['DISPATCH', 'CORRECT_DELIVERY_DATE'],
+    [S.DISPATCHED]: ['DELIVER', 'CANCEL', 'CORRECT_DELIVERY_DATE'],
     [S.RTO]: ['CANCEL'],
   },
   [UserRole.SALES_MANAGER]: {
@@ -265,6 +273,7 @@ describe('allowedActions — agrees with the routes that enforce them', () => {
     EDIT: 'edit',
     CORRECT_AWB: 'correctAwb',
     SET_DELIVERY_DATE: 'setDeliveryDate',
+    CORRECT_DELIVERY_DATE: 'correctDeliveryDate',
   };
 
   function routeAdmits(action: OrderAction, role: UserRole): boolean {
@@ -304,9 +313,9 @@ describe('allowedActions — agrees with the routes that enforce them', () => {
       }
     }
     // Not vacuous: QC 2×1 each for verify and reject, resubmit 2, dispatch 3, deliver 3,
-    // cancel 3 roles × 2 statuses, RTO 2, edit 2, AWB correction 2 roles × 4 statuses, and the
-    // Sales delivery date 3 roles × 2 statuses.
-    expect(offered).toBe(36);
+    // cancel 3 roles × 2 statuses, RTO 2, edit 2, AWB correction 2 roles × 4 statuses, the
+    // Sales delivery date 3 roles × 2 statuses, and the Logistics date correction 3 roles × 2.
+    expect(offered).toBe(42);
   });
 
   it('gates every route by the one table', () => {
@@ -321,6 +330,7 @@ describe('allowedActions — agrees with the routes that enforce them', () => {
       EDIT: MANAGER_ROLES,
       CORRECT_AWB: MANAGER_ROLES,
       SET_DELIVERY_DATE: DELIVERY_DATE_ROLES,
+      CORRECT_DELIVERY_DATE: DELIVERY_DATE_CORRECTION_ROLES,
     });
   });
 
@@ -346,6 +356,15 @@ describe('allowedActions — agrees with the routes that enforce them', () => {
     ['SET_DELIVERY_DATE', UserRole.LOGISTICS_EXECUTIVE, false],
     ['SET_DELIVERY_DATE', UserRole.QC, false],
     ['SET_DELIVERY_DATE', UserRole.ACCOUNTS_EXECUTIVE, false],
+    ['CORRECT_DELIVERY_DATE', UserRole.LOGISTICS_MANAGER, true],
+    ['CORRECT_DELIVERY_DATE', UserRole.LOGISTICS_EXECUTIVE, true],
+    ['CORRECT_DELIVERY_DATE', UserRole.SUPERADMIN, true],
+    ['CORRECT_DELIVERY_DATE', UserRole.QC, false],
+    ['CORRECT_DELIVERY_DATE', UserRole.SALES_AGENT, false],
+    ['CORRECT_DELIVERY_DATE', UserRole.SALES_MANAGER, false],
+    ['CORRECT_DELIVERY_DATE', UserRole.CUSTOMER_SERVICE_AGENT, false],
+    ['CORRECT_DELIVERY_DATE', UserRole.MARKETING_ANALYST, false],
+    ['CORRECT_DELIVERY_DATE', UserRole.ACCOUNTS_EXECUTIVE, false],
   ] as const)('the %s route admits %s: %s', (action, role, admitted) => {
     expect(routeAdmits(action, role)).toBe(admitted);
   });
@@ -374,5 +393,94 @@ describe('allowedActions — a lead in a pipeline closed to the caller', () => {
     expect(allowedActions(S.QC_REJECTED, UserRole.SALES_MANAGER, true)).toEqual(
       ['RESUBMIT'],
     );
+  });
+});
+
+/*
+  Every order must have a delivery date (client, 2026-10-17): an undated order is not offered QC
+  verification or dispatch. Nothing else depends on the date, and a dated order is offered exactly
+  what it was before.
+*/
+describe('allowedActions — an order without a delivery date', () => {
+  it('names QC verification and dispatch, and only them, as needing the date', () => {
+    expect(DATE_REQUIRED_ACTIONS).toEqual(['QC_VERIFY', 'DISPATCH']);
+  });
+
+  it('drops QC verification and dispatch and nothing else, for every role and status', () => {
+    for (const role of ALL_ROLES) {
+      for (const status of ALL_STATUSES) {
+        expect(allowedActions(status, role, false, false)).toEqual(
+          allowedActions(status, role).filter(
+            (action) => action !== 'QC_VERIFY' && action !== 'DISPATCH',
+          ),
+        );
+      }
+    }
+  });
+
+  it('offers a dated order what the tables give, as before', () => {
+    for (const role of ALL_ROLES) {
+      for (const status of ALL_STATUSES) {
+        expect(allowedActions(status, role, false, true)).toEqual(
+          allowedActions(status, role),
+        );
+      }
+    }
+  });
+
+  it('leaves QC only the rejection of an undated order, and Logistics no dispatch', () => {
+    expect(allowedActions(S.INITIAL, UserRole.QC, false, false)).toEqual([
+      'QC_REJECT',
+    ]);
+    // Logistics can still date it — the Manager's edit, and both roles' correction.
+    expect(
+      allowedActions(S.QC_VERIFIED, UserRole.LOGISTICS_MANAGER, false, false),
+    ).toEqual(['EDIT', 'CORRECT_DELIVERY_DATE']);
+    expect(
+      allowedActions(S.QC_VERIFIED, UserRole.LOGISTICS_EXECUTIVE, false, false),
+    ).toEqual(['CORRECT_DELIVERY_DATE']);
+    // Sales can still date it — the way out of the gate.
+    expect(
+      allowedActions(S.INITIAL, UserRole.SALES_AGENT, false, false),
+    ).toEqual(['SET_DELIVERY_DATE']);
+  });
+});
+
+/*
+  The Logistics team corrects a delivery date once QC has verified the order (client, 2026-10-17):
+  both Logistics roles, on QC Verified and Dispatched orders only. Not QC (it verifies only, Q11),
+  not Sales (whose own date action is unchanged), and no history correction on Delivered, Cancelled
+  or RTO orders (undecided).
+*/
+describe('the Logistics delivery-date correction', () => {
+  it('is for both Logistics roles and Super Admin, and no one else', () => {
+    expect(DELIVERY_DATE_CORRECTION_ROLES).toEqual([
+      UserRole.LOGISTICS_MANAGER,
+      UserRole.LOGISTICS_EXECUTIVE,
+      UserRole.SUPERADMIN,
+    ]);
+  });
+
+  it('is taken on QC Verified and Dispatched orders only', () => {
+    expect(actionStatuses('CORRECT_DELIVERY_DATE')).toEqual([
+      S.QC_VERIFIED,
+      S.DISPATCHED,
+    ]);
+  });
+
+  it('is offered dated or not — it is how an undated order gets its date', () => {
+    for (const status of [S.QC_VERIFIED, S.DISPATCHED]) {
+      expect(
+        allowedActions(status, UserRole.LOGISTICS_EXECUTIVE, false, false),
+      ).toContain('CORRECT_DELIVERY_DATE');
+    }
+  });
+
+  it('leaves Sales’ own date action exactly as it was', () => {
+    expect(ACTION_ROLES.SET_DELIVERY_DATE).toEqual(DELIVERY_DATE_ROLES);
+    expect(actionStatuses('SET_DELIVERY_DATE')).toEqual([
+      S.INITIAL,
+      S.QC_REJECTED,
+    ]);
   });
 });

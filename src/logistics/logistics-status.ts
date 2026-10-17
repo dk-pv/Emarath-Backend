@@ -100,8 +100,12 @@ export const TERMINAL_STATUSES: readonly LogisticsStatus[] = [
  * - SET_DELIVERY_DATE (Phase 2D, ADR-0094): Sales sets or clears the requested delivery day
  *   until QC verifies the order. From QC_VERIFIED the Logistics Manager's EDIT owns the date, and
  *   from dispatch nobody changes it. Provisional default P2, pending open client question D4.
+ * - CORRECT_DELIVERY_DATE (client, 2026-10-17: Logistics needs a controlled way to correct the
+ *   date): the Logistics team re-dates an order QC has verified, before or after dispatch, with a
+ *   reason. Delivered, Cancelled and RTO orders are history, and how they are dated is undecided.
  */
-export type OrderEdit = 'EDIT' | 'CORRECT_AWB' | 'SET_DELIVERY_DATE';
+export type OrderEdit =
+  'EDIT' | 'CORRECT_AWB' | 'SET_DELIVERY_DATE' | 'CORRECT_DELIVERY_DATE';
 
 export const ORDER_EDIT_STATUSES: Readonly<
   Record<OrderEdit, readonly LogisticsStatus[]>
@@ -114,6 +118,10 @@ export const ORDER_EDIT_STATUSES: Readonly<
     LogisticsStatus.CANCELLED,
   ],
   SET_DELIVERY_DATE: [LogisticsStatus.INITIAL, LogisticsStatus.QC_REJECTED],
+  CORRECT_DELIVERY_DATE: [
+    LogisticsStatus.QC_VERIFIED,
+    LogisticsStatus.DISPATCHED,
+  ],
 };
 
 /**

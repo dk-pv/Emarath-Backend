@@ -113,27 +113,20 @@ describe('LeadsImportRepository.insertLeads — audit (ADR-0083)', () => {
     (ADR-0085 A2 path 7): the batch's transaction creates its Logistics order and records the
     CONVERTED event beside CREATED, with the order named on the conversion alone.
   */
-  it('converts an imported WON row inside the batch’s transaction', async () => {
+  /*
+    The import service refuses every row that would arrive WON before a batch is written (a
+    converted lead's order needs a delivery date, client 2026-10-17). Should one reach a batch
+    anyway — a stage reordered between validation and the write — the conversion refuses it, and
+    the batch's transaction rolls back rather than create an undated order.
+  */
+  it('refuses a WON row that reaches the batch, writing no event', async () => {
     const { repository, auditFindMany, auditCreateMany } = makeRepository();
     auditFindMany.mockResolvedValue([{ ...auditRow(LEAD_A), status: 'WON' }]);
 
-    await repository.insertLeads([record(LEAD_A, null)], audit);
-
-    const rows = (
-      auditCreateMany.mock.calls[0] as [
-        { data: { action: string; entityType: string }[] },
-      ]
-    )[0].data;
-    expect(rows).toMatchObject([
-      { entityId: LEAD_A, action: 'CREATED', after: { status: 'WON' } },
-      {
-        entityId: LEAD_A,
-        action: 'CONVERTED',
-        after: { status: 'WON' },
-        metadata: { importJobId: 'job-1', orderId: 'order-1' },
-      },
-      { entityType: 'LOGISTICS_ORDER', action: 'CREATED', leadId: LEAD_A },
-    ]);
+    await expect(
+      repository.insertLeads([record(LEAD_A, null)], audit),
+    ).rejects.toThrow('A Delivery Date is required to convert a lead to WON.');
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 
   it('leaves an imported row in any other status unconverted', async () => {

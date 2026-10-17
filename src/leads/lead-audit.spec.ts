@@ -23,6 +23,18 @@ const context: LeadAuditContext = {
   actor: userActor({ id: 'user-1' }),
   source: 'leads.status',
 };
+/** The same request converting a lead: it carries the requested delivery day (client, 2026-10-17). */
+const converting: LeadAuditContext = {
+  ...context,
+  deliveryDate: {
+    day: '2026-10-20',
+    businessDay: {
+      timeZone: 'Asia/Dubai',
+      today: '2026-10-17',
+      tomorrow: '2026-10-18',
+    },
+  },
+};
 
 /** A row shaped like the audit select. */
 function auditRow(overrides: Partial<LeadAuditRow> = {}): LeadAuditRow {
@@ -358,7 +370,7 @@ describe('auditLeadChanges', () => {
       [auditRow({ status: 'WON' })],
     ]);
 
-    const result = await auditLeadChanges(prisma, [LEAD], context, () => {
+    const result = await auditLeadChanges(prisma, [LEAD], converting, () => {
       calls.push('change');
       return Promise.resolve('changed');
     });
@@ -379,6 +391,12 @@ describe('auditLeadChanges', () => {
     expect(recorded(createMany)).toMatchObject([
       { action: 'CONVERTED', actorId: 'user-1', entityId: LEAD },
       { entityType: 'LOGISTICS_ORDER', action: 'CREATED', leadId: LEAD },
+      {
+        entityType: 'LOGISTICS_ORDER',
+        action: 'UPDATED',
+        leadId: LEAD,
+        source: 'logistics.delivery_date',
+      },
     ]);
   });
 
@@ -501,7 +519,7 @@ describe('applyLeadChanges (the caller-transaction form)', () => {
       [auditRow({ status: 'WON' })],
     ]);
 
-    const result = await applyLeadChanges(tx, [LEAD], context, () => {
+    const result = await applyLeadChanges(tx, [LEAD], converting, () => {
       calls.push('change');
       return Promise.resolve('changed');
     });
@@ -520,6 +538,7 @@ describe('applyLeadChanges (the caller-transaction form)', () => {
     expect(recorded(createMany)).toMatchObject([
       { action: 'CONVERTED', entityId: LEAD },
       { entityType: 'LOGISTICS_ORDER', action: 'CREATED' },
+      { entityType: 'LOGISTICS_ORDER', action: 'UPDATED' },
     ]);
   });
 
@@ -552,7 +571,7 @@ describe('applyLeadChanges — conversion to a Logistics order', () => {
       [auditRow({ status: 'WON' })],
     ]);
 
-    await applyLeadChanges(tx, [LEAD], context, change);
+    await applyLeadChanges(tx, [LEAD], converting, change);
 
     const [args] = createManyAndReturn.mock.calls[0] as unknown as [
       { data: Record<string, unknown>[]; skipDuplicates: boolean },
@@ -565,11 +584,41 @@ describe('applyLeadChanges — conversion to a Logistics order', () => {
       customerName: 'Acme',
       primaryPhone: '971500000000',
     });
+    // The order's creation, and Sales' requested date as its own event, in the same write.
     expect(
-      recorded(createMany).filter(
-        (row) => row.entityType === 'LOGISTICS_ORDER',
-      ),
-    ).toHaveLength(1);
+      recorded(createMany)
+        .filter((row) => row.entityType === 'LOGISTICS_ORDER')
+        .map((row) => [row.action, row.source]),
+    ).toEqual([
+      ['CREATED', 'leads.status'],
+      ['UPDATED', 'logistics.delivery_date'],
+    ]);
+  });
+
+  it('refuses a conversion without a delivery date, recording nothing', async () => {
+    const { tx, createMany } = makeTx([
+      [auditRow({ status: 'HOT' })],
+      [auditRow({ status: 'WON' })],
+    ]);
+
+    await expect(applyLeadChanges(tx, [LEAD], context, change)).rejects.toThrow(
+      'A Delivery Date is required to convert a lead to WON.',
+    );
+    expect(createMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses a delivery date on a change that converts nothing, recording nothing', async () => {
+    const { tx, createMany } = makeTx([
+      [auditRow({ status: 'HOT' })],
+      [auditRow({ status: 'Cold' })],
+    ]);
+
+    await expect(
+      applyLeadChanges(tx, [LEAD], converting, change),
+    ).rejects.toThrow(
+      'A Delivery Date is only accepted when the request converts a lead to WON.',
+    );
+    expect(createMany).not.toHaveBeenCalled();
   });
 
   it('puts the order id on the CONVERTED event and on no other lead event', async () => {
@@ -578,7 +627,7 @@ describe('applyLeadChanges — conversion to a Logistics order', () => {
       [auditRow({ status: 'WON', category: 'Retail' })],
     ]);
 
-    await applyLeadChanges(tx, [LEAD], context, change);
+    await applyLeadChanges(tx, [LEAD], converting, change);
 
     const leadEvents = recorded(createMany).filter(
       (row) => row.entityType === 'LEAD',
@@ -632,14 +681,39 @@ describe('applyLeadChanges — conversion to a Logistics order', () => {
       [auditRow({ status: 'WON' })],
     ]);
 
-    await recordLeadsCreated(tx, [LEAD], context);
+    await recordLeadsCreated(tx, [LEAD], converting);
 
     expect(createManyAndReturn).toHaveBeenCalledTimes(1);
     expect(recorded(createMany)).toMatchObject([
       { action: 'CREATED', entityId: LEAD },
       { action: 'CONVERTED', entityId: LEAD, metadata: { orderId: 'order-1' } },
       { entityType: 'LOGISTICS_ORDER', action: 'CREATED', leadId: LEAD },
+      {
+        entityType: 'LOGISTICS_ORDER',
+        action: 'UPDATED',
+        leadId: LEAD,
+        source: 'logistics.delivery_date',
+        after: { deliveryDate: '2026-10-20' },
+      },
     ]);
+  });
+
+  it('refuses a lead created as WON without a delivery date, recording nothing', async () => {
+    const { tx, createMany } = makeTx([[auditRow({ status: 'WON' })]]);
+
+    await expect(recordLeadsCreated(tx, [LEAD], context)).rejects.toThrow(
+      'A Delivery Date is required to convert a lead to WON.',
+    );
+    expect(createMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses a delivery date on a lead created in any other status', async () => {
+    const { tx, createMany } = makeTx([[auditRow({ status: 'New' })]]);
+
+    await expect(recordLeadsCreated(tx, [LEAD], converting)).rejects.toThrow(
+      'A Delivery Date is only accepted when the request converts a lead to WON.',
+    );
+    expect(createMany).not.toHaveBeenCalled();
   });
 
   it('leaves a lead created in any other status alone', async () => {

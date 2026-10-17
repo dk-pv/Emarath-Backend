@@ -1,9 +1,13 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { requestedDeliveryDate } from '../../logistics/logistics-conversion';
+import { CONVERTED_STATUS } from '../../reports/converted-leads-where';
 import { Prisma } from '../../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../../auth/current-user';
 import { ASSIGNABLE_USER_WHERE, REASSIGN_ROLES } from '../../auth/role-groups';
@@ -108,6 +112,7 @@ export class LeadRowActionsService {
     private readonly bulk: LeadsBulkService,
     private readonly mailer: MailerService,
     private readonly tagAccess: TagAccessService,
+    private readonly config: ConfigService,
   ) {}
 
   /**
@@ -132,6 +137,16 @@ export class LeadRowActionsService {
     // The copy lands in the source's pipeline, so the caller must be able to create there
     // (ADR-0093 B9) — an agent copying an assigned lead from a pipeline closed to them cannot.
     assertPipelineOpen(user, source.pipeline);
+    // The copy starts in its pipeline's first stage. If that is WON the copy would be a new
+    // converted lead, and a converted lead's order needs a delivery date (client, 2026-10-17)
+    // that this request has no way to carry, so it is refused before anything is written.
+    const status =
+      (await firstStageName(this.prisma, source.pipeline)) ?? 'New';
+    if (status === CONVERTED_STATUS) {
+      throw new ConflictException(
+        `The “${source.pipeline}” pipeline’s first stage is ${CONVERTED_STATUS}, so a copy would be a converted lead without a Delivery Date. Change that pipeline’s stage order before duplicating into it.`,
+      );
+    }
 
     const {
       assignments,
@@ -154,7 +169,7 @@ export class LeadRowActionsService {
     );
     const data: Prisma.LeadCreateInput = {
       ...scalars,
-      status: (await firstStageName(this.prisma, source.pipeline)) ?? 'New',
+      status,
       // The copy shares the source's phone, so it duplicates the same original (ADR-0092).
       duplicateOf: { connect: { id: duplicateOfId ?? sourceId } },
       assignments: copiedAssignees.length
@@ -253,7 +268,11 @@ export class LeadRowActionsService {
     const updated = await auditLeadChanges(
       this.prisma,
       [id],
-      { actor: userActor(user), source: 'leads.status' },
+      {
+        actor: userActor(user),
+        source: 'leads.status',
+        deliveryDate: requestedDeliveryDate(dto.deliveryDate, this.config),
+      },
       (tx) =>
         tx.lead.update({
           where: { id },
@@ -375,7 +394,7 @@ export class LeadRowActionsService {
 
     const target = await this.prisma.lead.findFirst({
       where: { AND: [leadScopeWhere(user), { id }] },
-      select: { id: true, pipeline: true },
+      select: { id: true, status: true, pipeline: true },
     });
     if (!target) throw new NotFoundException(OUT_OF_SCOPE_REASON);
     // Managers and administrators only (the route's @Roles), out of a pipeline they may change
@@ -387,6 +406,14 @@ export class LeadRowActionsService {
     if (!firstStage) {
       throw new BadRequestException(
         `The “${dto.pipeline}” pipeline has no stages, so a lead can’t be moved into it.`,
+      );
+    }
+    // The move lands the lead on that first stage. If that is WON the move would convert it, and
+    // a converted lead's order needs a delivery date (client, 2026-10-17) that this request has no
+    // way to carry. A lead that is already WON does not convert again, so it may still move.
+    if (firstStage === CONVERTED_STATUS && target.status !== CONVERTED_STATUS) {
+      throw new ConflictException(
+        `The “${dto.pipeline}” pipeline’s first stage is ${CONVERTED_STATUS}, so moving the lead there would convert it without a Delivery Date. Convert the lead with its Delivery Date instead, or change that pipeline’s stage order.`,
       );
     }
 

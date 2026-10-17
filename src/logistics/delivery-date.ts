@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import { LogisticsStatus, Prisma } from '../generated/prisma/client';
 
 /**
@@ -51,6 +52,31 @@ export function isDateOnly(value: string): boolean {
   if (year < 2000 || year > 2099) return false;
   const date = new Date(Date.UTC(year, month - 1, day));
   return date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+/** What a delivery date that is not a real `YYYY-MM-DD` day is refused with. */
+export const DELIVERY_DAY_FORMAT_MESSAGE =
+  'Delivery Date must be a real date written YYYY-MM-DD (years 2000-2099)';
+
+/**
+ * Refuses, with a 400, a requested delivery day that is not a real `YYYY-MM-DD` day or is before
+ * the business day's today — measured in the business timezone (`BUSINESS_TIME_ZONE`, Asia/Dubai),
+ * never the server's or the browser's. Today itself is allowed. The one rule for a day someone
+ * asks for, so every route that takes one refuses the same days with the same words.
+ */
+export function assertRequestedDeliveryDay(
+  day: string,
+  business: BusinessDay,
+): void {
+  if (!isDateOnly(day)) {
+    throw new BadRequestException(DELIVERY_DAY_FORMAT_MESSAGE);
+  }
+  if (day < business.today) {
+    const shown = business.today.split('-').reverse().join('-');
+    throw new BadRequestException(
+      `The delivery date can’t be before today, ${shown} (${business.timeZone}).`,
+    );
+  }
 }
 
 /** The DATE column's value for a day: its UTC midnight, which the column stores as the day. */

@@ -14,6 +14,12 @@ import {
 const trim = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' ? value.trim() : value;
 
+/** A blank value is no value: the key is treated as absent. */
+const blankToUndefined = ({ value }: { value: unknown }): unknown =>
+  typeof value === 'string' && value.trim() === ''
+    ? undefined
+    : trim({ value });
+
 /** Row "Assignee" action (LEAD-10.1 AC3): the agent to own this one lead. */
 export class ReassignLeadDto {
   @IsUUID('all', { message: 'agentId must be a valid user id' })
@@ -44,6 +50,17 @@ export class SetLeadStatusDto {
   @MaxLength(120)
   @IsOptional()
   lostReason?: string;
+
+  /**
+   * The requested delivery day, `YYYY-MM-DD`, sent only when this request converts the lead to
+   * WON: the order it creates must have one (client, 2026-10-17). Never the Booking Date. Its day
+   * rules are checked where the order is created (`convertLeadsToOrders`); blank counts as absent.
+   */
+  @Transform(blankToUndefined)
+  @IsString()
+  @MaxLength(32)
+  @IsOptional()
+  deliveryDate?: string;
 }
 
 /** Row "Delete" action (LEAD-10.1 AC5): confirms which lead was removed. */

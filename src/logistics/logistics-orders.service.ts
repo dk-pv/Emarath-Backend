@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -14,9 +13,13 @@ import { applyLeadChanges } from '../leads/lead-audit';
 import { escapeLike } from '../leads/lead-search';
 import { assertMayChangeLead } from '../pipelines/pipeline-access';
 import { CONVERTED_STATUS } from '../reports/converted-leads-where';
-import { logisticsOrderScopeWhere } from './logistics-roles';
+import {
+  DATE_REQUIRED_ACTIONS,
+  logisticsOrderScopeWhere,
+} from './logistics-roles';
 import {
   addDays,
+  assertRequestedDeliveryDay,
   BusinessDay,
   businessDay,
   DELIVERY_BUCKETS,
@@ -36,6 +39,7 @@ import {
 } from './logistics-status';
 import {
   CorrectAwbDto,
+  CorrectDeliveryDateDto,
   DispatchOrderDto,
   EDITABLE_ORDER_FIELDS,
   ListLogisticsOrdersDto,
@@ -69,6 +73,8 @@ const EDIT_REFUSAL: Readonly<Record<OrderEdit, string>> = {
   CORRECT_AWB: 'its AWB can only be corrected after dispatch',
   SET_DELIVERY_DATE:
     'its delivery date can only be set while INITIAL or QC_REJECTED',
+  CORRECT_DELIVERY_DATE:
+    'its delivery date can only be corrected while QC_VERIFIED or DISPATCHED',
 };
 
 /**
@@ -212,6 +218,34 @@ async function assertAwbFree(
   if (holder) {
     throw new ConflictException(
       `AWB ${awbNumber} is already used by order #${holder.orderNumber}.`,
+    );
+  }
+}
+
+/** The step each date-requiring move is, as its refusal names it. */
+const DATED_STEP: Partial<Record<LogisticsAction, string>> = {
+  QC_VERIFY: 'QC verification',
+  DISPATCH: 'dispatch',
+};
+
+/**
+ * Refuses with a 409 a move that needs the order's delivery date (`DATE_REQUIRED_ACTIONS`) on an
+ * order without one — every order must have a delivery date (client, 2026-10-17). Only a move the
+ * order's status allows is refused here: any other keeps the status refusal it always had. The
+ * date read is not locked, and need not be: no route can clear a date any more, so a dated order
+ * stays dated, and an undated read that a concurrent date overtakes only refuses the move.
+ */
+function assertDatedFor(
+  action: LogisticsAction,
+  order: { status: LogisticsStatus; deliveryDate: Date | null },
+): void {
+  if (
+    DATE_REQUIRED_ACTIONS.includes(action) &&
+    LOGISTICS_TRANSITIONS[action].from.includes(order.status) &&
+    order.deliveryDate === null
+  ) {
+    throw new ConflictException(
+      `This order has no delivery date. Set one before ${DATED_STEP[action]}.`,
     );
   }
 }
@@ -674,7 +708,7 @@ export class LogisticsOrdersService {
   }
 
   /**
-   * Sales sets or clears the delivery date the customer asked for, before QC verifies the order
+   * Sales sets or changes the delivery date the customer asked for, before QC verifies the order
    * (Phase 2D, ADR-0094 P1–P4): the order's own sales agent or their team's manager, through the
    * scope every read uses, so anyone else's order is a 404, and only while it is QC Pending or QC
    * Rejected, otherwise a 409. The row is locked first, as for the Manager's edit, so a QC
@@ -682,8 +716,9 @@ export class LogisticsOrdersService {
    * 409: Sales never changes the date of an order QC has verified. A lead in a pipeline closed to
    * the caller is theirs to view, not to change (ADR-0093 B2): a 403.
    *
-   * A day before the business day's today is refused (P4). Today and clearing are allowed, and the
-   * Manager's edit stays the way to correct a past date once the order is verified. Resending the
+   * A day before the business day's today is refused (P4); today is allowed, and the date can't be
+   * cleared (the DTO refuses null): every order must have one (client, 2026-10-17). The Manager's
+   * edit stays the way to correct a past date once the order is verified. Resending the
    * date the order already has writes nothing. A change is the order's `UPDATED` event with its
    * before and after days, as the Manager's edit records one. The status never moves and the lead
    * is not touched.
@@ -698,16 +733,10 @@ export class LogisticsOrdersService {
       const before = order.deliveryDate && fromDbDate(order.deliveryDate);
       const after = dto.deliveryDate;
       if (before !== after) {
-        const { today, timeZone } = this.businessDay();
-        if (after !== null && after < today) {
-          const shown = today.split('-').reverse().join('-');
-          throw new BadRequestException(
-            `The delivery date can’t be before today, ${shown} (${timeZone}).`,
-          );
-        }
+        assertRequestedDeliveryDay(after, this.businessDay());
         await tx.logisticsOrder.update({
           where: { id },
-          data: { deliveryDate: after === null ? null : toDbDate(after) },
+          data: { deliveryDate: toDbDate(after) },
         });
         await recordAuditEvents(tx, [
           {
@@ -719,6 +748,54 @@ export class LogisticsOrdersService {
             source: 'logistics.delivery_date',
             before: { deliveryDate: before },
             after: { deliveryDate: after },
+          },
+        ]);
+      }
+      return this.loadFull(tx, id, user);
+    });
+  }
+
+  /**
+   * The Logistics team corrects the delivery date of an order QC has verified, before or after
+   * dispatch (client, 2026-10-17), saying why. The row is locked first, as for every edit, and
+   * read through the caller's scope; any other status is a 409. The day must be today or later
+   * in the business timezone — the same rule as Sales' date — and the date can't be cleared.
+   * Resending the day the order already has writes and records nothing. A change is the order's
+   * `UPDATED` event with its before and after days and the reason, source
+   * `logistics.delivery_date_correction`, so the Journey tells it apart from Sales' date and the
+   * Manager's edit. The status never moves and the lead is not touched.
+   */
+  async correctDeliveryDate(
+    id: string,
+    dto: CorrectDeliveryDateDto,
+  ): Promise<LogisticsOrderResponse> {
+    const user = await this.currentUser.resolve();
+    return this.prisma.$transaction(async (tx) => {
+      const order = await this.lockForEdit(
+        tx,
+        id,
+        user,
+        'CORRECT_DELIVERY_DATE',
+      );
+      const before = order.deliveryDate && fromDbDate(order.deliveryDate);
+      const after = dto.deliveryDate;
+      if (before !== after) {
+        assertRequestedDeliveryDay(after, this.businessDay());
+        await tx.logisticsOrder.update({
+          where: { id },
+          data: { deliveryDate: toDbDate(after) },
+        });
+        await recordAuditEvents(tx, [
+          {
+            entityType: 'LOGISTICS_ORDER',
+            entityId: id,
+            leadId: order.leadId,
+            action: 'UPDATED',
+            actor: userActor(user),
+            source: 'logistics.delivery_date_correction',
+            before: { deliveryDate: before },
+            after: { deliveryDate: after },
+            metadata: { reason: dto.reason },
           },
         ]);
       }
@@ -738,6 +815,7 @@ export class LogisticsOrdersService {
     return withAwbClash(() =>
       this.prisma.$transaction(async (tx) => {
         const order = await this.loadState(tx, id, user);
+        assertDatedFor(action, order);
         await check?.(tx);
         await this.move(tx, order, action, fields, user, details);
         return this.loadFull(tx, id, user);
@@ -842,10 +920,15 @@ export class LogisticsOrdersService {
     tx: Prisma.TransactionClient,
     id: string,
     user: CurrentUser,
-  ): Promise<{ id: string; leadId: string; status: LogisticsStatus }> {
+  ): Promise<{
+    id: string;
+    leadId: string;
+    status: LogisticsStatus;
+    deliveryDate: Date | null;
+  }> {
     const order = await tx.logisticsOrder.findFirst({
       where: { AND: [logisticsOrderScopeWhere(user), { id }] },
-      select: { id: true, leadId: true, status: true },
+      select: { id: true, leadId: true, status: true, deliveryDate: true },
     });
     if (!order) throw new NotFoundException('Order not found.');
     return order;

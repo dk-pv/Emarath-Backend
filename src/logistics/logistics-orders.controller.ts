@@ -13,6 +13,7 @@ import { LogisticsOrdersService } from './logistics-orders.service';
 import { ACTION_ROLES, LOGISTICS_READ_ROLES } from './logistics-roles';
 import {
   CorrectAwbDto,
+  CorrectDeliveryDateDto,
   DispatchOrderDto,
   ListLogisticsOrdersDto,
   LogisticsDeliveryScheduleResponse,
@@ -174,7 +175,7 @@ export class LogisticsOrdersController {
     return this.orders.correctAwb(id, dto);
   }
 
-  /** Sales sets or clears the requested delivery date before QC verifies the order (Phase 2D). */
+  /** Sales sets or changes the requested delivery date before QC verifies the order (Phase 2D). */
   @Patch(':id/delivery-date')
   @Roles(...ACTION_ROLES.SET_DELIVERY_DATE)
   setDeliveryDate(
@@ -182,5 +183,15 @@ export class LogisticsOrdersController {
     @Body() dto: SetDeliveryDateDto,
   ): Promise<LogisticsOrderResponse> {
     return this.orders.setDeliveryDate(id, dto);
+  }
+
+  /** The Logistics team corrects the delivery date once QC has verified the order, with a reason. */
+  @Patch(':id/delivery-date-correction')
+  @Roles(...ACTION_ROLES.CORRECT_DELIVERY_DATE)
+  correctDeliveryDate(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CorrectDeliveryDateDto,
+  ): Promise<LogisticsOrderResponse> {
+    return this.orders.correctDeliveryDate(id, dto);
   }
 }

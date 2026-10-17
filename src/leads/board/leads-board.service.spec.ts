@@ -1,3 +1,4 @@
+import { ConfigService } from '@nestjs/config';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { UserRole } from '../../generated/prisma/client';
 import { CurrentUserService } from '../../auth/current-user';
@@ -64,6 +65,11 @@ function auditRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** The business timezone the services read (`BUSINESS_TIME_ZONE`). */
+const config = {
+  getOrThrow: () => ({ businessTimeZone: 'Asia/Dubai' }),
+} as unknown as ConfigService;
+
 function makeService(
   role: UserRole = UserRole.SUPERADMIN,
   // The pipelines closed to the caller (ADR-0093); none unless a test says so.
@@ -115,7 +121,7 @@ function makeService(
   // A move validates its target against the canonical catalogue; valid by default.
   const exists = jest.fn().mockResolvedValue(true);
   const stages = { exists } as unknown as StagesService;
-  const service = new LeadsBoardService(prisma, currentUser, stages);
+  const service = new LeadsBoardService(prisma, currentUser, stages, config);
   return {
     service,
     groupBy,
@@ -452,7 +458,10 @@ describe('LeadsBoardService.moveStage', () => {
       .mockResolvedValueOnce([auditRow({ status: 'HOT' })])
       .mockResolvedValueOnce([auditRow({ status: 'WON' })]);
 
-    await service.moveStage(LEAD_ID, { stage: 'WON' });
+    await service.moveStage(LEAD_ID, {
+      stage: 'WON',
+      deliveryDate: '2099-01-15',
+    });
 
     const [data] = (
       auditCreateMany.mock.calls[0] as [{ data: Record<string, unknown>[] }]
@@ -472,7 +481,47 @@ describe('LeadsBoardService.moveStage', () => {
         action: 'CREATED',
         leadId: LEAD_ID,
       }),
+      // The requested day the drop's prompt asked for, as Sales' own date event.
+      expect.objectContaining({
+        entityType: 'LOGISTICS_ORDER',
+        action: 'UPDATED',
+        source: 'logistics.delivery_date',
+        before: { deliveryDate: null },
+        after: { deliveryDate: '2099-01-15' },
+      }),
     ]);
+  });
+
+  it('refuses a drag onto WON without a delivery date, recording nothing', async () => {
+    const { service, findFirst, update, auditFindMany, auditCreateMany } =
+      makeService();
+    findFirst.mockResolvedValue({ status: 'HOT', pipeline: 'Lead Pipeline' });
+    update.mockResolvedValue(listRow({ status: 'WON' }));
+    auditFindMany
+      .mockResolvedValueOnce([auditRow({ status: 'HOT' })])
+      .mockResolvedValueOnce([auditRow({ status: 'WON' })]);
+
+    await expect(service.moveStage(LEAD_ID, { stage: 'WON' })).rejects.toThrow(
+      'A Delivery Date is required to convert a lead to WON.',
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses a delivery date on a drag that converts nothing', async () => {
+    const { service, findFirst, update, auditFindMany, auditCreateMany } =
+      makeService();
+    findFirst.mockResolvedValue({ status: 'HOT', pipeline: 'Lead Pipeline' });
+    update.mockResolvedValue(listRow({ status: 'Cold' }));
+    auditFindMany
+      .mockResolvedValueOnce([auditRow({ status: 'HOT' })])
+      .mockResolvedValueOnce([auditRow({ status: 'Cold' })]);
+
+    await expect(
+      service.moveStage(LEAD_ID, { stage: 'Cold', deliveryDate: '2099-01-15' }),
+    ).rejects.toThrow(
+      'A Delivery Date is only accepted when the request converts a lead to WON.',
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 
   it('writes no event when the move is refused before any write', async () => {

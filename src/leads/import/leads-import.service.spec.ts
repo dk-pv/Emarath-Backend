@@ -51,6 +51,7 @@ function evalResult(rows: Partial<EvaluatedRow>[]): EvaluationResult {
 function makeService(
   role: UserRole = UserRole.SUPERADMIN,
   importsDuplicates = false,
+  defaultStatus = 'New',
 ) {
   // Held as locals (not read off the mocks) so the assertions never reference an
   // unbound class method — the pattern leads.service.spec uses.
@@ -62,7 +63,7 @@ function makeService(
   const runFields = [...LEADS_IMPORT_FIELDS];
   const prepare = jest
     .fn()
-    .mockResolvedValue({ fields: runFields, defaultStatus: 'New' });
+    .mockResolvedValue({ fields: runFields, defaultStatus });
 
   // The row-selection rule is the real one; only evaluation and the write are stubbed.
   const realEngine = new ImportEngineService();
@@ -71,6 +72,7 @@ function makeService(
     persistValid,
     writable: (rows: EvaluatedRow[], target: { importsDuplicates?: boolean }) =>
       realEngine.writable(rows, target),
+    summarise: (rows: EvaluatedRow[]) => realEngine.summarise(rows),
   } as unknown as ImportEngineService;
 
   const descriptor = {
@@ -548,5 +550,98 @@ describe('LeadsImportService — a duplicate row is imported, not skipped (ADR-0
       [4, 'INVALID_PHONE'],
       [3, 'NOT_IMPORTED'],
     ]);
+  });
+});
+
+/*
+  A row that would arrive WON — by its own Lead Status, or by the pipeline's first stage standing in
+  for a blank one — would be a converted lead, and a converted lead's order needs a delivery date
+  (client, 2026-10-17) that import has no column for yet. Each such row is a row error of its own;
+  every other row imports as before, and no batch fails for it.
+*/
+describe('LeadsImportService — rows that would convert', () => {
+  const won = { status: 'valid' as const, mapped: { status: 'WON' } };
+  const fresh = { status: 'valid' as const, mapped: { status: 'New' } };
+  const blank = { status: 'valid' as const, mapped: {} };
+
+  it('refuses a WON row with a row error and keeps the rest valid, in the counts too', async () => {
+    const { service, evaluate } = makeService();
+    evaluate.mockResolvedValue(evalResult([fresh, won]));
+
+    const result = await service.validate(
+      csv(`${HEADER}\nA,1,2,COD\nB,1,2,COD`),
+      body(VALID_MAPPING),
+    );
+
+    expect(result).toMatchObject({ total: 2, valid: 1, invalid: 1 });
+    expect(result.rows[0]).toMatchObject({
+      status: 'invalid',
+      error: { errorCode: 'INVALID_OPTION' },
+    });
+    expect(result.rows[0].error?.reason).toContain(
+      'Lead Status WON converts the lead, and a converted lead needs a Delivery Date',
+    );
+    expect(result.rows[1].status).toBe('valid');
+  });
+
+  it('refuses a blank-status row when the pipeline starts at WON, and keeps rows with their own status', async () => {
+    const { service, evaluate } = makeService(
+      UserRole.SUPERADMIN,
+      false,
+      'WON',
+    );
+    evaluate.mockResolvedValue(evalResult([blank, fresh]));
+
+    const result = await service.validate(
+      csv(`${HEADER}\nA,1,2,COD\nB,1,2,COD`),
+      body(VALID_MAPPING),
+    );
+
+    expect(result).toMatchObject({ total: 2, valid: 1, invalid: 1 });
+    expect(result.rows[0].error?.reason).toContain(
+      'Lead Status is blank, so the row would take the pipeline’s first stage, WON',
+    );
+  });
+
+  it('refuses a WON duplicate too, though duplicates are otherwise imported', async () => {
+    const { service, evaluate } = makeService(UserRole.SUPERADMIN, true);
+    evaluate.mockResolvedValue(
+      evalResult([
+        {
+          status: 'duplicate',
+          mapped: { status: 'WON' },
+          error: { reason: 'dup', errorCode: 'DUPLICATE_EXISTING' },
+        },
+      ]),
+    );
+
+    const result = await service.validate(
+      csv(`${HEADER}\nA,1,2,COD`),
+      body(VALID_MAPPING),
+    );
+
+    expect(result).toMatchObject({ invalid: 1, duplicates: 0 });
+  });
+
+  it('settles a WON row as failed up front and never hands it to the batch writer', async () => {
+    const { service, evaluate, create, persistValid } = makeService();
+    evaluate.mockResolvedValue(evalResult([fresh, won]));
+
+    await service.startImport(
+      csv(`${HEADER}\nA,1,2,COD\nB,1,2,COD`),
+      body(VALID_MAPPING),
+    );
+
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ totalRows: 2, failedCount: 1 }),
+    );
+    // The writer is handed every row and writes only the writable ones; the WON row is not.
+    await new Promise((resolve) => setImmediate(resolve));
+    const [rows] = persistValid.mock.calls[0] as [EvaluatedRow[]];
+    expect(
+      new ImportEngineService()
+        .writable(rows, { importsDuplicates: false })
+        .map((row) => row.mapped.status),
+    ).toEqual(['New']);
   });
 });

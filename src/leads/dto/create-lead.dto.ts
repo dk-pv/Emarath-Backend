@@ -213,6 +213,17 @@ export class CreateLeadDto {
   @IsOptional()
   bookingDate?: string;
 
+  /**
+   * The requested delivery day, `YYYY-MM-DD`, sent only when this request converts the lead to
+   * WON: the order it creates must have one (client, 2026-10-17). Never the Booking Date. Its day
+   * rules are checked where the order is created (`convertLeadsToOrders`); blank counts as absent.
+   */
+  @Transform(emptyToUndefined)
+  @IsString()
+  @MaxLength(32)
+  @IsOptional()
+  deliveryDate?: string;
+
   /** Defaults to "Default" (LEAD-06.1 AC3). */
   @Transform(emptyToUndefined)
   @IsString()

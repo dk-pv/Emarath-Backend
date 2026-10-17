@@ -24,6 +24,7 @@ import {
   OrderReasonDto,
   QcDecisionDto,
   QcRejectDto,
+  CorrectDeliveryDateDto,
   SetDeliveryDateDto,
   UpdateLogisticsOrderDto,
 } from './dto/logistics-order.dto';
@@ -31,6 +32,8 @@ import {
 const ORDER = '33333333-3333-3333-3333-333333333333';
 const LEAD = '11111111-1111-1111-1111-111111111111';
 const USER = '22222222-2222-2222-2222-222222222222';
+/** A delivery day, for the orders a move needs to be dated (QC verification and dispatch). */
+const DATED = new Date('2026-10-20T00:00:00.000Z');
 
 interface Options {
   status?: LogisticsStatus;
@@ -311,6 +314,7 @@ const SEARCH_TERM = 5;
 describe('LogisticsOrdersService — QC', () => {
   it('verifies an order waiting for QC, and leaves the lead alone', async () => {
     const { service, order, leadUpdate, auditCreateMany } = makeService({
+      deliveryDate: DATED,
       role: UserRole.QC,
     });
 
@@ -336,6 +340,7 @@ describe('LogisticsOrdersService — QC', () => {
 
   it('verifies without a remark — approval remarks are optional (Q4)', async () => {
     const { service, order, auditCreateMany } = makeService({
+      deliveryDate: DATED,
       role: UserRole.QC,
     });
 
@@ -615,6 +620,7 @@ describe('LogisticsOrdersService — the write-back’s stage must exist', () =>
     'lets %s through on a pipeline without the reserved stages, never reading them',
     async (_label, status, role, act, reached) => {
       const { service, order, leadUpdate, stageFindUnique } = makeService({
+        deliveryDate: DATED,
         status,
         role,
         missingStage: 'QC NOT APPROVED',
@@ -632,6 +638,7 @@ describe('LogisticsOrdersService — the write-back’s stage must exist', () =>
 describe('LogisticsOrdersService — dispatch and the AWB', () => {
   it('dispatches a verified order, recording the AWB and the time', async () => {
     const { service, order, auditCreateMany } = makeService({
+      deliveryDate: DATED,
       status: LogisticsStatus.QC_VERIFIED,
       role: UserRole.LOGISTICS_EXECUTIVE,
     });
@@ -655,6 +662,7 @@ describe('LogisticsOrdersService — dispatch and the AWB', () => {
 
   it('records a dispatch with no courier as exactly that', async () => {
     const { service, auditCreateMany } = makeService({
+      deliveryDate: DATED,
       status: LogisticsStatus.QC_VERIFIED,
     });
 
@@ -667,6 +675,7 @@ describe('LogisticsOrdersService — dispatch and the AWB', () => {
 
   it('refuses to dispatch without a tracking number', async () => {
     const { service, orderUpdateMany } = makeService({
+      deliveryDate: DATED,
       status: LogisticsStatus.QC_VERIFIED,
     });
 
@@ -678,6 +687,7 @@ describe('LogisticsOrdersService — dispatch and the AWB', () => {
 
   it('refuses an AWB another order already holds, naming that order (Q9)', async () => {
     const { service, orderUpdateMany, auditCreateMany } = makeService({
+      deliveryDate: DATED,
       status: LogisticsStatus.QC_VERIFIED,
       awbHolder: { awbNumber: 'AWB-1', orderNumber: 1000 },
     });
@@ -691,6 +701,7 @@ describe('LogisticsOrdersService — dispatch and the AWB', () => {
 
   it('turns the unique index refusing a raced AWB into the same 409', async () => {
     const { service, orderUpdateMany } = makeService({
+      deliveryDate: DATED,
       status: LogisticsStatus.QC_VERIFIED,
     });
     orderUpdateMany.mockRejectedValueOnce(
@@ -706,7 +717,10 @@ describe('LogisticsOrdersService — dispatch and the AWB', () => {
   });
 
   it('refuses to dispatch an order QC has not verified', async () => {
-    const { service } = makeService({ status: LogisticsStatus.INITIAL });
+    const { service } = makeService({
+      deliveryDate: DATED,
+      status: LogisticsStatus.INITIAL,
+    });
 
     await expect(
       service.dispatch(ORDER, { awbNumber: 'AWB-1' }),
@@ -715,6 +729,7 @@ describe('LogisticsOrdersService — dispatch and the AWB', () => {
 
   it('cannot re-dispatch: a dispatched AWB changes only through the correction', async () => {
     const { service, order } = makeService({
+      deliveryDate: DATED,
       status: LogisticsStatus.QC_VERIFIED,
     });
 
@@ -727,6 +742,7 @@ describe('LogisticsOrdersService — dispatch and the AWB', () => {
 
   it('delivers a dispatched order', async () => {
     const { service, order, auditCreateMany } = makeService({
+      deliveryDate: DATED,
       status: LogisticsStatus.DISPATCHED,
       role: UserRole.LOGISTICS_EXECUTIVE,
     });
@@ -894,7 +910,10 @@ describe('LogisticsOrdersService — the Manager’s edit of a QC-verified order
   });
 
   it('leaves the edited order dispatchable — no return to QC', async () => {
-    const { service } = verified();
+    const { service } = makeService({
+      status: LogisticsStatus.QC_VERIFIED,
+      deliveryDate: DATED,
+    });
 
     await service.edit(ORDER, { city: 'Abu Dhabi' });
     const result = await service.dispatch(ORDER, { awbNumber: 'AWB-7' });
@@ -1128,6 +1147,7 @@ describe('LogisticsOrdersService — the full transition matrix', () => {
   )('from %s, %s', async (status, action) => {
     const [from, to] = MATRIX[action];
     const { service, order, auditCreateMany } = makeService({
+      deliveryDate: DATED,
       status,
       leadStatus: status === S.QC_REJECTED ? 'QC NOT APPROVED' : 'WON',
     });
@@ -1174,6 +1194,7 @@ describe('LogisticsOrdersService — provisional answers, pinned (Q12, Q13, Q15,
   // Q15: matching is exact after trimming, so two AWBs differing only by case do not clash.
   it('Q15 — treats awb-1 and AWB-1 as different AWBs', async () => {
     const { service, orderFindFirst } = makeService({
+      deliveryDate: DATED,
       status: LogisticsStatus.QC_VERIFIED,
       awbHolder: { awbNumber: 'AWB-1', orderNumber: 1000 },
     });
@@ -1923,20 +1944,21 @@ describe('LogisticsOrdersService — delivery dates', () => {
     });
   });
 
-  it('clears the date with null, and writes nothing when it is unchanged', async () => {
+  it('changes a date the order has, and writes nothing when it is unchanged', async () => {
     const set = makeService({
       status: LogisticsStatus.QC_VERIFIED,
       deliveryDate: day('2026-10-20'),
     });
-    await set.service.edit(ORDER, { deliveryDate: null });
+    await set.service.edit(ORDER, { deliveryDate: '2026-10-22' });
     expect(set.orderUpdate).toHaveBeenCalledWith({
       where: { id: ORDER },
-      data: { deliveryDate: null },
+      data: { deliveryDate: day('2026-10-22') },
     });
     expect(events(set.auditCreateMany)).toEqual([
       expect.objectContaining({
+        source: 'logistics.edit',
         before: { deliveryDate: '2026-10-20' },
-        after: { deliveryDate: null },
+        after: { deliveryDate: '2026-10-22' },
       }),
     ]);
 
@@ -2126,8 +2148,8 @@ describe('LogisticsOrdersService — delivery dates', () => {
 });
 
 /*
-  Phase 2D (ADR-0094): Sales sets or clears the delivery date the customer asked for until QC
-  verifies the order. The provisional defaults it rests on — who (P1), until when (P2), never a
+  Phase 2D (ADR-0094): Sales sets or changes the delivery date the customer asked for until QC
+  verifies the order — never clears it: every order must have one (client, 2026-10-17). The provisional defaults it rests on — who (P1), until when (P2), never a
   past day (P4), in the business timezone (P5) — are each pinned here.
 */
 describe('LogisticsOrdersService — the Sales delivery date (Phase 2D)', () => {
@@ -2141,7 +2163,7 @@ describe('LogisticsOrdersService — the Sales delivery date (Phase 2D)', () => 
   afterEach(() => jest.useRealTimers());
 
   const day = (ymd: string) => new Date(`${ymd}T00:00:00.000Z`);
-  const set = (deliveryDate: string | null): SetDeliveryDateDto => ({
+  const set = (deliveryDate: string): SetDeliveryDateDto => ({
     deliveryDate,
   });
 
@@ -2210,46 +2232,34 @@ describe('LogisticsOrdersService — the Sales delivery date (Phase 2D)', () => 
     ]);
   });
 
-  it('clears the date with null, so the order is undated again', async () => {
+  it('writes nothing and records nothing for the date it already has', async () => {
     const { service, orderUpdate, auditCreateMany } = makeService({
-      role: UserRole.SALES_MANAGER,
+      role: UserRole.SALES_AGENT,
       deliveryDate: day('2026-10-18'),
     });
 
-    const result = await service.setDeliveryDate(ORDER, set(null));
+    const result = await service.setDeliveryDate(ORDER, set('2026-10-18'));
 
-    expect(orderUpdate).toHaveBeenCalledWith({
-      where: { id: ORDER },
-      data: { deliveryDate: null },
-    });
-    expect(result.deliveryDate).toBeNull();
-    expect(result.deliveryBucket).toBe('none');
-    expect(events(auditCreateMany)).toEqual([
-      expect.objectContaining({
-        before: { deliveryDate: '2026-10-18' },
-        after: { deliveryDate: null },
-      }),
-    ]);
+    expect(result.deliveryDate).toBe('2026-10-18');
+    expect(orderUpdate).not.toHaveBeenCalled();
+    expect(events(auditCreateMany)).toEqual([]);
   });
 
-  it.each([
-    ['the date it has', '2026-10-18', day('2026-10-18')],
-    ['a clear of an undated order', null, undefined],
-  ])(
-    'writes nothing and records nothing for %s',
-    async (_label, value, stored) => {
-      const { service, orderUpdate, auditCreateMany } = makeService({
-        role: UserRole.SALES_AGENT,
-        deliveryDate: stored,
-      });
+  it('refuses a value that is not a real day even if a caller skips the DTO, writing nothing', async () => {
+    const { service, orderUpdate, auditCreateMany } = makeService({
+      role: UserRole.SALES_AGENT,
+      deliveryDate: day('2026-10-18'),
+    });
 
-      const result = await service.setDeliveryDate(ORDER, set(value));
+    const attempt = service.setDeliveryDate(ORDER, set('2026-02-30'));
 
-      expect(result.deliveryDate).toBe(value);
-      expect(orderUpdate).not.toHaveBeenCalled();
-      expect(events(auditCreateMany)).toEqual([]);
-    },
-  );
+    await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+    await expect(attempt).rejects.toThrow(
+      'Delivery Date must be a real date written YYYY-MM-DD (years 2000-2099)',
+    );
+    expect(orderUpdate).not.toHaveBeenCalled();
+    expect(events(auditCreateMany)).toEqual([]);
+  });
 
   it('refuses a day before the business day’s today with a 400, and accepts today itself (P4)', async () => {
     const past = makeService({ role: UserRole.SALES_AGENT });
@@ -2507,8 +2517,8 @@ describe('LogisticsOrdersService — the Sales delivery date (Phase 2D)', () => 
   the transaction ends, so whichever comes second waits. A transaction can be held open at a
   chosen point, still holding the lock, to interleave the two exactly.
 */
-function lockedOrder() {
-  const { order } = makeService();
+function lockedOrder(deliveryDate?: Date) {
+  const { order } = makeService({ deliveryDate });
   const audit: Record<string, unknown>[] = [];
   const pauses = new Map<string, Promise<void>>();
   let holder: object | null = null;
@@ -2610,8 +2620,8 @@ const settle = async () => {
 };
 
 describe('LogisticsOrdersService — a QC verification racing the Sales date', () => {
-  it('makes a verification that arrives while the date is being set wait, then verify the dated order', async () => {
-    const { order, audit, serviceFor, pauseAt } = lockedOrder();
+  it('makes a verification that arrives while the date is being changed wait, then verify the order with the new date', async () => {
+    const { order, audit, serviceFor, pauseAt } = lockedOrder(DATED);
     const resume = pauseAt('locked');
 
     const dating = serviceFor(UserRole.SALES_AGENT).setDeliveryDate(ORDER, {
@@ -2646,7 +2656,7 @@ describe('LogisticsOrdersService — a QC verification racing the Sales date', (
   });
 
   it('refuses the date with a 409 once a verification that took the lock first commits', async () => {
-    const { order, audit, serviceFor, pauseAt } = lockedOrder();
+    const { order, audit, serviceFor, pauseAt } = lockedOrder(DATED);
     const resume = pauseAt('moved');
 
     const verifying = serviceFor(UserRole.QC).qcVerify(ORDER, {});
@@ -2661,9 +2671,216 @@ describe('LogisticsOrdersService — a QC verification racing the Sales date', (
       status: LogisticsStatus.QC_VERIFIED,
     });
     await expect(dating).rejects.toBeInstanceOf(ConflictException);
-    expect(order.deliveryDate).toBeNull();
+    expect(order.deliveryDate).toEqual(DATED);
     expect(audit.map((event) => event.action)).toEqual(['QC_VERIFIED']);
   });
+
+  it('refuses a verification that reads the order still undated while its first date is being set — and the date still lands', async () => {
+    const { order, audit, serviceFor, pauseAt } = lockedOrder();
+    const resume = pauseAt('locked');
+
+    const dating = serviceFor(UserRole.SALES_AGENT).setDeliveryDate(ORDER, {
+      deliveryDate: '2099-01-15',
+    });
+    await settle();
+    const verifying = serviceFor(UserRole.QC).qcVerify(ORDER, {});
+
+    await expect(verifying).rejects.toThrow(
+      'This order has no delivery date. Set one before QC verification.',
+    );
+    resume();
+    await expect(dating).resolves.toMatchObject({
+      status: LogisticsStatus.INITIAL,
+      deliveryDate: '2099-01-15',
+    });
+    expect(order.status).toBe(LogisticsStatus.INITIAL);
+    expect(audit.map((event) => event.action)).toEqual(['UPDATED']);
+  });
+});
+
+/*
+  Every order must have a delivery date (client, 2026-10-17): QC does not verify an undated order
+  and Logistics does not dispatch one. The service refuses both with a 409 — the UI hiding them is
+  only advice — and nothing else asks for a date.
+*/
+describe('LogisticsOrdersService — a delivery date before QC verification and dispatch', () => {
+  it.each([
+    [
+      'QC verification',
+      LogisticsStatus.INITIAL,
+      UserRole.QC,
+      (service: LogisticsOrdersService) => service.qcVerify(ORDER, {}),
+      'This order has no delivery date. Set one before QC verification.',
+    ],
+    [
+      'dispatch',
+      LogisticsStatus.QC_VERIFIED,
+      UserRole.LOGISTICS_EXECUTIVE,
+      (service: LogisticsOrdersService) =>
+        service.dispatch(ORDER, { awbNumber: 'AWB-1' }),
+      'This order has no delivery date. Set one before dispatch.',
+    ],
+  ] as const)(
+    'refuses %s of an undated order with a 409, and moves and records nothing',
+    async (_label, status, role, act, message) => {
+      const { service, order, orderUpdateMany, auditCreateMany } = makeService({
+        status,
+        role,
+      });
+
+      const attempt = act(service);
+
+      await expect(attempt).rejects.toBeInstanceOf(ConflictException);
+      await expect(attempt).rejects.toThrow(message);
+      expect(order.status).toBe(status);
+      expect(orderUpdateMany).not.toHaveBeenCalled();
+      expect(auditCreateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [
+      'QC verification',
+      LogisticsStatus.INITIAL,
+      UserRole.QC,
+      (service: LogisticsOrdersService) => service.qcVerify(ORDER, {}),
+      LogisticsStatus.QC_VERIFIED,
+    ],
+    [
+      'dispatch',
+      LogisticsStatus.QC_VERIFIED,
+      UserRole.LOGISTICS_MANAGER,
+      (service: LogisticsOrdersService) =>
+        service.dispatch(ORDER, { awbNumber: 'AWB-1' }),
+      LogisticsStatus.DISPATCHED,
+    ],
+  ] as const)(
+    'lets %s of a dated order through as before',
+    async (_label, status, role, act, reached) => {
+      const { service, order } = makeService({
+        status,
+        role,
+        deliveryDate: DATED,
+      });
+
+      await expect(act(service)).resolves.toMatchObject({ status: reached });
+      expect(order.status).toBe(reached);
+    },
+  );
+
+  it('keeps the status refusal for a move the status does not allow, dated or not', async () => {
+    const { service } = makeService({
+      status: LogisticsStatus.DISPATCHED,
+      role: UserRole.QC,
+    });
+
+    await expect(service.qcVerify(ORDER, {})).rejects.toThrow(
+      'This order is DISPATCHED; it cannot be moved to QC_VERIFIED.',
+    );
+  });
+
+  it('asks for the date before it looks up the AWB', async () => {
+    const { service, orderFindFirst } = makeService({
+      status: LogisticsStatus.QC_VERIFIED,
+      role: UserRole.LOGISTICS_MANAGER,
+      awbHolder: { awbNumber: 'AWB-1', orderNumber: 1000 },
+    });
+
+    await expect(
+      service.dispatch(ORDER, { awbNumber: 'AWB-1' }),
+    ).rejects.toThrow('Set one before dispatch.');
+    const lookups = (orderFindFirst.mock.calls as [{ where: object }][]).map(
+      ([args]) => JSON.stringify(args.where),
+    );
+    expect(lookups.some((where) => where.includes('awbNumber'))).toBe(false);
+  });
+
+  it.each([
+    [
+      'QC rejection',
+      LogisticsStatus.INITIAL,
+      UserRole.QC,
+      (service: LogisticsOrdersService) =>
+        service.qcReject(ORDER, { remarks: 'Wrong address' }),
+      LogisticsStatus.QC_REJECTED,
+    ],
+    [
+      'resubmission',
+      LogisticsStatus.QC_REJECTED,
+      UserRole.SALES_MANAGER,
+      (service: LogisticsOrdersService) => service.resubmit(ORDER, {}),
+      LogisticsStatus.INITIAL,
+    ],
+    [
+      'delivery',
+      LogisticsStatus.DISPATCHED,
+      UserRole.LOGISTICS_EXECUTIVE,
+      (service: LogisticsOrdersService) => service.deliver(ORDER),
+      LogisticsStatus.DELIVERED,
+    ],
+    [
+      'cancellation',
+      LogisticsStatus.DISPATCHED,
+      UserRole.LOGISTICS_EXECUTIVE,
+      (service: LogisticsOrdersService) =>
+        service.cancel(ORDER, { reason: 'Customer refused' }),
+      LogisticsStatus.CANCELLED,
+    ],
+    [
+      'RTO',
+      LogisticsStatus.DISPATCHED,
+      UserRole.LOGISTICS_MANAGER,
+      (service: LogisticsOrdersService) =>
+        service.rto(ORDER, { reason: 'Address not found' }),
+      LogisticsStatus.RTO,
+    ],
+  ] as const)(
+    'asks no date for %s: an undated order still moves',
+    async (_label, status, role, act, reached) => {
+      const { service, order } = makeService({
+        status,
+        role,
+        leadStatus:
+          status === LogisticsStatus.QC_REJECTED ? 'QC NOT APPROVED' : 'WON',
+      });
+
+      await act(service);
+
+      expect(order.status).toBe(reached);
+    },
+  );
+
+  it.each([
+    [
+      UserRole.QC,
+      LogisticsStatus.INITIAL,
+      ['QC_VERIFY', 'QC_REJECT'],
+      ['QC_REJECT'],
+    ],
+    [
+      UserRole.LOGISTICS_MANAGER,
+      LogisticsStatus.QC_VERIFIED,
+      ['DISPATCH', 'EDIT', 'CORRECT_DELIVERY_DATE'],
+      ['EDIT', 'CORRECT_DELIVERY_DATE'],
+    ],
+    [
+      UserRole.LOGISTICS_EXECUTIVE,
+      LogisticsStatus.QC_VERIFIED,
+      ['DISPATCH', 'CORRECT_DELIVERY_DATE'],
+      ['CORRECT_DELIVERY_DATE'],
+    ],
+  ] as const)(
+    'offers a %s on a %s order %j when dated, and %j while undated',
+    async (role, status, dated, undated) => {
+      const withDate = makeService({ role, status, deliveryDate: DATED });
+      const without = makeService({ role, status });
+
+      expect((await withDate.service.get(ORDER)).allowedActions).toEqual(dated);
+      expect((await without.service.get(ORDER)).allowedActions).toEqual(
+        undated,
+      );
+    },
+  );
 });
 
 /*
@@ -2684,6 +2901,7 @@ describe('LogisticsOrdersService — allowedActions on every response', () => {
       'CANCEL',
       'RTO',
       'CORRECT_AWB',
+      'CORRECT_DELIVERY_DATE',
     ]);
   });
 
@@ -2706,6 +2924,7 @@ describe('LogisticsOrdersService — allowedActions on every response', () => {
 
   it('answers a transition with the actions of the status it just reached', async () => {
     const { service } = makeService({
+      deliveryDate: DATED,
       status: LogisticsStatus.INITIAL,
       role: UserRole.QC,
     });
@@ -2758,22 +2977,31 @@ describe('Logistics DTOs — what the routes refuse before the service runs', ()
     ]);
   });
 
+  it('takes the Sales delivery date as a day', async () => {
+    const dto = plainToInstance(SetDeliveryDateDto, {
+      deliveryDate: '2026-10-20',
+    });
+    expect(await validate(dto)).toEqual([]);
+    expect(dto.deliveryDate).toBe('2026-10-20');
+  });
+
   it.each([
-    [{ deliveryDate: '2026-10-20' }, '2026-10-20'],
-    [{ deliveryDate: null }, null],
-    [{ deliveryDate: '' }, null],
-    [{ deliveryDate: '  ' }, null],
+    {},
+    { deliveryDate: null },
+    { deliveryDate: '' },
+    { deliveryDate: '  ' },
   ])(
-    'takes the Sales delivery date %j as %j — a day, or a clear',
-    async (body, expected) => {
-      const dto = plainToInstance(SetDeliveryDateDto, body);
-      expect(await validate(dto)).toEqual([]);
-      expect(dto.deliveryDate).toBe(expected);
+    'refuses the Sales delivery date %j as a clear — every order must have one',
+    async (body) => {
+      const errors = await validate(plainToInstance(SetDeliveryDateDto, body));
+      expect(errors.map((error) => error.property)).toEqual(['deliveryDate']);
+      expect(Object.values(errors[0].constraints ?? {})).toEqual([
+        'Delivery Date is required; an order’s delivery date can’t be cleared',
+      ]);
     },
   );
 
   it.each([
-    {},
     { deliveryDate: '2026-02-30' },
     { deliveryDate: '15-10-2026' },
     { deliveryDate: '2026-10-15T00:00:00.000Z' },
@@ -2964,17 +3192,272 @@ describe('Logistics DTOs — what the routes refuse before the service runs', ()
     },
   );
 
-  it('turns a blank delivery date into null — a clear', async () => {
-    const dto = plainToInstance(UpdateLogisticsOrderDto, {
-      deliveryDate: '  ',
-    });
-    expect(await validate(dto)).toEqual([]);
-    expect(dto.deliveryDate).toBeNull();
+  it.each([null, '', '  '])(
+    'refuses clearing the delivery date in the Manager’s edit (%j)',
+    async (deliveryDate) => {
+      const errors = await validate(
+        plainToInstance(UpdateLogisticsOrderDto, { deliveryDate }),
+      );
+      expect(errors.map((error) => error.property)).toEqual(['deliveryDate']);
+      expect(Object.values(errors[0].constraints ?? {})).toEqual([
+        'Delivery Date is required; an order’s delivery date can’t be cleared',
+      ]);
+    },
+  );
+
+  it('leaves the delivery date alone when the Manager’s edit does not send it', async () => {
+    expect(
+      await invalid(UpdateLogisticsOrderDto, { city: 'Abu Dhabi' }),
+    ).toEqual([]);
   });
 
   it('sorts by delivery date, still from the whitelist', async () => {
     expect(
       await invalid(ListLogisticsOrdersDto, { sort: 'deliveryDate' }),
     ).toEqual([]);
+  });
+});
+
+/*
+  The Logistics team corrects the delivery date once QC has verified the order (client,
+  2026-10-17): both Logistics roles and Super Admin, on QC Verified and Dispatched orders, today
+  or later in the business timezone, never cleared, always with a reason — recorded as the order's
+  UPDATED event with its own source, so the Journey tells it from Sales' date and the Manager's edit.
+*/
+describe('LogisticsOrdersService — the Logistics delivery-date correction', () => {
+  // 20:30 UTC on 14 Oct: already the 15th in Dubai.
+  beforeEach(() => {
+    jest.useFakeTimers({
+      doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'],
+    });
+    jest.setSystemTime(new Date('2026-10-14T20:30:00.000Z'));
+  });
+  afterEach(() => jest.useRealTimers());
+
+  const day = (ymd: string) => new Date(`${ymd}T00:00:00.000Z`);
+  const correct = (
+    deliveryDate: string,
+    reason = 'Customer asked to move it',
+  ): CorrectDeliveryDateDto => ({ deliveryDate, reason });
+
+  it.each([
+    [UserRole.LOGISTICS_MANAGER, LogisticsStatus.QC_VERIFIED],
+    [UserRole.LOGISTICS_MANAGER, LogisticsStatus.DISPATCHED],
+    [UserRole.LOGISTICS_EXECUTIVE, LogisticsStatus.QC_VERIFIED],
+    [UserRole.LOGISTICS_EXECUTIVE, LogisticsStatus.DISPATCHED],
+    [UserRole.SUPERADMIN, LogisticsStatus.DISPATCHED],
+  ])(
+    'lets a %s correct the date of a %s order, recording before, after, actor and reason',
+    async (role, status) => {
+      const {
+        service,
+        order,
+        orderUpdate,
+        orderUpdateMany,
+        leadUpdate,
+        auditCreateMany,
+        queryRaw,
+        orderFindFirst,
+      } = makeService({ role, status, deliveryDate: day('2026-10-18') });
+
+      const result = await service.correctDeliveryDate(
+        ORDER,
+        correct('2026-10-22'),
+      );
+
+      expect(orderUpdate).toHaveBeenCalledWith({
+        where: { id: ORDER },
+        data: { deliveryDate: day('2026-10-22') },
+      });
+      expect(result.deliveryDate).toBe('2026-10-22');
+      expect(result.status).toBe(status);
+      expect(order.status).toBe(status);
+      expect(orderUpdateMany).not.toHaveBeenCalled();
+      expect(leadUpdate).not.toHaveBeenCalled();
+      // The row is locked before it is read.
+      expect(queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+        orderFindFirst.mock.invocationCallOrder[0],
+      );
+      expect(events(auditCreateMany)).toEqual([
+        expect.objectContaining({
+          entityType: 'LOGISTICS_ORDER',
+          entityId: ORDER,
+          leadId: LEAD,
+          action: 'UPDATED',
+          actorType: 'USER',
+          actorId: USER,
+          source: 'logistics.delivery_date_correction',
+          before: { deliveryDate: '2026-10-18' },
+          after: { deliveryDate: '2026-10-22' },
+          metadata: { reason: 'Customer asked to move it' },
+        }),
+      ]);
+    },
+  );
+
+  it('dates an undated QC-verified order, which then may be dispatched', async () => {
+    const { service } = makeService({
+      role: UserRole.LOGISTICS_EXECUTIVE,
+      status: LogisticsStatus.QC_VERIFIED,
+    });
+
+    const result = await service.correctDeliveryDate(
+      ORDER,
+      correct('2026-10-15'),
+    );
+
+    expect(result.deliveryDate).toBe('2026-10-15');
+    expect(result.allowedActions).toEqual([
+      'DISPATCH',
+      'CORRECT_DELIVERY_DATE',
+    ]);
+  });
+
+  it.each([
+    LogisticsStatus.INITIAL,
+    LogisticsStatus.QC_REJECTED,
+    LogisticsStatus.DELIVERED,
+    LogisticsStatus.CANCELLED,
+    LogisticsStatus.RTO,
+  ])(
+    'refuses a correction on a %s order with a 409, writing nothing',
+    async (status) => {
+      const { service, orderUpdate, auditCreateMany } = makeService({
+        role: UserRole.LOGISTICS_MANAGER,
+        status,
+        deliveryDate: day('2026-10-18'),
+      });
+
+      const attempt = service.correctDeliveryDate(ORDER, correct('2026-10-22'));
+
+      await expect(attempt).rejects.toBeInstanceOf(ConflictException);
+      await expect(attempt).rejects.toThrow(
+        `This order is ${status}; its delivery date can only be corrected while QC_VERIFIED or DISPATCHED.`,
+      );
+      expect(orderUpdate).not.toHaveBeenCalled();
+      expect(auditCreateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refuses a day before the business day’s today with a 400, and accepts today', async () => {
+    const past = makeService({
+      role: UserRole.LOGISTICS_MANAGER,
+      status: LogisticsStatus.DISPATCHED,
+      deliveryDate: day('2026-10-18'),
+    });
+    const attempt = past.service.correctDeliveryDate(
+      ORDER,
+      correct('2026-10-14'),
+    );
+    await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
+    await expect(attempt).rejects.toThrow(
+      'The delivery date can’t be before today, 15-10-2026 (Asia/Dubai).',
+    );
+    expect(past.orderUpdate).not.toHaveBeenCalled();
+    expect(past.auditCreateMany).not.toHaveBeenCalled();
+
+    const today = makeService({
+      role: UserRole.LOGISTICS_MANAGER,
+      status: LogisticsStatus.DISPATCHED,
+      deliveryDate: day('2026-10-18'),
+    });
+    await expect(
+      today.service.correctDeliveryDate(ORDER, correct('2026-10-15')),
+    ).resolves.toMatchObject({ deliveryDate: '2026-10-15' });
+  });
+
+  it('writes and records nothing when the date is the one the order has', async () => {
+    const { service, orderUpdate, auditCreateMany } = makeService({
+      role: UserRole.LOGISTICS_MANAGER,
+      status: LogisticsStatus.QC_VERIFIED,
+      deliveryDate: day('2026-10-18'),
+    });
+
+    const result = await service.correctDeliveryDate(
+      ORDER,
+      correct('2026-10-18'),
+    );
+
+    expect(result.deliveryDate).toBe('2026-10-18');
+    expect(orderUpdate).not.toHaveBeenCalled();
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('404s an order outside the caller’s scope', async () => {
+    const { service, orderUpdate } = makeService({
+      role: UserRole.LOGISTICS_MANAGER,
+      status: LogisticsStatus.QC_VERIFIED,
+      inScope: false,
+    });
+
+    await expect(
+      service.correctDeliveryDate(ORDER, correct('2026-10-20')),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(orderUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe('CorrectDeliveryDateDto', () => {
+  const errorsOf = async (body: Record<string, unknown>) =>
+    (await validate(plainToInstance(CorrectDeliveryDateDto, body))).map(
+      (error) => [error.property, Object.values(error.constraints ?? {})],
+    );
+
+  it('takes a day and a reason, trimmed', async () => {
+    const dto = plainToInstance(CorrectDeliveryDateDto, {
+      deliveryDate: '2026-10-22',
+      reason: '  Customer asked to move it  ',
+    });
+    expect(await validate(dto)).toEqual([]);
+    expect(dto.reason).toBe('Customer asked to move it');
+  });
+
+  it.each([
+    {},
+    { deliveryDate: null },
+    { deliveryDate: '' },
+    { deliveryDate: '  ' },
+  ])('refuses a missing or cleared date %j', async (date) => {
+    expect(await errorsOf({ ...date, reason: 'x' })).toEqual([
+      [
+        'deliveryDate',
+        [
+          'Delivery Date is required; an order’s delivery date can’t be cleared',
+        ],
+      ],
+    ]);
+  });
+
+  it.each(['2026-02-30', '22-10-2026', '2026-10-22T00:00:00.000Z'])(
+    'refuses %j, which is not a real YYYY-MM-DD day',
+    async (deliveryDate) => {
+      expect(await errorsOf({ deliveryDate, reason: 'x' })).toEqual([
+        [
+          'deliveryDate',
+          [
+            'Delivery Date must be a real date written YYYY-MM-DD (years 2000-2099)',
+          ],
+        ],
+      ]);
+    },
+  );
+
+  it.each([{}, { reason: '' }, { reason: '   ' }])(
+    'requires a reason: %j is refused',
+    async (reason) => {
+      expect(
+        (await errorsOf({ deliveryDate: '2026-10-22', ...reason })).map(
+          ([property]) => property,
+        ),
+      ).toEqual(['reason']);
+    },
+  );
+
+  it('caps the reason at 500 characters', async () => {
+    expect(
+      (
+        await errorsOf({ deliveryDate: '2026-10-22', reason: 'x'.repeat(501) })
+      ).map(([property]) => property),
+    ).toEqual(['reason']);
   });
 });

@@ -11,12 +11,20 @@ import {
   ImportField,
   RowError,
 } from '../../common/import/import-descriptor';
-import { ImportEngineService } from '../../common/import/import-engine.service';
+import {
+  EvaluationSummary,
+  ImportEngineService,
+} from '../../common/import/import-engine.service';
 import { SampleFormat, buildSampleFile } from '../../common/import/sample-file';
-import { parseSpreadsheet } from '../../common/import/spreadsheet-parser';
+import {
+  ParsedSheet,
+  parseSpreadsheet,
+} from '../../common/import/spreadsheet-parser';
+import { CONVERTED_STATUS } from '../../reports/converted-leads-where';
 import {
   LeadsImportContext,
   LeadsImportDescriptor,
+  LeadsImportRun,
 } from './leads-import.descriptor';
 import {
   ImportJobRepository,
@@ -104,12 +112,7 @@ export class LeadsImportService {
     this.assertMapping(mapping);
     const run = await this.descriptor.prepare(dto.pipeline, user);
 
-    const { rows, summary } = await this.engine.evaluate(
-      sheet,
-      mapping,
-      this.descriptor,
-      run.fields,
-    );
+    const { rows, summary } = await this.evaluate(sheet, mapping, run);
 
     // Rows that need attention first, so the bounded window always shows them.
     const window = [
@@ -138,12 +141,7 @@ export class LeadsImportService {
     this.assertMapping(mapping);
     const run = await this.descriptor.prepare(dto.pipeline, user);
 
-    const { rows, summary } = await this.engine.evaluate(
-      sheet,
-      mapping,
-      this.descriptor,
-      run.fields,
-    );
+    const { rows, summary } = await this.evaluate(sheet, mapping, run);
 
     const errors = this.collectErrors(rows);
     // A duplicate is written as its own lead (ADR-0092), so nothing is skipped.
@@ -281,6 +279,28 @@ export class LeadsImportService {
     return errors;
   }
 
+  /**
+   * The engine's verdict on every row, then the one rule only this run knows: a row that would
+   * arrive WON — its own Lead Status, or the pipeline's first stage standing in for a blank one —
+   * would be a converted lead, and a converted lead's order needs a delivery date (client,
+   * 2026-10-17) that import has no column for yet. Each such row is refused on its own, as a row
+   * error, so the rest of the file still imports and nothing is written for it.
+   */
+  private async evaluate(
+    sheet: ParsedSheet,
+    mapping: Record<string, string | null>,
+    run: LeadsImportRun,
+  ): Promise<{ rows: EvaluatedRow[]; summary: EvaluationSummary }> {
+    const { rows } = await this.engine.evaluate(
+      sheet,
+      mapping,
+      this.descriptor,
+      run.fields,
+    );
+    const settled = rows.map((row) => refuseConversion(row, run.defaultStatus));
+    return { rows: settled, summary: this.engine.summarise(settled) };
+  }
+
   private parseMapping(raw: string): Record<string, string | null> {
     let parsed: unknown;
     try {
@@ -340,4 +360,27 @@ export class LeadsImportService {
       );
     }
   }
+}
+
+/**
+ * A row that would be created WON — by its own Lead Status or, left blank, by the pipeline's first
+ * stage — refused with a row error; any other row as it was.
+ */
+function refuseConversion(
+  row: EvaluatedRow,
+  defaultStatus: string,
+): EvaluatedRow {
+  if (row.status === 'invalid') return row;
+  const explicit = row.mapped.status;
+  if ((explicit || defaultStatus) !== CONVERTED_STATUS) return row;
+  return {
+    ...row,
+    status: 'invalid',
+    error: {
+      errorCode: 'INVALID_OPTION',
+      reason: explicit
+        ? `Lead Status ${CONVERTED_STATUS} converts the lead, and a converted lead needs a Delivery Date, which import can’t take yet. Import the row with another Lead Status and convert it in Emarath with its Delivery Date`
+        : `Lead Status is blank, so the row would take the pipeline’s first stage, ${CONVERTED_STATUS}, and convert without a Delivery Date. Give the row another Lead Status and convert it in Emarath with its Delivery Date`,
+    },
+  };
 }

@@ -56,4 +56,13 @@ describe('Leads row quick actions (e2e)', () => {
       .send({ status: 'New', foo: 'bar' })
       .expect(400);
   });
+
+  // The requested delivery day a Convert carries (client, 2026-10-17) is text; the route's DTO
+  // takes the key — whether a day is required, real and not past is the conversion's rule.
+  it('rejects a status change whose delivery date is not text', async () => {
+    await api
+      .post(`/api/leads/${uuid}/status`)
+      .send({ status: 'WON', deliveryDate: 20991015 })
+      .expect(400);
+  });
 });

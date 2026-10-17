@@ -16,6 +16,7 @@ import {
   Validate,
   ValidateIf,
   ValidatorConstraint,
+  type ValidationArguments,
   type ValidatorConstraintInterface,
 } from 'class-validator';
 import {
@@ -27,6 +28,7 @@ import { allowedActions, OrderAction } from '../logistics-roles';
 import {
   BusinessDay,
   DELIVERY_BUCKETS,
+  DELIVERY_DAY_FORMAT_MESSAGE,
   DeliveryBucket,
   deliveryBucketOf,
   fromDbDate,
@@ -60,15 +62,21 @@ const blankToNull = ({ value }: { value: unknown }): unknown => {
   return trimmed === '' ? null : trimmed;
 };
 
-/** A delivery date: a real calendar day, `YYYY-MM-DD` (ADR-0094). */
+/**
+ * A delivery date: a real calendar day, `YYYY-MM-DD` (ADR-0094). Every order must have one (client,
+ * 2026-10-17), so a date sent empty — null, or blank, which `blankToNull` makes null — is refused
+ * as a clear rather than as a malformed day.
+ */
 @ValidatorConstraint({ name: 'deliveryDay', async: false })
 class DeliveryDay implements ValidatorConstraintInterface {
   validate(value: unknown): boolean {
     return typeof value === 'string' && isDateOnly(value);
   }
 
-  defaultMessage(): string {
-    return 'Delivery Date must be a real date written YYYY-MM-DD (years 2000-2099)';
+  defaultMessage(args: ValidationArguments): string {
+    return args.value === null || args.value === undefined
+      ? 'Delivery Date is required; an order’s delivery date can’t be cleared'
+      : DELIVERY_DAY_FORMAT_MESSAGE;
   }
 }
 
@@ -303,15 +311,32 @@ export class CorrectAwbDto {
 
 /**
  * Sales' requested delivery day, before QC verifies the order (Phase 2D, ADR-0094): a real
- * calendar day written `YYYY-MM-DD`, or null — sent blank too — to clear it. The key must be
- * sent, so an empty body is refused rather than read as a clear. Whether the day may be before
- * today is the service's rule, because "today" is the business timezone's.
+ * calendar day written `YYYY-MM-DD`. It can be changed but never cleared — every order must have
+ * a delivery date (client, 2026-10-17) — so null, blank and an empty body are all refused.
+ * Whether the day may be before today is the service's rule, because "today" is the business
+ * timezone's.
  */
 export class SetDeliveryDateDto {
   @Transform(blankToNull)
-  @ValidateIf((dto: SetDeliveryDateDto) => dto.deliveryDate !== null)
   @Validate(DeliveryDay)
-  deliveryDate!: string | null;
+  deliveryDate!: string;
+}
+
+/**
+ * The Logistics team's correction of the delivery date of an order QC has verified (client,
+ * 2026-10-17): a real `YYYY-MM-DD` day — required, never null or blank — and why it changed,
+ * required too. Whether the day may be before today is the service's rule (today or later).
+ */
+export class CorrectDeliveryDateDto {
+  @Transform(blankToNull)
+  @Validate(DeliveryDay)
+  deliveryDate!: string;
+
+  @Transform(trim)
+  @IsString()
+  @IsNotEmpty({ message: 'A reason for the correction is required' })
+  @MaxLength(500)
+  reason!: string;
 }
 
 /**
@@ -421,14 +446,15 @@ export class UpdateLogisticsOrderDto {
   paymentMethod?: string | null;
 
   /**
-   * The planned delivery day, `YYYY-MM-DD` (ADR-0094); sent blank, it is cleared. Who sets it and
-   * until when is open client question D4 — until answered it follows this edit's rules: the
-   * Logistics Manager, while the order is QC Verified.
+   * The planned delivery day, `YYYY-MM-DD` (ADR-0094), following this edit's rules: the Logistics
+   * Manager, while the order is QC Verified. Absent leaves it as it is; unlike the other fields it
+   * can't be cleared — null or blank is refused — because every order must have a delivery date
+   * (client, 2026-10-17).
    */
   @Transform(blankToNull)
-  @IsOptional()
+  @ValidateIf((dto: UpdateLogisticsOrderDto) => dto.deliveryDate !== undefined)
   @Validate(DeliveryDay)
-  deliveryDate?: string | null;
+  deliveryDate?: string;
 }
 
 /**
@@ -617,7 +643,12 @@ export function toLogisticsOrderResponse(
     ...row,
     deliveryDate,
     deliveryBucket: deliveryBucketOf(deliveryDate, row.status, day),
-    allowedActions: allowedActions(row.status, role, leadClosed),
+    allowedActions: allowedActions(
+      row.status,
+      role,
+      leadClosed,
+      deliveryDate !== null,
+    ),
     statusChangedAt: row.statusChangedAt.toISOString(),
     convertedAt: row.convertedAt.toISOString(),
     productQty: row.productQty?.toString() ?? null,

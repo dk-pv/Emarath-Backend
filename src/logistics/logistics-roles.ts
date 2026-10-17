@@ -68,6 +68,17 @@ export const DELIVERY_DATE_ROLES: readonly UserRole[] = [
 ];
 
 /**
+ * Correcting the delivery date once QC has verified the order (client, 2026-10-17: the Logistics
+ * team needs a controlled way to correct it): both Logistics roles. QC verifies only (Q11) and is
+ * not named; Data & MIS has no role, and how it gets this is undecided.
+ */
+export const DELIVERY_DATE_CORRECTION_ROLES: readonly UserRole[] = [
+  UserRole.LOGISTICS_MANAGER,
+  UserRole.LOGISTICS_EXECUTIVE,
+  UserRole.SUPERADMIN,
+];
+
+/**
  * Reading an order: the sales roles (their own leads only), both Logistics roles, QC, and
  * Accounts — Delivered orders only (`logisticsOrderScopeWhere`), read-only: no action names it.
  */
@@ -98,6 +109,7 @@ export const ACTION_ROLES: Readonly<Record<OrderAction, readonly UserRole[]>> =
     EDIT: MANAGER_ROLES,
     CORRECT_AWB: MANAGER_ROLES,
     SET_DELIVERY_DATE: DELIVERY_DATE_ROLES,
+    CORRECT_DELIVERY_DATE: DELIVERY_DATE_CORRECTION_ROLES,
   };
 
 const isOrderEdit = (action: OrderAction): action is OrderEdit =>
@@ -119,6 +131,16 @@ export function actionStatuses(
 const LEAD_CHANGE_ACTIONS: readonly OrderAction[] = ['SET_DELIVERY_DATE'];
 
 /**
+ * The moves an order may not make without a delivery date — every order must have one (client,
+ * 2026-10-17): QC does not verify an undated order and Logistics does not dispatch one. While the
+ * order has none they are not offered, and the service refuses them with a 409.
+ */
+export const DATE_REQUIRED_ACTIONS: readonly LogisticsAction[] = [
+  'QC_VERIFY',
+  'DISPATCH',
+];
+
+/**
  * What the caller may do to an order in `status` right now — advisory, for the UI to render,
  * never a permission: each route's `@Roles()` and the conditional update in the service stay
  * the authority, and this can only ever be a subset of what they accept.
@@ -128,18 +150,24 @@ const LEAD_CHANGE_ACTIONS: readonly OrderAction[] = ['SET_DELIVERY_DATE'];
  * it, not a bypass. Visibility needs no check of its own: an order reaches a caller only through
  * their scope. The one thing a scope cannot say is that the order's lead sits in a pipeline
  * closed to the caller (`leadClosed`), which a sales agent can see but not change, so the date
- * action is not offered there.
+ * action is not offered there. And an order without a delivery date (`dated` false) is not
+ * offered the moves that need one (`DATE_REQUIRED_ACTIONS`).
  */
 export function allowedActions(
   status: LogisticsStatus,
   role: UserRole,
   leadClosed = false,
+  dated = true,
 ): OrderAction[] {
   return (Object.keys(ACTION_ROLES) as OrderAction[]).filter(
     (action) =>
       actionStatuses(action).includes(status) &&
       ACTION_ROLES[action].includes(role) &&
-      !(leadClosed && LEAD_CHANGE_ACTIONS.includes(action)),
+      !(leadClosed && LEAD_CHANGE_ACTIONS.includes(action)) &&
+      !(
+        !dated &&
+        (DATE_REQUIRED_ACTIONS as readonly OrderAction[]).includes(action)
+      ),
   );
 }
 

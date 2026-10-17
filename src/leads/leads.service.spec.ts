@@ -1,3 +1,4 @@
+import { ConfigService } from '@nestjs/config';
 import {
   BadRequestException,
   NotFoundException,
@@ -65,6 +66,9 @@ const AGENT_OWN_ROW = {
   ],
 };
 
+/** A requested delivery day safely after any business day these tests run on. */
+const FUTURE_DAY = '2099-01-15';
+
 const BASE_DTO: CreateLeadDto = {
   name: 'Ahmed',
   primaryPhone: '971500000000',
@@ -107,6 +111,11 @@ type UpdateArgs = {
   complaintReason: string | null;
   customFieldValues?: { customFieldId: string; value: string }[];
 };
+
+/** The business timezone the services read (`BUSINESS_TIME_ZONE`). */
+const config = {
+  getOrThrow: () => ({ businessTimeZone: 'Asia/Dubai' }),
+} as unknown as ConfigService;
 
 function makeService(
   role: UserRole = UserRole.SUPERADMIN,
@@ -174,6 +183,16 @@ function makeService(
   // transaction, or on the client once an edit has committed. Nothing found by default.
   const txLeadFindUnique = jest.fn().mockResolvedValue(null);
   const leadFindUnique = jest.fn().mockResolvedValue(null);
+  const orderInsert = jest.fn((args: { data: { leadId: string }[] }) =>
+    Promise.resolve(
+      args.data.map((row, index) => ({
+        id: `order-${index + 1}`,
+        leadId: row.leadId,
+        orderNumber: 1000 + index,
+        status: 'INITIAL',
+      })),
+    ),
+  );
   const tx = {
     $queryRaw: jest.fn().mockResolvedValue([]),
     lead: { findMany: auditFindMany, findUnique: txLeadFindUnique },
@@ -182,16 +201,7 @@ function makeService(
     // insert, so a lead that becomes WON gets an order id on its CONVERTED event.
     logisticsOrder: {
       findMany: jest.fn().mockResolvedValue([]),
-      createManyAndReturn: jest.fn((args: { data: { leadId: string }[] }) =>
-        Promise.resolve(
-          args.data.map((row, index) => ({
-            id: `order-${index + 1}`,
-            leadId: row.leadId,
-            orderNumber: 1000 + index,
-            status: 'INITIAL',
-          })),
-        ),
-      ),
+      createManyAndReturn: orderInsert,
     },
   };
   const $transaction = jest.fn((run: (client: typeof tx) => Promise<unknown>) =>
@@ -245,12 +255,14 @@ function makeService(
     settings,
     assignment,
     tagAccess,
+    config,
   );
   const dataOf = (call = 0): Prisma.LeadCreateInput =>
     (create.mock.calls[call] as [Prisma.LeadCreateInput])[0];
   const updateArgsOf = (call = 0): UpdateArgs =>
     (update.mock.calls[call] as [string, UpdateArgs])[1];
   return {
+    orderInsert,
     leadFindMany,
     leadFindFirst,
     leadCount,
@@ -1237,7 +1249,11 @@ describe('LeadsService — audit (ADR-0083)', () => {
     const { service, dataOf, auditFindMany, auditCreateMany } = makeService();
     auditFindMany.mockResolvedValue([auditRow({ status: 'WON' })]);
 
-    await service.create({ ...BASE_DTO, status: 'WON' });
+    await service.create({
+      ...BASE_DTO,
+      status: 'WON',
+      deliveryDate: FUTURE_DAY,
+    });
 
     expect(dataOf().status).toBe('WON');
     const events = recorded(auditCreateMany);
@@ -1247,6 +1263,12 @@ describe('LeadsService — audit (ADR-0083)', () => {
       { action: 'CREATED', source: 'leads.create', after: { status: 'WON' } },
       { action: 'CONVERTED', metadata: { orderId: 'order-1' } },
       { entityType: 'LOGISTICS_ORDER', action: 'CREATED', leadId: 'lead-1' },
+      {
+        entityType: 'LOGISTICS_ORDER',
+        action: 'UPDATED',
+        source: 'logistics.delivery_date',
+        after: { deliveryDate: FUTURE_DAY },
+      },
     ]);
   });
 
@@ -1266,7 +1288,11 @@ describe('LeadsService — audit (ADR-0083)', () => {
         }),
       ]);
 
-    await service.update('lead-1', { ...BASE_DTO, status: 'WON' });
+    await service.update('lead-1', {
+      ...BASE_DTO,
+      status: 'WON',
+      deliveryDate: FUTURE_DAY,
+    });
 
     expect((update.mock.calls[0] as unknown[])[2]).toBe(tx);
     expect(
@@ -1280,10 +1306,12 @@ describe('LeadsService — audit (ADR-0083)', () => {
         undefined,
         expect.objectContaining({ orderNumber: 1000, status: 'INITIAL' }),
       ],
+      ['UPDATED', { deliveryDate: null }, { deliveryDate: FUTURE_DAY }],
     ]);
     // Only the conversion names the order; the other lead events keep their own metadata.
     expect(recorded(auditCreateMany).map((e) => e.metadata)).toEqual([
       { orderId: 'order-1' },
+      undefined,
       undefined,
       undefined,
       undefined,
@@ -2254,5 +2282,158 @@ describe('LeadsService — pipeline access (ADR-0093)', () => {
 
       expect(kit.updateArgsOf().data.pipeline).toBe('Complaints');
     });
+  });
+});
+
+/*
+  Every new order must have a delivery date (client, 2026-10-17). The create form and the edit form
+  convert a lead to WON, so each must carry the requested day; the conversion itself refuses an
+  order without one, whatever the UI sent. A request that converts nothing may not carry one.
+*/
+describe('LeadsService — the delivery date a conversion carries', () => {
+  it('creates a WON lead’s order with the requested day, in the same transaction', async () => {
+    const { service, orderInsert, auditFindMany } = makeService();
+    auditFindMany.mockResolvedValue([auditRow({ status: 'WON' })]);
+
+    await service.create({
+      ...BASE_DTO,
+      status: 'WON',
+      deliveryDate: FUTURE_DAY,
+    });
+
+    const [args] = orderInsert.mock.calls[0] as unknown as [
+      { data: Record<string, unknown>[] },
+    ];
+    expect(args.data[0].deliveryDate).toEqual(
+      new Date(`${FUTURE_DAY}T00:00:00.000Z`),
+    );
+    // Never the Booking Date: the order's date is the day this request carried.
+    expect(args.data[0]).not.toHaveProperty('bookingDate');
+  });
+
+  it('refuses a WON lead without a delivery date, recording nothing', async () => {
+    const { service, auditFindMany, auditCreateMany } = makeService();
+    auditFindMany.mockResolvedValue([auditRow({ status: 'WON' })]);
+
+    await expect(
+      service.create({ ...BASE_DTO, status: 'WON' }),
+    ).rejects.toThrow('A Delivery Date is required to convert a lead to WON.');
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses a status-less lead on a pipeline whose first stage is WON without a date', async () => {
+    const { service, stageFindFirst, auditFindMany, auditCreateMany } =
+      makeService();
+    stageFindFirst.mockResolvedValue({ name: 'WON' });
+    auditFindMany.mockResolvedValue([auditRow({ status: 'WON' })]);
+
+    await expect(service.create({ ...BASE_DTO })).rejects.toThrow(
+      'A Delivery Date is required to convert a lead to WON.',
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('creates a default-WON lead with the date it carries', async () => {
+    const { service, stageFindFirst, auditFindMany, orderInsert } =
+      makeService();
+    stageFindFirst.mockResolvedValue({ name: 'WON' });
+    auditFindMany.mockResolvedValue([auditRow({ status: 'WON' })]);
+
+    await service.create({ ...BASE_DTO, deliveryDate: FUTURE_DAY });
+
+    expect(orderInsert).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['a day before today in Dubai', '2020-01-01', 'can’t be before today'],
+    ['a day that does not exist', '2099-02-30', 'must be a real date'],
+  ])('refuses %s', async (_label, deliveryDate, message) => {
+    const { service, auditFindMany, orderInsert } = makeService();
+    auditFindMany.mockResolvedValue([auditRow({ status: 'WON' })]);
+
+    await expect(
+      service.create({ ...BASE_DTO, status: 'WON', deliveryDate }),
+    ).rejects.toThrow(message);
+    expect(orderInsert).not.toHaveBeenCalled();
+  });
+
+  it('refuses a delivery date on a lead created in another status', async () => {
+    const { service, auditCreateMany } = makeService();
+
+    await expect(
+      service.create({ ...BASE_DTO, deliveryDate: FUTURE_DAY }),
+    ).rejects.toThrow(
+      'A Delivery Date is only accepted when the request converts a lead to WON.',
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('converts an unconverted lead edited into WON with the requested day', async () => {
+    const { service, findById, auditFindMany, orderInsert, auditCreateMany } =
+      makeService();
+    findById.mockResolvedValue(FAKE_ROW);
+    auditFindMany
+      .mockResolvedValueOnce([auditRow({ status: 'New' })])
+      .mockResolvedValueOnce([auditRow({ status: 'WON' })]);
+
+    await service.update('lead-1', {
+      ...BASE_DTO,
+      status: 'WON',
+      deliveryDate: FUTURE_DAY,
+    });
+
+    const [args] = orderInsert.mock.calls[0] as unknown as [
+      { data: Record<string, unknown>[] },
+    ];
+    expect(args.data[0].deliveryDate).toEqual(
+      new Date(`${FUTURE_DAY}T00:00:00.000Z`),
+    );
+    expect(
+      recorded(auditCreateMany).find(
+        (event) => event.source === 'logistics.delivery_date',
+      ),
+    ).toMatchObject({
+      action: 'UPDATED',
+      actorId: 'me',
+      after: { deliveryDate: FUTURE_DAY },
+    });
+  });
+
+  it('refuses an edit into WON without a delivery date, recording nothing', async () => {
+    const { service, findById, auditFindMany, auditCreateMany } = makeService();
+    findById.mockResolvedValue(FAKE_ROW);
+    auditFindMany
+      .mockResolvedValueOnce([auditRow({ status: 'New' })])
+      .mockResolvedValueOnce([auditRow({ status: 'WON' })]);
+
+    await expect(
+      service.update('lead-1', { ...BASE_DTO, status: 'WON' }),
+    ).rejects.toThrow('A Delivery Date is required to convert a lead to WON.');
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('asks no date of an edit that converts nothing, and refuses one if sent', async () => {
+    const ordinary = makeService();
+    ordinary.findById.mockResolvedValue(FAKE_ROW);
+    ordinary.auditFindMany
+      .mockResolvedValueOnce([auditRow({ city: 'Dubai' })])
+      .mockResolvedValueOnce([auditRow({ city: 'Sharjah' })]);
+    await ordinary.service.update('lead-1', { ...BASE_DTO, city: 'Sharjah' });
+    expect(ordinary.orderInsert).not.toHaveBeenCalled();
+
+    const withDate = makeService();
+    withDate.findById.mockResolvedValue(FAKE_ROW);
+    withDate.auditFindMany
+      .mockResolvedValueOnce([auditRow({ city: 'Dubai' })])
+      .mockResolvedValueOnce([auditRow({ city: 'Sharjah' })]);
+    await expect(
+      withDate.service.update('lead-1', {
+        ...BASE_DTO,
+        city: 'Sharjah',
+        deliveryDate: FUTURE_DAY,
+      }),
+    ).rejects.toThrow(
+      'A Delivery Date is only accepted when the request converts a lead to WON.',
+    );
   });
 });
