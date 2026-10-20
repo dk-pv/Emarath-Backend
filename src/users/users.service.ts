@@ -19,6 +19,12 @@ import {
   userEvent,
 } from './user-audit';
 import {
+  assertTeamMemberRole,
+  findTeamLabel,
+  lockTeams,
+  normalizeTeamName,
+} from './team-label';
+import {
   CreateUserDto,
   ListUsersQueryDto,
   PERMISSION_CATALOG,
@@ -186,6 +192,11 @@ export class UsersService {
     const actor = userActor(await this.currentUser.resolve());
 
     const row = await this.prisma.$transaction(async (tx) => {
+      let team: string | null = null;
+      if (dto.team) {
+        await lockTeams(tx);
+        team = await this.teamFor(tx, dto.team, baseRole, name, null);
+      }
       const created = await tx.user.create({
         data: {
           name,
@@ -198,7 +209,7 @@ export class UsersService {
           roleId: dto.roleId,
           jobTitle: dto.jobTitle ?? null,
           phone: dto.phone,
-          team: dto.team ?? null,
+          team,
           isActive: dto.isActive ?? true,
           reportingToId: dto.reportingToId ?? null,
           leadFormId: dto.leadFormId ?? null,
@@ -266,8 +277,20 @@ export class UsersService {
         : undefined;
 
     const row = await this.prisma.$transaction(async (tx) => {
+      // The team lock comes before the account's row lock, in the order a team rename takes
+      // them, so an edit and a rename wait for each other instead of deadlocking.
+      if (dto.team) await lockTeams(tx);
       await lockUser(tx, id);
       const before = await readUserAuditState(tx, id);
+      const team = dto.team
+        ? await this.teamFor(
+            tx,
+            dto.team,
+            baseRole ?? existing.role,
+            name ?? existing.name,
+            existing.team,
+          )
+        : dto.team;
 
       await tx.user.update({
         where: { id },
@@ -280,7 +303,7 @@ export class UsersService {
           role: baseRole,
           roleId: dto.roleId,
           jobTitle: dto.jobTitle,
-          team: dto.team,
+          team,
           isActive: dto.isActive,
           reportingToId: dto.reportingToId,
           leadFormId: dto.leadFormId,
@@ -446,10 +469,30 @@ export class UsersService {
         firstName: true,
         lastName: true,
         avatarKey: true,
+        team: true,
       },
     });
     if (!user) throw new NotFoundException('Team member not found.');
     return user;
+  }
+
+  /**
+   * The team label a form value means (Teams v1): the stored spelling when it names a live team in
+   * any case, otherwise the value as a new team. Only sales users join a team; a member keeping
+   * the label they already carry is not re-checked, so an older account stays editable. The
+   * caller holds `lockTeams`.
+   */
+  private async teamFor(
+    tx: Prisma.TransactionClient,
+    value: string,
+    role: UserRole,
+    name: string,
+    current: string | null,
+  ): Promise<string> {
+    const normalized = normalizeTeamName(value);
+    const team = (await findTeamLabel(tx, normalized)) ?? normalized;
+    if (team !== current) assertTeamMemberRole(role, name);
+    return team;
   }
 
   /** A named role must exist and be live; its baseRole is what authorization stores. */

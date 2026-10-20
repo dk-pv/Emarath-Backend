@@ -15,6 +15,7 @@ import {
 import { CONVERTED_STATUS } from './converted-leads-where';
 import { LOST_STATUS } from './lost-leads-where';
 import { buildLeadsByOwnershipWhere } from './leads-by-ownership-where';
+import { achievementPercent, teamLeadsWhere } from './team-lead-where';
 import { LeadsByOwnershipQueryDto } from './dto/leads-by-ownership-query.dto';
 import {
   LEADS_BY_OWNERSHIP_SELECT,
@@ -74,19 +75,6 @@ const METRIC_WHERE: Record<MetricKey, Prisma.LeadWhereInput> = {
   ordersCount: { logisticsOrder: { isNot: null } },
 };
 
-/**
- * Converted value as a percentage of a monthly goal, uncapped (the dashboard's rule); null when
- * there is no positive goal to measure against, so the screen says "No Target Set".
- */
-function achievement(
-  won: Prisma.Decimal,
-  goal: Prisma.Decimal | null | undefined,
-): number | null {
-  return goal && goal.gt(0)
-    ? Math.round(won.div(goal).toNumber() * 10000) / 100
-    : null;
-}
-
 function toOwnerRow(
   base: Pick<OwnerCountRow, 'ownerId' | 'ownerName' | 'count'>,
   metrics: Record<MetricKey, number>,
@@ -105,29 +93,29 @@ function toOwnerRow(
   };
 }
 
-/** A team's subtotal: the sum of its owners' rows, its goal its active members' goals. */
+/** One team's figures, read over its own leads, before its target is known. */
+interface TeamFigures {
+  team: string | null;
+  owners: number;
+  count: number;
+  metrics: Record<MetricKey, number>;
+  value: Prisma.Decimal;
+  won: Prisma.Decimal;
+}
+
 function toTeamRow(
-  team: string | null,
-  rows: OwnerCountRow[],
-  won: Prisma.Decimal,
+  figures: TeamFigures,
   goal: Prisma.Decimal | null,
 ): TeamSubtotalRow {
-  const sum = (key: MetricKey | 'count') =>
-    rows.reduce((total, row) => total + row[key], 0);
-  const count = sum('count');
-  const metrics = Object.fromEntries(
-    METRIC_KEYS.map((key) => [key, sum(key)]),
-  ) as Record<MetricKey, number>;
+  const { team, owners, count, metrics } = figures;
   return {
     team,
-    owners: rows.length,
+    owners,
     count,
     ...metrics,
     conversionRatio: count > 0 ? (metrics.convertedCount / count) * 100 : 0,
-    targetAchievement: achievement(won, goal),
-    leadValue: rows
-      .reduce((total, row) => total.add(row.leadValue), ZERO)
-      .toString(),
+    targetAchievement: achievementPercent(figures.won, goal),
+    leadValue: figures.value.toString(),
   };
 }
 
@@ -232,7 +220,7 @@ export class LeadsByOwnershipReportService {
                 { ownerId: self.id, ownerName: self.name, count },
                 metrics,
                 value._sum.actualAmount ?? ZERO,
-                achievement(
+                achievementPercent(
                   won._sum.actualAmount ?? ZERO,
                   self.monthlyGoalAmount,
                 ),
@@ -309,7 +297,7 @@ export class LeadsByOwnershipReportService {
             METRIC_KEYS.map((key) => [key, byUser[key].get(group.userId) ?? 0]),
           ) as Record<MetricKey, number>,
           valueByUser.get(group.userId) ?? ZERO,
-          achievement(
+          achievementPercent(
             wonByUser.get(group.userId) ?? ZERO,
             ownerById.get(group.userId)?.monthlyGoalAmount,
           ),
@@ -318,7 +306,7 @@ export class LeadsByOwnershipReportService {
       .sort(
         (a, b) => b.count - a.count || a.ownerName.localeCompare(b.ownerName),
       );
-    const teams = await this.teamSubtotals(rows, ownerById, wonByUser);
+    const teams = await this.teamSubtotals(and, rows, ownerById);
     if (unassigned > 0) {
       rows.push(
         toOwnerRow(
@@ -333,46 +321,40 @@ export class LeadsByOwnershipReportService {
   }
 
   /**
-   * The owner rows summed per `User.team` (the owners with no team together, last); each named
-   * team's target is the sum of its active members' monthly goals, in one grouped query.
+   * One subtotal per `User.team` among the owners shown (the owners with no team together, last).
+   * A team's figures are read over its own leads (`teamLeadsWhere`) rather than added up from its
+   * owners' rows, so a lead co-assigned to two members of one team counts once for that team; a
+   * lead shared across two teams counts once in each. A named team's target is the sum of its
+   * active members' monthly goals.
+   * ponytail: a few counts per team shown; one grouped raw query if teams ever number in dozens.
    */
   private async teamSubtotals(
+    and: (extra: Prisma.LeadWhereInput) => Prisma.LeadWhereInput,
     rows: OwnerCountRow[],
     ownerById: Map<string, { team: string | null }>,
-    wonByUser: Map<string, Prisma.Decimal>,
   ): Promise<TeamSubtotalRow[]> {
-    const byTeam = new Map<
-      string | null,
-      { rows: OwnerCountRow[]; won: Prisma.Decimal }
-    >();
+    const owners = new Map<string | null, number>();
     for (const row of rows) {
       if (!row.ownerId) continue;
       const team = ownerById.get(row.ownerId)?.team ?? null;
-      const group = byTeam.get(team) ?? { rows: [], won: ZERO };
-      group.rows.push(row);
-      group.won = group.won.add(wonByUser.get(row.ownerId) ?? ZERO);
-      byTeam.set(team, group);
+      owners.set(team, (owners.get(team) ?? 0) + 1);
     }
-    const named = [...byTeam.keys()].filter(
+    const named = [...owners.keys()].filter(
       (team): team is string => team !== null,
     );
-    const goals = named.length
-      ? await this.prisma.user.groupBy({
-          by: ['team'],
-          where: { team: { in: named }, deletedAt: null, isActive: true },
-          _sum: { monthlyGoalAmount: true },
-        })
-      : [];
-    const goalByTeam = new Map(
-      goals.map((goal) => [goal.team, goal._sum.monthlyGoalAmount]),
-    );
-    return [...byTeam]
-      .map(([team, group]) =>
+    const [goalByTeam, figures] = await Promise.all([
+      this.goalsByTeam(named),
+      Promise.all(
+        [...owners].map(([team, count]) =>
+          this.teamFigures(and(teamLeadsWhere(team)), team, count),
+        ),
+      ),
+    ]);
+    return figures
+      .map((team) =>
         toTeamRow(
           team,
-          group.rows,
-          group.won,
-          team === null ? null : (goalByTeam.get(team) ?? null),
+          team.team === null ? null : (goalByTeam.get(team.team) ?? null),
         ),
       )
       .sort(
@@ -381,6 +363,46 @@ export class LeadsByOwnershipReportService {
           b.count - a.count ||
           (a.team ?? '').localeCompare(b.team ?? ''),
       );
+  }
+
+  /** Each named team's target: the sum of its active members' monthly goals, in one grouped query. */
+  private async goalsByTeam(
+    named: string[],
+  ): Promise<Map<string | null, Prisma.Decimal | null>> {
+    if (named.length === 0) return new Map();
+    const goals = await this.prisma.user.groupBy({
+      by: ['team'],
+      where: { team: { in: named }, deletedAt: null, isActive: true },
+      _sum: { monthlyGoalAmount: true },
+    });
+    return new Map(
+      goals.map((goal) => [goal.team, goal._sum.monthlyGoalAmount]),
+    );
+  }
+
+  /** A team's counts, value and won value over its leads (`where` already holds the team). */
+  private async teamFigures(
+    where: Prisma.LeadWhereInput,
+    team: string | null,
+    owners: number,
+  ): Promise<TeamFigures> {
+    const [count, metrics, value, won] = await Promise.all([
+      this.prisma.lead.count({ where }),
+      this.metricsFor(where),
+      this.prisma.lead.aggregate({ where, _sum: { actualAmount: true } }),
+      this.prisma.lead.aggregate({
+        where: { AND: [where, METRIC_WHERE.convertedCount] },
+        _sum: { actualAmount: true },
+      }),
+    ]);
+    return {
+      team,
+      owners,
+      count,
+      metrics,
+      value: value._sum.actualAmount ?? ZERO,
+      won: won._sum.actualAmount ?? ZERO,
+    };
   }
 
   /** Each metric's per-owner counts — one `leadAssignment.groupBy` per metric, never per row. */

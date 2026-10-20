@@ -89,6 +89,27 @@ interface Options {
   agentGoal?: Prisma.Decimal | null;
   agentMetrics?: Counts;
   role?: UserRole;
+  /**
+   * What each team's own leads hold, keyed by team (`'null'` for no team): the service reads a
+   * team as the leads with an assignee on it, never as the sum of its owners' rows.
+   */
+  teamLeads?: Record<string, TeamLeads>;
+}
+
+interface TeamLeads {
+  count: number;
+  metrics: Counts;
+  value: Prisma.Decimal;
+  won: Prisma.Decimal;
+}
+
+/** The team a stubbed `where` narrows to through `teamLeadsWhere`, or undefined for none. */
+function teamOf(where: unknown): string | undefined {
+  const match =
+    /"assignments":\{"some":\{"user":\{"team":("[^"]*"|null)\}\}\}/.exec(
+      JSON.stringify(where),
+    );
+  return match ? String(JSON.parse(match[1])) : undefined;
 }
 
 function makeService(options: Options = {}) {
@@ -119,6 +140,7 @@ function makeService(options: Options = {}) {
     agentGoal = null,
     agentMetrics = counts({ convertedCount: 3 }),
     role = UserRole.SUPERADMIN,
+    teamLeads = {},
   } = options;
 
   const groupBy = jest.fn((args: { where: { lead: unknown } }) => {
@@ -127,6 +149,12 @@ function makeService(options: Options = {}) {
   });
   const count = jest.fn((args: { where: unknown }) => {
     const read = readWhere(args.where);
+    const team = teamLeads[teamOf(args.where) ?? ''];
+    if (team) {
+      return Promise.resolve(
+        read.metric ? team.metrics[read.metric] : team.count,
+      );
+    }
     if (read.metric)
       return Promise.resolve(
         read.unassigned
@@ -137,6 +165,15 @@ function makeService(options: Options = {}) {
   });
   const aggregate = jest.fn((args: { where: unknown }) => {
     const read = readWhere(args.where);
+    const team = teamLeads[teamOf(args.where) ?? ''];
+    if (team) {
+      return Promise.resolve({
+        _sum: {
+          actualAmount:
+            read.metric === 'convertedCount' ? team.won : team.value,
+        },
+      });
+    }
     return Promise.resolve({
       _sum: {
         actualAmount: read.unassigned
@@ -178,6 +215,7 @@ function makeService(options: Options = {}) {
     service: new LeadsByOwnershipReportService(prisma, currentUser),
     groupBy,
     count,
+    aggregate,
     findMany,
     userGroupBy,
   };
@@ -495,11 +533,25 @@ describe('LeadsByOwnershipReportService.summary — orders, targets and teams', 
     expect(rows[0].leadValue).toBe('2200.5');
   });
 
-  it('subtotals the owner rows per team — no-team owners last, Unassigned left out — against each team’s members’ goals', async () => {
+  const alpha: TeamLeads = {
+    count: 6,
+    metrics: counts({ convertedCount: 2, ordersCount: 3, newCount: 1 }),
+    value: dec('2200.50'),
+    won: dec('1500.50'),
+  };
+  const noTeam: TeamLeads = {
+    count: 5,
+    metrics: counts({ convertedCount: 1 }),
+    value: dec('2000'),
+    won: dec('2000'),
+  };
+
+  it('subtotals per team — no-team owners last, Unassigned left out — against each team’s members’ goals', async () => {
     const { service, userGroupBy } = makeService({
       names: owners,
       values,
       teamGoals: [{ team: 'Alpha', _sum: { monthlyGoalAmount: dec('6000') } }],
+      teamLeads: { Alpha: alpha, null: noTeam },
     });
 
     const { teams } = await service.summary(query());
@@ -513,9 +565,10 @@ describe('LeadsByOwnershipReportService.summary — orders, targets and teams', 
       expect.objectContaining({
         team: 'Alpha',
         owners: 1,
-        count: 7,
-        convertedCount: 3,
-        ordersCount: 4,
+        count: 6,
+        newCount: 1,
+        convertedCount: 2,
+        ordersCount: 3,
         leadValue: '2200.5',
         // 1500.50 of WON value against the team's 6000.
         targetAchievement: 25.01,
@@ -528,6 +581,59 @@ describe('LeadsByOwnershipReportService.summary — orders, targets and teams', 
         targetAchievement: null,
       }),
     ]);
-    expect(teams[0].conversionRatio).toBeCloseTo((3 / 7) * 100, 10);
+    expect(teams[0].conversionRatio).toBeCloseTo((2 / 6) * 100, 10);
+  });
+
+  /*
+    The double-count fix (M1): two members of Alpha share a lead, so their rows hold 7 + 4 = 11
+    leads while Alpha has 10. The team is read over its own leads, scoped like everything else,
+    and its WON value — the target's numerator — is the team's, not the two owners' sum.
+  */
+  it('counts a lead two members of one team share once for the team, not once per member', async () => {
+    const C = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+    const { service, count, aggregate } = makeService({
+      owners: [group(A, 7), group(C, 4)],
+      names: [
+        { id: A, name: 'Ansar', team: 'Alpha', monthlyGoalAmount: dec('3000') },
+        { id: C, name: 'Cyra', team: 'Alpha', monthlyGoalAmount: dec('1000') },
+      ],
+      values: [
+        // The shared WON lead appears once per owner in the assignment rows.
+        { userId: A, lead: { actualAmount: dec('1000'), status: 'WON' } },
+        { userId: C, lead: { actualAmount: dec('1000'), status: 'WON' } },
+      ],
+      teamGoals: [{ team: 'Alpha', _sum: { monthlyGoalAmount: dec('4000') } }],
+      teamLeads: {
+        Alpha: {
+          count: 10,
+          metrics: counts({ convertedCount: 1 }),
+          value: dec('1000'),
+          won: dec('1000'),
+        },
+      },
+    });
+
+    const { rows, teams } = await service.summary(query());
+
+    expect(rows.slice(0, 2).map((row) => [row.ownerName, row.count])).toEqual([
+      ['Ansar', 7],
+      ['Cyra', 4],
+    ]);
+    expect(teams).toHaveLength(1);
+    expect(teams[0]).toMatchObject({
+      team: 'Alpha',
+      owners: 2,
+      count: 10,
+      convertedCount: 1,
+      leadValue: '1000',
+      // 1000 once against 4000, not the owners' 2000.
+      targetAchievement: 25,
+    });
+    const teamWhere = { assignments: { some: { user: { team: 'Alpha' } } } };
+    for (const mock of [count, aggregate]) {
+      expect(
+        wheres(mock).some((json) => json.includes(JSON.stringify(teamWhere))),
+      ).toBe(true);
+    }
   });
 });

@@ -45,6 +45,15 @@ export const PIPELINE_MOVE_ROLES: readonly UserRole[] = [
   UserRole.SALES_MANAGER,
 ];
 
+/**
+ * Who may belong to a team (Teams v1): the sales roles the team label means something for — the
+ * manager's team scope, team tag permissions, team targets. The administrator is never scoped by a
+ * team, and the post-sale roles hold no sales access, so neither is placed in one.
+ */
+export const TEAM_MEMBER_ROLES: readonly UserRole[] = SALES_MODULE_ROLES.filter(
+  (role) => role !== UserRole.SUPERADMIN,
+);
+
 /** Who a lead may be assigned to: the lead-handling roles (LEAD-06.2). */
 export const ASSIGNABLE_ROLES: readonly UserRole[] = [
   UserRole.SALES_AGENT,

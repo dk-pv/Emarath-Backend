@@ -61,9 +61,11 @@ export interface OwnerCountRow {
 }
 
 /**
- * One team's subtotal: the sum of its owners' rows (so a lead co-assigned within the team counts
- * once per owner, as in the rows), grouped by the owner's `User.team`; `team` null gathers the
- * owners with no team. Its target is the sum of the monthly goals of the team's active members.
+ * One team's subtotal, for each `User.team` among the owners shown; `team` null gathers the owners
+ * with no team. Its figures are read over the team's leads — those with at least one assignee on
+ * the team — so a lead co-assigned to two members of the team counts once (unlike the owner rows,
+ * where it counts for each owner), and a lead shared across two teams counts once in each. Its
+ * target is the sum of the monthly goals of the team's active members.
  */
 export interface TeamSubtotalRow extends Omit<
   OwnerCountRow,

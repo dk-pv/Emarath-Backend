@@ -18,6 +18,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { UserRole } from '../../generated/prisma/client';
+import { MAX_TEAM_NAME, normalizeTeamName } from '../team-label';
 
 export const USER_ROLES = Object.values(UserRole);
 
@@ -144,9 +145,12 @@ class TeamMemberConfigDto {
   @IsOptional()
   pipelines?: string[];
 
-  @Transform(trimToNull)
+  /** Teams v1: normalised like every team name (`normalizeTeamName`); blank means no team. */
+  @Transform(({ value }: { value: unknown }): unknown =>
+    typeof value === 'string' ? normalizeTeamName(value) || null : value,
+  )
   @IsString()
-  @MaxLength(120)
+  @MaxLength(MAX_TEAM_NAME)
   @IsOptional()
   team?: string | null;
 

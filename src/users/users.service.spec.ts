@@ -114,10 +114,13 @@ function makeService(actorId = ACTOR) {
   const queryRaw = jest.fn().mockResolvedValue([]);
   const updateMany = jest.fn().mockResolvedValue({ count: 1 });
   const auditCreateMany = jest.fn();
+  // Teams v1: the team lock a team change takes.
+  const executeRaw = jest.fn().mockResolvedValue(1);
 
   const tx = {
     $queryRaw: queryRaw,
-    user: { create, update, updateMany, findUniqueOrThrow },
+    $executeRaw: executeRaw,
+    user: { create, update, updateMany, findUniqueOrThrow, findFirst },
     userModulePermission: {
       deleteMany: permissionDeleteMany,
       createMany: permissionCreateMany,
@@ -181,6 +184,7 @@ function makeService(actorId = ACTOR) {
     queryRaw,
     updateMany,
     auditCreateMany,
+    executeRaw,
   };
 }
 
@@ -799,5 +803,136 @@ describe('UsersService — history (AUD-01)', () => {
         after: { avatarKey: 'avatars/x.png' },
       }),
     ]);
+  });
+});
+
+/*
+  Teams v1: the member form's Team field writes the same label the Teams screen does — the
+  stored spelling of an existing team in any case, a new name normalised — and only sales users
+  join a team. The team lock comes first, as a team rename takes it, so the two cannot deadlock.
+*/
+describe('UsersService — the Team field (Teams v1)', () => {
+  /** `findFirst` answers the team lookup (a `team` filter) with `label`, anything else with `live`. */
+  function arrange(
+    live = liveRow({ team: null }),
+    label: string | null = null,
+  ) {
+    const mocks = makeService();
+    mocks.findFirst.mockImplementation((args: { where: { team?: unknown } }) =>
+      Promise.resolve(
+        args.where.team !== undefined ? (label ? { team: label } : null) : live,
+      ),
+    );
+    mocks.findUniqueOrThrow.mockResolvedValue(detailRow());
+    mocks.update.mockResolvedValue({ id: OTHER });
+    return mocks;
+  }
+
+  const savedTeam = (update: jest.Mock): unknown =>
+    ((update.mock.calls as unknown[][])[0][0] as { data: { team?: unknown } })
+      .data.team;
+
+  it('stores an existing team typed in another case under its stored spelling, locking teams before the account', async () => {
+    const mocks = arrange(liveRow({ team: null }), 'North Team');
+
+    await mocks.service.update(OTHER, { team: 'north   team' });
+
+    expect(savedTeam(mocks.update)).toBe('North Team');
+    expect(mocks.executeRaw).toHaveBeenCalledTimes(1);
+    expect(mocks.executeRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.queryRaw.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('stores a new team name normalised', async () => {
+    const mocks = arrange();
+
+    await mocks.service.update(OTHER, { team: '  New   Team ' });
+
+    expect(savedTeam(mocks.update)).toBe('New Team');
+  });
+
+  it('refuses to put a post-sale account in a team, and writes nothing', async () => {
+    const mocks = arrange(
+      liveRow({ team: null, role: UserRole.LOGISTICS_EXECUTIVE }),
+      'Alpha',
+    );
+
+    await expect(
+      mocks.service.update(OTHER, { team: 'Alpha' }),
+    ).rejects.toThrow(/cannot join a team/);
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+
+  it('checks the new role when the same edit changes it', async () => {
+    const mocks = arrange(liveRow({ team: null }), 'Alpha');
+    mocks.roleFindFirst.mockResolvedValue({
+      baseRole: UserRole.LOGISTICS_MANAGER,
+    });
+
+    await expect(
+      mocks.service.update(OTHER, {
+        roleId: '55555555-5555-5555-5555-555555555555',
+        team: 'Alpha',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('keeps a label an account already carries, whatever its role, so an older account stays editable', async () => {
+    const mocks = arrange(
+      liveRow({ team: 'Alpha', role: UserRole.LOGISTICS_EXECUTIVE }),
+      'Alpha',
+    );
+
+    await mocks.service.update(OTHER, { team: 'Alpha', jobTitle: 'Driver' });
+
+    expect(savedTeam(mocks.update)).toBe('Alpha');
+  });
+
+  it('takes the member out of their team with null, without the team lock', async () => {
+    const mocks = arrange(liveRow({ team: 'Alpha' }));
+
+    await mocks.service.update(OTHER, { team: null });
+
+    expect(savedTeam(mocks.update)).toBeNull();
+    expect(mocks.executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('leaves the team alone when the edit does not send it', async () => {
+    const mocks = arrange(liveRow({ team: 'Alpha' }));
+
+    await mocks.service.update(OTHER, { jobTitle: 'Lead BDE' });
+
+    expect(savedTeam(mocks.update)).toBeUndefined();
+    expect(mocks.executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('creates a member in an existing team under its stored spelling', async () => {
+    const mocks = arrange(liveRow(), 'Alpha');
+    mocks.findFirst.mockImplementation((args: { where: { team?: unknown } }) =>
+      Promise.resolve(args.where.team !== undefined ? { team: 'Alpha' } : null),
+    );
+    mocks.roleFindFirst.mockResolvedValue({ baseRole: UserRole.SALES_AGENT });
+    mocks.leadFormFindFirst.mockResolvedValue({ id: FORM_ID });
+    mocks.create.mockResolvedValue({ id: OTHER });
+
+    await mocks.service.create({ ...CREATE_DTO, team: 'ALPHA' });
+
+    const args = (mocks.create.mock.calls as unknown[][])[0][0] as {
+      data: { team: unknown };
+    };
+    expect(args.data.team).toBe('Alpha');
+  });
+
+  it('refuses a new administrator with a team', async () => {
+    const mocks = arrange(liveRow(), null);
+    mocks.findFirst.mockResolvedValue(null);
+    mocks.roleFindFirst.mockResolvedValue({ baseRole: UserRole.SUPERADMIN });
+    mocks.leadFormFindFirst.mockResolvedValue({ id: FORM_ID });
+
+    await expect(
+      mocks.service.create({ ...CREATE_DTO, team: 'Alpha' }),
+    ).rejects.toThrow(/cannot join a team/);
+    expect(mocks.create).not.toHaveBeenCalled();
   });
 });

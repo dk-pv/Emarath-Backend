@@ -115,6 +115,8 @@ const ADMIN_ONLY_CONTROLLERS = new Set([
   'SettingsController',
   'TagAccessController',
   'TagsController',
+  // Teams v1: team administration, every route Super Admin only like the member roster.
+  'TeamsController',
   'UsersController',
 ]);
 const OPEN_ON_ADMIN_CONTROLLERS = new Set([
@@ -319,6 +321,12 @@ describe('Operational roles across every route (ADR-0084)', () => {
       'GET /api/settings/activity-reminders/workflow',
       'GET /api/audit/log',
       'GET /api/audit/log/filter-options',
+      'GET /api/teams',
+      'POST /api/teams',
+      'POST /api/teams/rename',
+      'POST /api/teams/assign',
+      'GET /api/reports/team-performance',
+      'GET /api/reports/team-performance/filter-options',
       ...LOGISTICS_READ_LABELS,
       ...JOURNEY_LABELS,
       ...LOGISTICS_QC_LABELS,
