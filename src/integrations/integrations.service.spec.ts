@@ -1,5 +1,6 @@
 import { NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { CurrentUserService } from '../auth/current-user';
 import { IntegrationsService } from './integrations.service';
 
 const ID = '11111111-1111-1111-1111-111111111111';
@@ -23,18 +24,70 @@ function makeService() {
   const findMany = jest.fn();
   const findFirst = jest.fn();
   const update = jest.fn();
+  const auditCreateMany = jest.fn();
 
   const prisma = {
     integration: { findMany, findFirst, update },
+    auditEvent: { createMany: auditCreateMany },
+    $transaction: jest.fn((run: (tx: unknown) => unknown) => run(prisma)),
   } as unknown as PrismaService;
+  const currentUser = {
+    resolve: jest.fn().mockResolvedValue({ id: 'admin-1' }),
+  } as unknown as CurrentUserService;
 
   return {
-    service: new IntegrationsService(prisma),
+    service: new IntegrationsService(prisma, currentUser),
     findMany,
     findFirst,
     update,
+    auditCreateMany,
   };
 }
+
+describe('IntegrationsService.setEnabled — history (AUD-01)', () => {
+  it('records the switch, with who flipped it, in the same transaction as the write', async () => {
+    const { service, findFirst, update, auditCreateMany } = makeService();
+    findFirst.mockResolvedValue({ id: ID, enabled: false });
+    update.mockResolvedValue(integrationRow({ enabled: true }));
+
+    await service.setEnabled(ID, true);
+
+    expect(auditCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          entityType: 'INTEGRATION',
+          entityId: ID,
+          leadId: null,
+          action: 'UPDATED',
+          actorType: 'USER',
+          actorId: 'admin-1',
+          source: 'integrations.toggle',
+          before: { enabled: false },
+          after: { enabled: true },
+        }),
+      ],
+    });
+  });
+
+  it('records nothing when the switch is already where it is being set', async () => {
+    const { service, findFirst, update, auditCreateMany } = makeService();
+    findFirst.mockResolvedValue({ id: ID, enabled: true });
+    update.mockResolvedValue(integrationRow({ enabled: true }));
+
+    await service.setEnabled(ID, true);
+
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records nothing when the write fails', async () => {
+    const { service, findFirst, update, auditCreateMany } = makeService();
+    findFirst.mockResolvedValue({ id: ID, enabled: false });
+    update.mockRejectedValue(new Error('write failed'));
+
+    await expect(service.setEnabled(ID, true)).rejects.toThrow('write failed');
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+});
 
 describe('IntegrationsService.list', () => {
   it('returns the registry in grid order, excluding soft-deleted rows (AC1/AC2)', async () => {

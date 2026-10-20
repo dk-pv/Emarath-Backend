@@ -68,6 +68,13 @@ describe('DocumentsService', () => {
     delete: jest.Mock;
   };
   let currentUser: { resolve: jest.Mock };
+  // The writes' own transaction (AUD-01): the same create/update/deleteMany doubles, plus the
+  // row lock, the locked re-read and the event table.
+  let tx: {
+    $queryRaw: jest.Mock;
+    document: Record<string, jest.Mock>;
+    auditEvent: { createMany: jest.Mock };
+  };
 
   beforeEach(() => {
     prisma = {
@@ -82,9 +89,27 @@ describe('DocumentsService', () => {
         delete: jest.fn().mockResolvedValue(undefined),
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
-      // The service composes [findMany, count] and awaits them together; the mock
-      // resolves the tuple so the two ops need no real client.
-      $transaction: jest.fn().mockResolvedValue([[listRow], 1]),
+      // The list composes [findMany, count] and awaits them together; the mock resolves the
+      // tuple so the two ops need no real client. A write's callback runs against `tx`.
+      $transaction: jest.fn((arg: unknown) =>
+        typeof arg === 'function'
+          ? (arg as (client: typeof tx) => unknown)(tx)
+          : Promise.resolve([[listRow], 1]),
+      ),
+    };
+    tx = {
+      $queryRaw: jest.fn().mockResolvedValue([]),
+      document: {
+        create: prisma.document.create,
+        update: prisma.document.update,
+        deleteMany: prisma.document.deleteMany,
+        findUniqueOrThrow: jest.fn().mockResolvedValue(storedRow),
+        // Every requested row still exists unless a test says otherwise.
+        findMany: jest.fn((args: { where: { id: { in: string[] } } }) =>
+          Promise.resolve(args.where.id.in.map((id) => ({ ...storedRow, id }))),
+        ),
+      },
+      auditEvent: { createMany: jest.fn() },
     };
     storage = {
       put: jest.fn().mockResolvedValue({
@@ -474,12 +499,12 @@ describe('DocumentsService', () => {
     expect(result).toEqual({ id: 'doc-1' });
     // AC3: the physical object is removed, keyed off the scoped row's storageKey.
     expect(storage.delete).toHaveBeenCalledWith('documents/uuid/combo.png');
-    expect(prisma.document.delete).toHaveBeenCalledWith({
-      where: { id: 'doc-1' },
+    expect(prisma.document.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: ['doc-1'] } },
     });
     // Storage-first so a failed row delete stays retryable (the key lives on the row).
     expect(storage.delete.mock.invocationCallOrder[0]).toBeLessThan(
-      prisma.document.delete.mock.invocationCallOrder[0],
+      prisma.document.deleteMany.mock.invocationCallOrder[0],
     );
     // The scope predicate gates the read (excludes deleted + cross-scope rows).
     expect((prisma.document.findFirst.mock.calls as unknown[][])[0][0]).toEqual(
@@ -506,7 +531,7 @@ describe('DocumentsService', () => {
     prisma.document.findFirst.mockResolvedValue(scopedRow('someone-else'));
 
     await service.remove('doc-1');
-    expect(prisma.document.delete).toHaveBeenCalled();
+    expect(prisma.document.deleteMany).toHaveBeenCalled();
   });
 
   it('forbids a view-only grantee from deleting (no file or row touched)', async () => {
@@ -517,7 +542,7 @@ describe('DocumentsService', () => {
       ForbiddenException,
     );
     expect(storage.delete).not.toHaveBeenCalled();
-    expect(prisma.document.delete).not.toHaveBeenCalled();
+    expect(prisma.document.deleteMany).not.toHaveBeenCalled();
   });
 
   it('404s a document the caller cannot see (incl. deleted/foreign) and deletes nothing', async () => {
@@ -528,7 +553,7 @@ describe('DocumentsService', () => {
       NotFoundException,
     );
     expect(storage.delete).not.toHaveBeenCalled();
-    expect(prisma.document.delete).not.toHaveBeenCalled();
+    expect(prisma.document.deleteMany).not.toHaveBeenCalled();
   });
 
   it('does not remove the row when storage deletion fails (keeps the delete retryable)', async () => {
@@ -537,7 +562,7 @@ describe('DocumentsService', () => {
     storage.delete.mockRejectedValue(new Error('storage down'));
 
     await expect(service.remove('doc-1')).rejects.toThrow('storage down');
-    expect(prisma.document.delete).not.toHaveBeenCalled();
+    expect(prisma.document.deleteMany).not.toHaveBeenCalled();
   });
 
   // --- DOC-08.1 bulk delete (per-item, deletable = owner/SUPERADMIN) ---
@@ -635,5 +660,118 @@ describe('DocumentsService', () => {
     const result = await service.bulkDelete({ ids: ['a'] });
     expect(JSON.stringify(result)).not.toContain('storageKey');
     expect(JSON.stringify(result)).not.toContain('documents/a/secret.png');
+  });
+
+  describe('history (AUD-01)', () => {
+    const events = () =>
+      (
+        tx.auditEvent.createMany.mock.calls as [
+          { data: Record<string, unknown>[] },
+        ][]
+      )
+        .map(([arg]) => arg.data)
+        .flat();
+
+    it('records an upload with what was stored and who may see it — never the storage key', async () => {
+      await service.create(file(), dto({ userIds: ['user-2'] }));
+
+      expect(events()).toEqual([
+        expect.objectContaining({
+          entityType: 'DOCUMENT',
+          entityId: 'doc-1',
+          leadId: null,
+          action: 'CREATED',
+          actorId: 'user-1',
+          source: 'documents.upload',
+          after: {
+            title: 'Product Images',
+            fileName: 'combo.png',
+            category: null,
+            sizeBytes: 5,
+            contentType: 'image/png',
+            uploaderId: 'user-1',
+            accessUserIds: ['user-2'],
+          },
+        }),
+      ]);
+      expect(JSON.stringify(events())).not.toContain('documents/uuid');
+    });
+
+    it('records nothing, and removes the stored file, when the upload’s write fails', async () => {
+      prisma.document.create.mockRejectedValue(new Error('write failed'));
+
+      await expect(service.create(file(), dto())).rejects.toThrow(
+        'write failed',
+      );
+      expect(tx.auditEvent.createMany).not.toHaveBeenCalled();
+      expect(storage.delete).toHaveBeenCalledWith('documents/uuid/combo.png');
+    });
+
+    it('records an access change as PERMISSIONS_CHANGED and a rename as UPDATED, under a row lock', async () => {
+      prisma.document.findFirst.mockResolvedValue({
+        id: 'doc-1',
+        uploaderId: 'user-1',
+      });
+      prisma.document.update.mockResolvedValue({
+        ...storedRow,
+        title: 'Renamed',
+        access: [{ user: { id: 'user-3', name: 'Agent Three' } }],
+      });
+
+      await service.update('doc-1', { title: 'Renamed', userIds: ['user-3'] });
+
+      expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(events()).toEqual([
+        expect.objectContaining({
+          action: 'PERMISSIONS_CHANGED',
+          source: 'documents.update',
+          before: { accessUserIds: ['user-2'] },
+          after: { accessUserIds: ['user-3'] },
+        }),
+        expect.objectContaining({
+          action: 'UPDATED',
+          before: { title: 'Product Images' },
+          after: { title: 'Renamed' },
+        }),
+      ]);
+    });
+
+    it('records each deleted document as it stood, and none a concurrent delete already took', async () => {
+      prisma.document.findMany.mockResolvedValue([
+        { id: 'a', storageKey: 'documents/a/x.png' },
+        { id: 'b', storageKey: 'documents/b/y.pdf' },
+      ]);
+      // 'b' vanished between the scoped read and the locked re-read.
+      tx.document.findMany.mockResolvedValue([{ ...storedRow, id: 'a' }]);
+
+      await service.bulkDelete({ ids: ['a', 'b'] });
+
+      expect(prisma.document.deleteMany).toHaveBeenCalledWith({
+        where: { id: { in: ['a'] } },
+      });
+      expect(events()).toEqual([
+        expect.objectContaining({
+          entityId: 'a',
+          action: 'DELETED',
+          source: 'documents.bulk-delete',
+          before: expect.objectContaining({
+            title: 'Product Images',
+          }) as unknown,
+        }),
+      ]);
+    });
+
+    it('records nothing when the document is not the caller’s to delete', async () => {
+      prisma.document.findFirst.mockResolvedValue({
+        id: 'doc-1',
+        uploaderId: 'someone-else',
+        storageKey: 'documents/uuid/combo.png',
+      });
+
+      await expect(service.remove('doc-1')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(tx.auditEvent.createMany).not.toHaveBeenCalled();
+    });
   });
 });

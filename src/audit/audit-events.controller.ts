@@ -17,7 +17,7 @@ import {
  * `LOGISTICS_READ_ROLES` is the reader set an order already uses: every sales role (their own
  * leads only, enforced in the service) plus both Logistics roles, QC and Accounts. Like the
  * Logistics roles, Accounts reaches a journey only through its order scope — a Delivered order —
- * and so reads that order's own events, never the lead's.
+ * and so reads that order's own events and its Accounts record's (ADR-0096), never the lead's.
  */
 @Controller('audit/events')
 export class AuditEventsController {

@@ -157,7 +157,10 @@ export class LeadsBySourceReportService {
    * reflects the active period/team filters. Rows are pulled in batches and written straight to
    * the response, so memory stays flat regardless of match count.
    */
-  async exportCsv(query: LeadsBySourceQueryDto, res: Response): Promise<void> {
+  async exportCsv(
+    query: LeadsBySourceQueryDto,
+    res: Response,
+  ): Promise<number> {
     const user = await this.currentUser.resolve();
     const where = buildLeadsBySourceWhere(user, query);
 
@@ -175,6 +178,7 @@ export class LeadsBySourceReportService {
       EXPORT_HEADERS.map((header) => csvCell(header)).join(',') + '\r\n',
     );
 
+    let exported = 0;
     let skip = 0;
     while (skip < MAX_EXPORT_ROWS) {
       const leads = await this.prisma.lead.findMany({
@@ -185,6 +189,7 @@ export class LeadsBySourceReportService {
         take: EXPORT_BATCH_SIZE,
       });
       if (leads.length === 0) break;
+      exported += leads.length;
 
       let chunk = '';
       for (const lead of leads) {
@@ -204,6 +209,7 @@ export class LeadsBySourceReportService {
     }
 
     res.end();
+    return exported;
   }
 
   /** The team values the filter offers (AC3): the distinct non-empty `User.team` labels. */

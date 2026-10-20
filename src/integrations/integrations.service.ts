@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { CurrentUserService } from '../auth/current-user';
+import { recordAuditEvents, userActor } from '../audit/audit-events';
 import { IntegrationResponse } from './dto/integration.dto';
 
 const INTEGRATION_SELECT = {
@@ -30,7 +32,10 @@ const INTEGRATION_SELECT = {
  */
 @Injectable()
 export class IntegrationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly currentUser: CurrentUserService,
+  ) {}
 
   /**
    * The whole library in grid order (INT-01.1 AC1–AC3).
@@ -59,16 +64,35 @@ export class IntegrationsService {
   async setEnabled(id: string, enabled: boolean): Promise<IntegrationResponse> {
     const found = await this.prisma.integration.findFirst({
       where: { id, deletedAt: null },
-      select: { id: true },
+      select: { id: true, enabled: true },
     });
     if (!found) {
       throw new NotFoundException('Integration not found.');
     }
+    const actor = userActor(await this.currentUser.resolve());
 
-    return this.prisma.integration.update({
-      where: { id },
-      data: { enabled },
-      select: INTEGRATION_SELECT,
+    return this.prisma.$transaction(async (tx) => {
+      const row = await tx.integration.update({
+        where: { id },
+        data: { enabled },
+        select: INTEGRATION_SELECT,
+      });
+      // A switch flipped to where it already is changes nothing, so it records nothing.
+      if (found.enabled !== enabled) {
+        await recordAuditEvents(tx, [
+          {
+            entityType: 'INTEGRATION',
+            entityId: id,
+            leadId: null,
+            action: 'UPDATED',
+            actor,
+            source: 'integrations.toggle',
+            before: { enabled: found.enabled },
+            after: { enabled },
+          },
+        ]);
+      }
+      return row;
     });
   }
 }

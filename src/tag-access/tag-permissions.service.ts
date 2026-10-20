@@ -5,7 +5,14 @@ import {
 } from '@nestjs/common';
 import { Prisma, TagAccessMode, UserRole } from '../generated/prisma/client';
 import { SALES_MODULE_ROLES } from '../auth/role-groups';
+import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  AuditState,
+  recordAuditEvents,
+  stateChangeEvents,
+  userActor,
+} from '../audit/audit-events';
 import {
   TeamTagAccessNode,
   SaveTeamTagAccessDto,
@@ -21,6 +28,21 @@ const OVERRIDABLE_ROLES: readonly UserRole[] = SALES_MODULE_ROLES.filter(
   (role) => role !== UserRole.SUPERADMIN,
 );
 
+/** Which policy a change is about: a team's default or one user's override. */
+type PolicyKey = { team: string } | { userId: string };
+
+/**
+ * A policy as its history records it (AUD-01). No stored policy reads as all-null, which is what
+ * the resolver makes of it too: the pre-feature default for a team, "inherit" for a user.
+ */
+function policyState(row: PolicyRow | null): AuditState {
+  return {
+    canCreate: row?.canCreate ?? null,
+    tagAccess: row?.tagAccess ?? null,
+    tagIds: (row?.grants.map((grant) => grant.tagId) ?? []).sort(),
+  };
+}
+
 /**
  * The Admin's side of Tag Permissions (ADR-0091): read the whole matrix, and set or reset a
  * team's default or one user's override. Every method is reached only through
@@ -28,7 +50,10 @@ const OVERRIDABLE_ROLES: readonly UserRole[] = SALES_MODULE_ROLES.filter(
  */
 @Injectable()
 export class TagPermissionsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly currentUser: CurrentUserService,
+  ) {}
 
   /**
    * Every team and every overridable user with what they currently get.
@@ -119,7 +144,7 @@ export class TagPermissionsService {
       await this.assertTagsExist(dto.tagIds);
     }
 
-    await this.prisma.$transaction(async (tx) => {
+    await this.recorded({ team: dto.team }, 'tag-access.team', async (tx) => {
       const policy = await tx.tagAccessPolicy.upsert({
         where: { team: dto.team },
         create: {
@@ -137,7 +162,9 @@ export class TagPermissionsService {
 
   /** Back to "as before" for this team. Idempotent. */
   async resetTeam(team: string): Promise<TagAccessOverview> {
-    await this.prisma.tagAccessPolicy.deleteMany({ where: { team } });
+    await this.recorded({ team }, 'tag-access.team-reset', (tx) =>
+      tx.tagAccessPolicy.deleteMany({ where: { team } }),
+    );
     return this.overview();
   }
 
@@ -166,7 +193,7 @@ export class TagPermissionsService {
     const tagIds = dto.tagIds ?? [];
     if (tagAccess === TagAccessMode.LISTED) await this.assertTagsExist(tagIds);
 
-    await this.prisma.$transaction(async (tx) => {
+    await this.recorded({ userId }, 'tag-access.user', async (tx) => {
       const policy = await tx.tagAccessPolicy.upsert({
         where: { userId },
         create: { user: { connect: { id: userId } }, canCreate, tagAccess },
@@ -180,8 +207,59 @@ export class TagPermissionsService {
 
   /** Back to inheriting the team. Idempotent. */
   async resetUser(userId: string): Promise<TagAccessOverview> {
-    await this.prisma.tagAccessPolicy.deleteMany({ where: { userId } });
+    await this.recorded({ userId }, 'tag-access.user-reset', (tx) =>
+      tx.tagAccessPolicy.deleteMany({ where: { userId } }),
+    );
     return this.overview();
+  }
+
+  /**
+   * Runs one policy write and records what it changed (AUD-01), in one transaction. The policy
+   * row is locked before it is read, so the before-state is the one the write replaced; a write
+   * that changes nothing — a repeated save, a reset of a policy that does not exist — records
+   * nothing.
+   */
+  private async recorded(
+    key: PolicyKey,
+    source: string,
+    write: (tx: Prisma.TransactionClient) => Promise<unknown>,
+  ): Promise<void> {
+    const actor = userActor(await this.currentUser.resolve());
+    const where: Prisma.TagAccessPolicyWhereUniqueInput =
+      'team' in key ? { team: key.team } : { userId: key.userId };
+
+    await this.prisma.$transaction(async (tx) => {
+      if ('team' in key) {
+        await tx.$queryRaw`SELECT id FROM tag_access_policies WHERE team = ${key.team} FOR UPDATE`;
+      } else {
+        await tx.$queryRaw`SELECT id FROM tag_access_policies WHERE user_id = ${key.userId}::uuid FOR UPDATE`;
+      }
+      const before = await tx.tagAccessPolicy.findUnique({
+        where,
+        select: POLICY_SELECT,
+      });
+      await write(tx);
+      const after = await tx.tagAccessPolicy.findUnique({
+        where,
+        select: POLICY_SELECT,
+      });
+
+      const policyId = after?.id ?? before?.id;
+      if (!policyId) return;
+      const events = stateChangeEvents(
+        {
+          entityType: 'TAG_ACCESS_POLICY',
+          entityId: policyId,
+          leadId: null,
+          actor,
+          source,
+          metadata: key,
+        },
+        policyState(before),
+        policyState(after),
+      ).map((event) => ({ ...event, action: 'PERMISSIONS_CHANGED' as const }));
+      if (events.length > 0) await recordAuditEvents(tx, events);
+    });
   }
 
   /** Grants exist only for `LISTED`; any other mode leaves the policy with none. */

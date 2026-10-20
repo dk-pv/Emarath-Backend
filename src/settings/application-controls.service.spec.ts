@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { CurrentUserService } from '../auth/current-user';
 import { SettingsService } from './settings.service';
 import {
   APPLICATION_DASHBOARD_DEFAULTS,
@@ -34,10 +35,17 @@ function makeService(
     appSetting: { findUnique, upsert },
     stage: { findMany: stageFindMany },
     leadSource: { findMany: leadSourceFindMany },
+    auditEvent: { createMany: jest.fn() },
+    $queryRaw: jest.fn().mockResolvedValue([]),
+    $transaction: jest.fn((run: (tx: unknown) => unknown) => run(prisma)),
   } as unknown as PrismaService;
+  const currentUser = {
+    resolve: jest.fn().mockResolvedValue({ id: 'admin-1' }),
+  } as unknown as CurrentUserService;
+  upsert.mockResolvedValue({ id: 'setting-1' });
 
   return {
-    service: new SettingsService(prisma),
+    service: new SettingsService(prisma, currentUser),
     findUnique,
     upsert,
     stageFindMany,

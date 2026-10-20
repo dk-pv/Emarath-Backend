@@ -6,6 +6,7 @@ import {
   LeadFirstResponseSummaryResponse,
 } from './dto/lead-first-response-response.dto';
 import { LeadFirstResponseService } from './lead-first-response.service';
+import { AuditedExport } from '../audit/audited-export';
 
 /**
  * The Lead First Response report's read API (RPT-02.9). Every route is role-scoped by the
@@ -34,10 +35,11 @@ export class LeadFirstResponseController {
 
   /** GET /api/reports/leads/first-response/export — the scoped rows as a CSV download. */
   @Get('export')
+  @AuditedExport('reports.lead-first-response.export')
   export(
     @Query() query: LeadFirstResponseQueryDto,
     @Res({ passthrough: false }) res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     return this.firstResponse.exportCsv(query, res);
   }
 }

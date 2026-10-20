@@ -6,6 +6,7 @@ import {
   LeadAgingSummaryResponse,
 } from './dto/lead-aging-response.dto';
 import { LeadAgingReportService } from './lead-aging.service';
+import { AuditedExport } from '../audit/audited-export';
 
 /**
  * The Lead Aging & Stale Leads report's read API (RPT-02.8). Every route is role-scoped by
@@ -32,10 +33,11 @@ export class LeadAgingController {
 
   /** GET /api/reports/leads/aging/export — the scoped rows as a CSV download. */
   @Get('export')
+  @AuditedExport('reports.lead-aging.export')
   export(
     @Query() query: LeadAgingQueryDto,
     @Res({ passthrough: false }) res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     return this.leadAging.exportCsv(query, res);
   }
 }

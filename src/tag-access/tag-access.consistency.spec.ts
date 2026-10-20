@@ -83,7 +83,10 @@ function build(rows: PolicyRow[], team: string | null = 'Sales') {
   } as unknown as PrismaService;
   return {
     access: new TagAccessService(prisma),
-    permissions: new TagPermissionsService(prisma),
+    permissions: new TagPermissionsService(prisma, {
+      resolve: () =>
+        Promise.resolve({ id: 'admin-1', role: UserRole.SUPERADMIN }),
+    }),
   };
 }
 

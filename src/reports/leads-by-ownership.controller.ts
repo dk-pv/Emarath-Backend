@@ -7,6 +7,7 @@ import {
   LeadsByOwnershipListResponse,
   LeadsByOwnershipSummaryResponse,
 } from './dto/leads-by-ownership-response.dto';
+import { AuditedExport } from '../audit/audited-export';
 
 /**
  * The Leads By Ownership report's HTTP surface (RPT-02.5). Thin by design: the DTO validates the
@@ -43,10 +44,11 @@ export class LeadsByOwnershipController {
 
   /** GET /api/reports/leads/by-ownership/export — the same scoped set as a CSV download. */
   @Get('export')
+  @AuditedExport('reports.leads-by-ownership.export')
   export(
     @Query() query: LeadsByOwnershipQueryDto,
     @Res() res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     return this.leadsByOwnership.exportCsv(query, res);
   }
 }

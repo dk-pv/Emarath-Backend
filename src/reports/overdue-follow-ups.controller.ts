@@ -7,6 +7,7 @@ import {
   OverdueFollowUpsListResponse,
   OverdueFollowUpsSummaryResponse,
 } from './dto/overdue-follow-ups-response.dto';
+import { AuditedExport } from '../audit/audited-export';
 
 /**
  * The Overdue Follow Ups report's HTTP surface (RPT-03.2). Thin by design: the DTO validates the
@@ -42,10 +43,11 @@ export class OverdueFollowUpsController {
 
   /** GET /api/reports/follow-ups/overdue/export — the same scoped set as a CSV download. */
   @Get('export')
+  @AuditedExport('reports.overdue-follow-ups.export')
   export(
     @Query() query: OverdueFollowUpsQueryDto,
     @Res() res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     return this.overdue.exportCsv(query, res);
   }
 }

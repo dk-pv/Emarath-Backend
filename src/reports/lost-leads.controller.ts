@@ -7,6 +7,7 @@ import {
   LostLeadsListResponse,
   LostLeadsSummaryResponse,
 } from './dto/lost-leads-response.dto';
+import { AuditedExport } from '../audit/audited-export';
 
 /**
  * The Lost Leads report's HTTP surface (RPT-02.7). Thin by design: the DTO validates the
@@ -39,10 +40,11 @@ export class LostLeadsController {
 
   /** GET /api/reports/leads/lost/export — the same scoped set as a CSV download. */
   @Get('export')
+  @AuditedExport('reports.lost-leads.export')
   export(
     @Query() query: LostLeadsQueryDto,
     @Res() res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     return this.lostLeads.exportCsv(query, res);
   }
 }

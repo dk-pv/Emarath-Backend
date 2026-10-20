@@ -1,5 +1,6 @@
 import { CallOutcome, UserRole } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { CurrentUserService } from '../auth/current-user';
 import { SettingsService, toSalesCrmGeneral } from './settings.service';
 import {
   SALES_CRM_GENERAL_DEFAULTS,
@@ -65,24 +66,117 @@ import {
  */
 function makeService() {
   const findUnique = jest.fn();
-  const upsert = jest.fn().mockResolvedValue(undefined);
+  const upsert = jest.fn().mockResolvedValue({ id: 'setting-1' });
   const userFindUnique = jest.fn().mockResolvedValue({ name: 'Emarath Admin' });
   // Follow Up Types refuse to delete a type live follow-ups are filed under.
   const activityCount = jest.fn().mockResolvedValue(0);
+  // The stored payload a save replaces, read under the row lock (AUD-01). None by default.
+  const queryRaw = jest.fn().mockResolvedValue([]);
+  const auditCreateMany = jest.fn();
   const prisma = {
     appSetting: { findUnique, upsert },
     user: { findUnique: userFindUnique },
     activity: { count: activityCount },
+    auditEvent: { createMany: auditCreateMany },
+    $queryRaw: queryRaw,
+    $transaction: jest.fn((run: (tx: unknown) => unknown) => run(prisma)),
   } as unknown as PrismaService;
+  const currentUser = {
+    resolve: jest.fn().mockResolvedValue({ id: 'admin-1' }),
+  } as unknown as CurrentUserService;
 
   return {
-    service: new SettingsService(prisma),
+    service: new SettingsService(prisma, currentUser),
     findUnique,
     upsert,
     userFindUnique,
     activityCount,
+    queryRaw,
+    auditCreateMany,
   };
 }
+
+describe('SettingsService — history (AUD-01)', () => {
+  const general: UpdateOrganizationGeneralDto = {
+    ...ORGANIZATION_GENERAL_DEFAULTS,
+    currency: 'AED',
+  };
+
+  it('records only the fields a save changed, against the value it replaced, under a row lock', async () => {
+    const { service, queryRaw, auditCreateMany } = makeService();
+    queryRaw.mockResolvedValue([{ value: { ...general, currency: 'USD' } }]);
+
+    await service.saveOrganizationGeneral(general);
+
+    expect(queryRaw).toHaveBeenCalledTimes(1);
+    const [sql] = queryRaw.mock.calls[0] as [TemplateStringsArray];
+    expect(sql.join('?')).toContain('FOR UPDATE');
+    expect(auditCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          entityType: 'SETTING',
+          entityId: 'setting-1',
+          leadId: null,
+          action: 'UPDATED',
+          actorType: 'USER',
+          actorId: 'admin-1',
+          source: `settings.${ORGANIZATION_GENERAL_KEY}`,
+          before: { currency: 'USD' },
+          after: { currency: 'AED' },
+        }),
+      ],
+    });
+  });
+
+  it('records a first save against null — the shipped defaults were never stored', async () => {
+    const { service, auditCreateMany } = makeService();
+
+    await service.saveOrganizationGeneral(general);
+
+    const [{ data }] = auditCreateMany.mock.calls[0] as [
+      { data: { before: Record<string, unknown> }[] },
+    ];
+    expect(Object.values(data[0].before).every((value) => value === null)).toBe(
+      true,
+    );
+  });
+
+  it('records nothing for a save that changes nothing', async () => {
+    const { service, queryRaw, auditCreateMany } = makeService();
+    queryRaw.mockResolvedValue([{ value: general }]);
+
+    await service.saveOrganizationGeneral(general);
+
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records nothing when the write fails', async () => {
+    const { service, upsert, auditCreateMany } = makeService();
+    upsert.mockRejectedValue(new Error('write failed'));
+
+    await expect(service.saveOrganizationGeneral(general)).rejects.toThrow(
+      'write failed',
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('compares a list payload as one value', async () => {
+    const { service, findUnique, queryRaw, auditCreateMany } = makeService();
+    findUnique.mockResolvedValue(null);
+    queryRaw.mockResolvedValue([{ value: CALL_STATUS_DEFAULTS }]);
+
+    await service.saveCallStatus(CALL_STATUS_DEFAULTS[0].providerStatus, {
+      customName: 'Line busy',
+    });
+
+    const [{ data }] = auditCreateMany.mock.calls[0] as [
+      { data: { source: string; before: object; after: object }[] },
+    ];
+    expect(data[0].source).toBe(`settings.${CALL_TRACKING_STATUSES_KEY}`);
+    expect(Object.keys(data[0].before)).toEqual(['value']);
+    expect(Object.keys(data[0].after)).toEqual(['value']);
+  });
+});
 
 /** The one upsert argument shape the assertions read back. */
 interface UpsertCall {

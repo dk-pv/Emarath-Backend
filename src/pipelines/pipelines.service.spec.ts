@@ -32,7 +32,12 @@ function makeService() {
   const userFindMany = jest.fn().mockResolvedValue([]);
   const userFindFirst = jest.fn().mockResolvedValue({ id: 'u1' });
   const userUpdate = jest.fn();
-  const $transaction = jest.fn().mockResolvedValue([]);
+  // Array transactions resolve; callback ones (create, AUD-01) run against this double.
+  const $transaction = jest.fn((arg: unknown) =>
+    typeof arg === 'function'
+      ? (arg as (client: unknown) => unknown)(prisma)
+      : Promise.resolve([]),
+  );
   const stageCreateMany = jest.fn();
   const auditCreateMany = jest.fn();
 
@@ -212,12 +217,9 @@ describe('PipelinesService.update', () => {
       leadUpdateMany,
       stageUpdateMany,
     } = makeService();
-    findUnique.mockResolvedValue({
-      id: 'p1',
-      name: 'LOGISTICS',
-      shortCode: null,
-      isDefault: false,
-    });
+    findUnique.mockResolvedValue(
+      row({ id: 'p1', name: 'LOGISTICS', shortCode: null, isDefault: false }),
+    );
     userFindMany.mockResolvedValue([
       { id: 'u1', pipelines: ['LOGISTICS', 'QC'] },
     ]);
@@ -242,12 +244,9 @@ describe('PipelinesService.update', () => {
 
   it('records the rename once, on the pipeline, in the rename’s transaction (ADR-0083)', async () => {
     const { service, findUnique, findMany, auditCreateMany } = makeService();
-    findUnique.mockResolvedValue({
-      id: 'p1',
-      name: 'LOGISTICS',
-      shortCode: null,
-      isDefault: false,
-    });
+    findUnique.mockResolvedValue(
+      row({ id: 'p1', name: 'LOGISTICS', shortCode: null, isDefault: false }),
+    );
     findMany.mockResolvedValue([row({ id: 'p1', name: 'Logistics UAE' })]);
 
     await service.update('p1', { name: 'Logistics UAE' });
@@ -272,12 +271,9 @@ describe('PipelinesService.update', () => {
   it('leaves leads alone when only the short code changes', async () => {
     const { service, findUnique, findMany, update, leadUpdateMany } =
       makeService();
-    findUnique.mockResolvedValue({
-      id: 'p1',
-      name: 'QC',
-      shortCode: null,
-      isDefault: false,
-    });
+    findUnique.mockResolvedValue(
+      row({ id: 'p1', name: 'QC', shortCode: null, isDefault: false }),
+    );
     findMany.mockResolvedValue([
       row({ id: 'p1', name: 'QC', shortCode: 'QC1' }),
     ]);
@@ -303,13 +299,15 @@ describe('PipelinesService.update — step 3 settings', () => {
   /** Every settings test edits the same pipeline, whose stages are s-new/s-won. */
   const ready = () => {
     const kit = makeService();
-    kit.findUnique.mockResolvedValue({
-      id: 'p1',
-      name: 'Sales',
-      shortCode: 'SL',
-      isDefault: false,
-      accessMode: 'ALL_USERS',
-    });
+    kit.findUnique.mockResolvedValue(
+      row({
+        id: 'p1',
+        name: 'Sales',
+        shortCode: 'SL',
+        isDefault: false,
+        accessMode: 'ALL_USERS',
+      }),
+    );
     kit.stageFindMany.mockResolvedValue([
       { id: 's-new', pipeline: 'Sales' },
       { id: 's-won', pipeline: 'Sales' },
@@ -473,12 +471,9 @@ describe('PipelinesService.setDefault', () => {
   it('clears the previous default and sets the new one together', async () => {
     const { service, findUnique, findMany, $transaction, updateMany } =
       makeService();
-    findUnique.mockResolvedValue({
-      id: 'p2',
-      name: 'QC',
-      shortCode: null,
-      isDefault: false,
-    });
+    findUnique.mockResolvedValue(
+      row({ id: 'p2', name: 'QC', shortCode: null, isDefault: false }),
+    );
     findMany.mockResolvedValue([]);
 
     await service.setDefault('p2');
@@ -494,12 +489,14 @@ describe('PipelinesService.setDefault', () => {
 describe('PipelinesService.remove', () => {
   it('refuses to delete the default pipeline', async () => {
     const { service, findUnique, remove } = makeService();
-    findUnique.mockResolvedValue({
-      id: 'p1',
-      name: 'Lead Pipeline',
-      shortCode: null,
-      isDefault: true,
-    });
+    findUnique.mockResolvedValue(
+      row({
+        id: 'p1',
+        name: 'Lead Pipeline',
+        shortCode: null,
+        isDefault: true,
+      }),
+    );
 
     await expect(service.remove('p1')).rejects.toBeInstanceOf(
       ConflictException,
@@ -509,12 +506,9 @@ describe('PipelinesService.remove', () => {
 
   it('refuses while leads still sit on it, and says how many', async () => {
     const { service, findUnique, leadCount, remove } = makeService();
-    findUnique.mockResolvedValue({
-      id: 'p2',
-      name: 'LOGISTICS',
-      shortCode: null,
-      isDefault: false,
-    });
+    findUnique.mockResolvedValue(
+      row({ id: 'p2', name: 'LOGISTICS', shortCode: null, isDefault: false }),
+    );
     leadCount.mockResolvedValue(3072);
 
     await expect(service.remove('p2')).rejects.toThrow('3072 leads');
@@ -523,12 +517,9 @@ describe('PipelinesService.remove', () => {
 
   it('counts archived leads too, so none is left on a deleted pipeline', async () => {
     const { service, findUnique, leadCount } = makeService();
-    findUnique.mockResolvedValue({
-      id: 'p2',
-      name: 'QC',
-      shortCode: null,
-      isDefault: false,
-    });
+    findUnique.mockResolvedValue(
+      row({ id: 'p2', name: 'QC', shortCode: null, isDefault: false }),
+    );
 
     await service.remove('p2');
 
@@ -540,12 +531,9 @@ describe('PipelinesService.remove', () => {
   it('takes the pipeline stages with it, in one transaction', async () => {
     const { service, findUnique, $transaction, stageDeleteMany } =
       makeService();
-    findUnique.mockResolvedValue({
-      id: 'p2',
-      name: 'QC',
-      shortCode: null,
-      isDefault: false,
-    });
+    findUnique.mockResolvedValue(
+      row({ id: 'p2', name: 'QC', shortCode: null, isDefault: false }),
+    );
 
     await expect(service.remove('p2')).resolves.toEqual({ id: 'p2' });
 
@@ -638,13 +626,15 @@ describe('PipelinesService permissions', () => {
 
   it('replaces the whole grant list on update', async () => {
     const { service, findUnique, findMany, update } = makeService();
-    findUnique.mockResolvedValue({
-      id: 'p1',
-      name: 'QC',
-      shortCode: null,
-      isDefault: false,
-      accessMode: 'SPECIFIC',
-    });
+    findUnique.mockResolvedValue(
+      row({
+        id: 'p1',
+        name: 'QC',
+        shortCode: null,
+        isDefault: false,
+        accessMode: 'SPECIFIC',
+      }),
+    );
     findMany.mockResolvedValue([row({ id: 'p1', name: 'QC' })]);
 
     await service.update('p1', {
@@ -662,6 +652,170 @@ describe('PipelinesService permissions', () => {
     ];
     expect(call.data.permissions.deleteMany).toEqual({});
     expect(call.data.permissions.create).toHaveLength(1);
+  });
+});
+
+describe('PipelinesService — history (AUD-01)', () => {
+  const USER_ID = '22222222-2222-4222-8222-222222222222';
+  const events = (auditCreateMany: jest.Mock) =>
+    (auditCreateMany.mock.calls as [{ data: Record<string, unknown>[] }][])
+      .map(([arg]) => arg.data)
+      .flat();
+
+  it('records a new pipeline with who may open it', async () => {
+    const { service, count, create, findMany, auditCreateMany } = makeService();
+    count.mockResolvedValue(1);
+    create.mockResolvedValue({
+      id: 'new',
+      name: 'Sales',
+      isDefault: false,
+      templateKey: null,
+    });
+    findMany.mockResolvedValue([row({ id: 'new', name: 'Sales' })]);
+
+    await service.create({
+      name: 'Sales',
+      shortCode: 'SL',
+      accessMode: 'SPECIFIC',
+      permissions: [{ permissionType: 'USER', userId: USER_ID }],
+    });
+
+    expect(events(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityType: 'PIPELINE',
+        entityId: 'new',
+        action: 'CREATED',
+        actorId: 'admin-1',
+        source: 'pipelines.create',
+        after: {
+          name: 'Sales',
+          shortCode: 'SL',
+          isDefault: false,
+          templateKey: null,
+          accessMode: 'SPECIFIC',
+          grants: [{ permissionType: 'USER', roleId: null, userId: USER_ID }],
+        },
+      }),
+    ]);
+  });
+
+  it('records an access change as PERMISSIONS_CHANGED and the rest of the edit as UPDATED, with the write', async () => {
+    const { service, findUnique, findMany, $transaction, auditCreateMany } =
+      makeService();
+    findUnique.mockResolvedValue(row({ id: 'p1', name: 'QC' }));
+    findMany.mockResolvedValue([row({ id: 'p1', name: 'QC' })]);
+
+    await service.update('p1', {
+      shortCode: 'QC1',
+      accessMode: 'SPECIFIC',
+      permissions: [{ permissionType: 'USER', userId: USER_ID }],
+    });
+
+    const [batch] = $transaction.mock.calls[0] as [unknown[]];
+    expect(batch).toHaveLength(2);
+    expect(events(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        action: 'PERMISSIONS_CHANGED',
+        source: 'pipelines.update',
+        before: { accessMode: 'ALL_USERS', grants: [] },
+        after: {
+          accessMode: 'SPECIFIC',
+          grants: [{ permissionType: 'USER', roleId: null, userId: USER_ID }],
+        },
+      }),
+      expect.objectContaining({
+        action: 'UPDATED',
+        before: { shortCode: null },
+        after: { shortCode: 'QC1' },
+      }),
+    ]);
+  });
+
+  it('records only the settings a step-3 save changed, and nothing for a save that changes nothing', async () => {
+    const kit = makeService();
+    kit.findUnique.mockResolvedValue(row({ id: 'p1', name: 'Sales' }));
+    kit.stageFindMany.mockResolvedValue([{ id: 's-new', pipeline: 'Sales' }]);
+    kit.findMany.mockResolvedValue([row({ id: 'p1', name: 'Sales' })]);
+
+    await kit.service.update('p1', { settings: settings() });
+    expect(events(kit.auditCreateMany)).toEqual([
+      expect.objectContaining({
+        action: 'UPDATED',
+        before: { defaultStageId: null },
+        after: { defaultStageId: 's-new' },
+      }),
+    ]);
+
+    const same = makeService();
+    same.findUnique.mockResolvedValue(
+      row({ id: 'p1', name: 'Sales', defaultStageId: 's-new' }),
+    );
+    same.stageFindMany.mockResolvedValue([{ id: 's-new', pipeline: 'Sales' }]);
+    same.findMany.mockResolvedValue([row({ id: 'p1', name: 'Sales' })]);
+    await same.service.update('p1', { settings: settings() });
+    expect(same.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records the settings a rename carries in the rename’s own history write', async () => {
+    const { service, findUnique, findMany, stageFindMany, auditCreateMany } =
+      makeService();
+    findUnique.mockResolvedValue(row({ id: 'p1', name: 'LOGISTICS' }));
+    stageFindMany.mockResolvedValue([{ id: 's-new', pipeline: 'LOGISTICS' }]);
+    findMany.mockResolvedValue([row({ id: 'p1', name: 'Logistics UAE' })]);
+
+    await service.update('p1', { name: 'Logistics UAE', settings: settings() });
+
+    expect(auditCreateMany).toHaveBeenCalledTimes(1);
+    expect(events(auditCreateMany).map((event) => event.action)).toEqual([
+      'RENAMED',
+      'UPDATED',
+    ]);
+  });
+
+  it('records a new default once, and nothing when it already was the default', async () => {
+    const kit = makeService();
+    kit.findUnique.mockResolvedValue(
+      row({ id: 'p2', name: 'QC', isDefault: false }),
+    );
+    kit.findMany.mockResolvedValue([]);
+    await kit.service.setDefault('p2');
+    expect(events(kit.auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityId: 'p2',
+        action: 'UPDATED',
+        source: 'pipelines.default',
+        before: { isDefault: false },
+        after: { isDefault: true },
+      }),
+    ]);
+
+    const again = makeService();
+    again.findUnique.mockResolvedValue(row({ id: 'p1', isDefault: true }));
+    again.findMany.mockResolvedValue([]);
+    await again.service.setDefault('p1');
+    expect(again.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records a deletion with the pipeline as it stood', async () => {
+    const { service, findUnique, auditCreateMany } = makeService();
+    findUnique.mockResolvedValue(
+      row({ id: 'p2', name: 'QC', isDefault: false }),
+    );
+
+    await service.remove('p2');
+
+    expect(events(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityId: 'p2',
+        action: 'DELETED',
+        source: 'pipelines.delete',
+        before: expect.objectContaining({
+          name: 'QC',
+          accessMode: 'ALL_USERS',
+          grants: [],
+        }) as unknown,
+      }),
+    ]);
   });
 });
 

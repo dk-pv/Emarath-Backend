@@ -210,9 +210,14 @@ function makeService(options: Options = {}) {
     .mockResolvedValue([{ id: ORDER, leadId: LEAD }]);
   const createManyAndReturn = jest.fn().mockResolvedValue([]);
   const queryRaw = jest.fn().mockResolvedValue([]);
+  // The Accounts record a delivery opens (ADR-0096), as the database would return it.
+  const accountsCreate = jest
+    .fn()
+    .mockResolvedValue({ id: 'record-1', status: 'INITIAL' });
 
   const tx = {
     $queryRaw: queryRaw,
+    accountsRecord: { create: accountsCreate },
     logisticsOrder: {
       findUnique: orderFindUnique,
       findFirst: orderFindFirst,
@@ -280,6 +285,7 @@ function makeService(options: Options = {}) {
     auditCreateMany,
     createManyAndReturn,
     queryRaw,
+    accountsCreate,
     listFindMany,
     listCount,
     findFirst,
@@ -740,8 +746,8 @@ describe('LogisticsOrdersService — dispatch and the AWB', () => {
     expect(order.awbNumber).toBe('AWB-1');
   });
 
-  it('delivers a dispatched order', async () => {
-    const { service, order, auditCreateMany } = makeService({
+  it('delivers a dispatched order, and opens its Accounts record in the same transaction (§4 step 11)', async () => {
+    const { service, order, auditCreateMany, accountsCreate } = makeService({
       deliveryDate: DATED,
       status: LogisticsStatus.DISPATCHED,
       role: UserRole.LOGISTICS_EXECUTIVE,
@@ -751,7 +757,101 @@ describe('LogisticsOrdersService — dispatch and the AWB', () => {
 
     expect(result.status).toBe(LogisticsStatus.DELIVERED);
     expect(order.deliveredAt).toBeInstanceOf(Date);
-    expect(events(auditCreateMany)).toMatchObject([{ action: 'DELIVERED' }]);
+    expect(accountsCreate).toHaveBeenCalledTimes(1);
+    expect(accountsCreate).toHaveBeenCalledWith({
+      data: { orderId: ORDER },
+      select: { id: true, status: true },
+    });
+    expect(events(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityType: 'LOGISTICS_ORDER',
+        action: 'DELIVERED',
+      }),
+      {
+        entityType: 'ACCOUNTS_RECORD',
+        entityId: 'record-1',
+        leadId: LEAD,
+        action: 'ACCOUNTS_CREATED',
+        actorType: 'USER',
+        actorId: USER,
+        source: 'logistics.deliver',
+        before: undefined,
+        after: { status: 'INITIAL' },
+        metadata: { orderId: ORDER },
+      },
+    ]);
+  });
+
+  /*
+    The unique key on the record's order is the backstop. Its refusal must read as what it is —
+    never as the AWB clash every other unique refusal on a move used to be reported as.
+  */
+  it('reports a second Accounts record as an Accounts 409, not an AWB clash', async () => {
+    const { service, accountsCreate } = makeService({
+      deliveryDate: DATED,
+      status: LogisticsStatus.DISPATCHED,
+    });
+    accountsCreate.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+      }),
+    );
+
+    await expect(service.deliver(ORDER)).rejects.toThrow(
+      new ConflictException(
+        'This order already has an Accounts record, so the delivery was not recorded.',
+      ),
+    );
+  });
+
+  it('opens no Accounts record when the delivery is refused', async () => {
+    const { service, accountsCreate, auditCreateMany } = makeService({
+      status: LogisticsStatus.DISPATCHED,
+      racedTo: LogisticsStatus.RTO,
+    });
+
+    await expect(service.deliver(ORDER)).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(accountsCreate).not.toHaveBeenCalled();
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+});
+
+/*
+  Q7 and Q13: only a delivered order enters Accounts — every other move, a cancellation and an RTO
+  among them, opens no record.
+*/
+describe('LogisticsOrdersService — only DELIVERED opens an Accounts record', () => {
+  const MOVES: [
+    LogisticsStatus,
+    (s: LogisticsOrdersService) => Promise<unknown>,
+  ][] = [
+    [LogisticsStatus.INITIAL, (s) => s.qcVerify(ORDER, {})],
+    [LogisticsStatus.INITIAL, (s) => s.qcReject(ORDER, { remarks: 'x' })],
+    [LogisticsStatus.QC_REJECTED, (s) => s.resubmit(ORDER, {})],
+    [
+      LogisticsStatus.QC_VERIFIED,
+      (s) => s.dispatch(ORDER, { awbNumber: 'AWB-1' }),
+    ],
+    [LogisticsStatus.DISPATCHED, (s) => s.cancel(ORDER, reason('x'))],
+    [LogisticsStatus.DISPATCHED, (s) => s.rto(ORDER, reason('x'))],
+    [LogisticsStatus.RTO, (s) => s.cancel(ORDER, reason('x'))],
+  ];
+
+  it.each(MOVES)('from %s, %s', async (status, move) => {
+    const { service, accountsCreate, order } = makeService({
+      status,
+      deliveryDate: DATED,
+      leadStatus:
+        status === LogisticsStatus.QC_REJECTED ? 'QC NOT APPROVED' : 'WON',
+    });
+
+    await move(service);
+
+    expect(order.status).not.toBe(status);
+    expect(accountsCreate).not.toHaveBeenCalled();
   });
 });
 
@@ -971,18 +1071,23 @@ describe('LogisticsOrdersService — cancellation and RTO', () => {
   });
 
   /*
-    Q7: an RTO order never enters Accounts. There is no Accounts model yet, so what is pinned
-    is the rule that holds whatever comes later: the RTO touches the order and its own event,
-    and creates nothing else — no lead write, no other record.
+    Q7: an RTO order never enters Accounts. The RTO touches the order and its own event, and
+    creates nothing else — no lead write, no Accounts record (ADR-0096), no other record.
   */
   it('writes only the order and its own event on RTO — nothing enters Accounts', async () => {
-    const { service, leadUpdate, createManyAndReturn, auditCreateMany } =
-      makeService({ status: LogisticsStatus.DISPATCHED });
+    const {
+      service,
+      leadUpdate,
+      createManyAndReturn,
+      auditCreateMany,
+      accountsCreate,
+    } = makeService({ status: LogisticsStatus.DISPATCHED });
 
     await service.rto(ORDER, reason('Nobody at address'));
 
     expect(leadUpdate).not.toHaveBeenCalled();
     expect(createManyAndReturn).not.toHaveBeenCalled();
+    expect(accountsCreate).not.toHaveBeenCalled();
     expect(events(auditCreateMany)).toEqual([
       expect.objectContaining({ entityType: 'LOGISTICS_ORDER', action: 'RTO' }),
     ]);

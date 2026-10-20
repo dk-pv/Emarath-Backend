@@ -142,6 +142,23 @@ async function csv(
   return { header: header.split(','), lines, text };
 }
 
+describe('LeadsExportService — row count (AUD-01)', () => {
+  it('resolves to the number of leads written, which the export’s history records', async () => {
+    const { service } = setup([row('Aisha'), row('Omar'), row('Sara')]);
+    const res = {
+      status: jest.fn().mockReturnThis(),
+      setHeader: jest.fn().mockReturnThis(),
+      write: jest.fn().mockReturnValue(true),
+      end: jest.fn(),
+      destroy: jest.fn(),
+    };
+
+    await expect(
+      service.export(query({}), res as unknown as Response),
+    ).resolves.toBe(3);
+  });
+});
+
 describe('LeadsExportService — Manage Columns selections reach the file', () => {
   it('writes a selected custom column that used to be dropped, in the user’s order', async () => {
     const { service } = setup([

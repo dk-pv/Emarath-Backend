@@ -262,6 +262,13 @@ describe('ConvertedLeadsReportService.listDetailed', () => {
 });
 
 describe('ConvertedLeadsReportService.exportCsv', () => {
+  it('resolves to the number of rows written, which the export’s history records (AUD-01)', async () => {
+    const { service } = makeService([exportRow(), exportRow()]);
+    const { res } = makeResponse();
+
+    await expect(service.exportCsv(query(), res)).resolves.toBe(2);
+  });
+
   it('writes the six headers and the amount as a bare number', async () => {
     const { service } = makeService([exportRow()]);
     const { res, chunks } = makeResponse();

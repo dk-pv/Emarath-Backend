@@ -110,16 +110,31 @@ function makeService(actorId = ACTOR) {
   const storageDelete = jest.fn().mockResolvedValue(undefined);
   const signedUrl = jest.fn().mockResolvedValue('https://signed/avatar');
 
+  // History (AUD-01): the row lock, the conditional soft delete and the event table.
+  const queryRaw = jest.fn().mockResolvedValue([]);
+  const updateMany = jest.fn().mockResolvedValue({ count: 1 });
+  const auditCreateMany = jest.fn();
+
   const tx = {
-    user: { create, update, findUniqueOrThrow },
+    $queryRaw: queryRaw,
+    user: { create, update, updateMany, findUniqueOrThrow },
     userModulePermission: {
       deleteMany: permissionDeleteMany,
       createMany: permissionCreateMany,
     },
+    auditEvent: { createMany: auditCreateMany },
   };
 
   const prisma = {
-    user: { findMany, findFirst, count, create, update, findUniqueOrThrow },
+    user: {
+      findMany,
+      findFirst,
+      count,
+      create,
+      update,
+      updateMany,
+      findUniqueOrThrow,
+    },
     role: { findFirst: roleFindFirst },
     leadForm: { findFirst: leadFormFindFirst },
     pipeline: { findMany: pipelineFindMany },
@@ -127,7 +142,11 @@ function makeService(actorId = ACTOR) {
       deleteMany: permissionDeleteMany,
       createMany: permissionCreateMany,
     },
-    $transaction: jest.fn((fn: (t: typeof tx) => unknown) => fn(tx)),
+    auditEvent: { createMany: auditCreateMany },
+    // Callback transactions run against `tx`; array ones resolve their operations.
+    $transaction: jest.fn((arg: ((t: typeof tx) => unknown) | unknown[]) =>
+      typeof arg === 'function' ? arg(tx) : Promise.all(arg),
+    ),
   } as unknown as PrismaService;
   const refreshTokens = { revokeAllForUser } as unknown as RefreshTokenService;
   const currentUser = {
@@ -159,7 +178,17 @@ function makeService(actorId = ACTOR) {
     storagePut,
     storageDelete,
     signedUrl,
+    queryRaw,
+    updateMany,
+    auditCreateMany,
   };
+}
+
+/** The rows each history write received, flattened across calls. */
+function auditRows(createMany: jest.Mock): Record<string, unknown>[] {
+  return (createMany.mock.calls as [{ data: Record<string, unknown>[] }][])
+    .map(([arg]) => arg.data)
+    .flat();
 }
 
 function query(overrides: Partial<ListUsersQueryDto> = {}): ListUsersQueryDto {
@@ -500,24 +529,27 @@ describe('UsersService.setAvatar', () => {
 
 describe('UsersService.remove / setPassword', () => {
   it('refuses to let an admin delete their own account', async () => {
-    const { service, update } = makeService();
+    const { service, update, updateMany } = makeService();
 
     await expect(service.remove(ACTOR)).rejects.toBeInstanceOf(
       BadRequestException,
     );
     expect(update).not.toHaveBeenCalled();
+    expect(updateMany).not.toHaveBeenCalled();
   });
 
   it('soft-deletes and revokes sessions rather than hard-deleting', async () => {
     const mocks = makeService();
     mocks.findFirst.mockResolvedValue(liveRow());
-    mocks.update.mockResolvedValue(userRow());
+    mocks.findUniqueOrThrow.mockResolvedValue(detailRow());
 
     await mocks.service.remove(OTHER);
 
-    const args = (mocks.update.mock.calls as unknown[][])[0][0] as {
+    const args = (mocks.updateMany.mock.calls as unknown[][])[0][0] as {
+      where: { id: string; deletedAt: null };
       data: { deletedAt: Date };
     };
+    expect(args.where).toEqual({ id: OTHER, deletedAt: null });
     expect(args.data.deletedAt).toBeInstanceOf(Date);
     expect(mocks.revokeAllForUser).toHaveBeenCalledWith(OTHER);
   });
@@ -575,5 +607,197 @@ describe('UsersService.detail', () => {
     await expect(mocks.service.detail(OTHER)).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+});
+
+describe('UsersService — history (AUD-01)', () => {
+  it('records a new member as CREATED with their whole configuration, never the password', async () => {
+    const mocks = makeService();
+    mocks.findFirst.mockResolvedValue(null);
+    mocks.roleFindFirst.mockResolvedValue({ baseRole: UserRole.SALES_AGENT });
+    mocks.leadFormFindFirst.mockResolvedValue({ id: FORM_ID });
+    mocks.create.mockResolvedValue({ id: OTHER });
+    mocks.findUniqueOrThrow.mockResolvedValue(detailRow());
+
+    await mocks.service.create({ ...CREATE_DTO });
+
+    const [event] = auditRows(mocks.auditCreateMany);
+    expect(event).toMatchObject({
+      entityType: 'USER',
+      entityId: OTHER,
+      leadId: null,
+      action: 'CREATED',
+      actorType: 'USER',
+      actorId: ACTOR,
+      source: 'users.create',
+      after: expect.objectContaining({
+        email: 'agent1@emarath.com',
+        roleId: ROLE_ID,
+        pipelines: ['Lead Pipeline'],
+        permissions: [
+          { module: 'LEADS', canView: true, canAdd: true, canEdit: true },
+        ],
+      }) as unknown,
+    });
+    expect(JSON.stringify(auditRows(mocks.auditCreateMany))).not.toMatch(
+      /password|Str0ngPass/i,
+    );
+  });
+
+  it('splits an edit into ROLE_CHANGED, PERMISSIONS_CHANGED and UPDATED, each with only its changed fields', async () => {
+    const mocks = makeService();
+    mocks.findFirst.mockResolvedValue(liveRow());
+    mocks.roleFindFirst.mockResolvedValue({ baseRole: UserRole.SALES_MANAGER });
+    const NEW_ROLE = '55555555-5555-5555-5555-555555555555';
+    mocks.findUniqueOrThrow
+      .mockResolvedValueOnce(detailRow())
+      .mockResolvedValueOnce(
+        detailRow({
+          role: UserRole.SALES_MANAGER,
+          roleId: NEW_ROLE,
+          jobTitle: 'Team Lead',
+          pipelines: ['Complaints', 'Lead Pipeline'],
+        }),
+      )
+      .mockResolvedValue(detailRow());
+
+    await mocks.service.update(OTHER, {
+      roleId: NEW_ROLE,
+      jobTitle: 'Team Lead',
+      pipelines: ['Lead Pipeline', 'Complaints'],
+    });
+
+    expect(mocks.queryRaw).toHaveBeenCalledTimes(1);
+    const events = auditRows(mocks.auditCreateMany);
+    expect(events.map((event) => event.action)).toEqual([
+      'ROLE_CHANGED',
+      'PERMISSIONS_CHANGED',
+      'UPDATED',
+    ]);
+    expect(events[0]).toMatchObject({
+      source: 'users.update',
+      actorId: ACTOR,
+      before: { role: UserRole.SALES_AGENT, roleId: ROLE_ID },
+      after: { role: UserRole.SALES_MANAGER, roleId: NEW_ROLE },
+    });
+    expect(events[1]).toMatchObject({
+      before: { pipelines: ['Lead Pipeline'] },
+      after: { pipelines: ['Complaints', 'Lead Pipeline'] },
+    });
+    expect(events[2]).toMatchObject({
+      before: { jobTitle: 'BDE' },
+      after: { jobTitle: 'Team Lead' },
+    });
+  });
+
+  it('records a deactivation as DEACTIVATED', async () => {
+    const mocks = makeService();
+    mocks.findFirst.mockResolvedValue(liveRow());
+    mocks.findUniqueOrThrow
+      .mockResolvedValueOnce(detailRow())
+      .mockResolvedValueOnce(detailRow({ isActive: false }))
+      .mockResolvedValue(detailRow({ isActive: false }));
+
+    await mocks.service.update(OTHER, { isActive: false });
+
+    expect(auditRows(mocks.auditCreateMany)).toEqual([
+      expect.objectContaining({
+        action: 'DEACTIVATED',
+        before: { isActive: true },
+        after: { isActive: false },
+      }),
+    ]);
+  });
+
+  it('records nothing for an edit that changes nothing', async () => {
+    const mocks = makeService();
+    mocks.findFirst.mockResolvedValue(liveRow());
+    mocks.findUniqueOrThrow.mockResolvedValue(detailRow());
+
+    await mocks.service.update(OTHER, { jobTitle: 'BDE' });
+
+    expect(mocks.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records nothing when the edit fails inside its transaction', async () => {
+    const mocks = makeService();
+    mocks.findFirst.mockResolvedValue(liveRow());
+    mocks.findUniqueOrThrow.mockResolvedValue(detailRow());
+    mocks.update.mockRejectedValue(new Error('write failed'));
+
+    await expect(
+      mocks.service.update(OTHER, { jobTitle: 'X' }),
+    ).rejects.toThrow('write failed');
+    expect(mocks.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records a removal with the account as it stood; a removal that lost the race is a 404 and records nothing', async () => {
+    const mocks = makeService();
+    mocks.findFirst.mockResolvedValue(liveRow());
+    mocks.findUniqueOrThrow.mockResolvedValue(detailRow());
+
+    await mocks.service.remove(OTHER);
+    expect(auditRows(mocks.auditCreateMany)).toEqual([
+      expect.objectContaining({
+        action: 'DELETED',
+        source: 'users.delete',
+        before: expect.objectContaining({
+          email: 'agent1@emarath.com',
+        }) as unknown,
+      }),
+    ]);
+
+    const late = makeService();
+    late.findFirst.mockResolvedValue(liveRow());
+    late.findUniqueOrThrow.mockResolvedValue(detailRow());
+    late.updateMany.mockResolvedValue({ count: 0 });
+    await expect(late.service.remove(OTHER)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(late.auditCreateMany).not.toHaveBeenCalled();
+    expect(late.revokeAllForUser).not.toHaveBeenCalled();
+  });
+
+  it('records a password change as the bare fact, without the hash', async () => {
+    const mocks = makeService();
+    mocks.findFirst.mockResolvedValue(liveRow());
+
+    await mocks.service.setPassword(OTHER, 'BrandNewPass1');
+
+    const events = auditRows(mocks.auditCreateMany);
+    expect(events).toEqual([
+      expect.objectContaining({
+        entityId: OTHER,
+        action: 'PASSWORD_CHANGED',
+        actorId: ACTOR,
+        source: 'users.password',
+      }),
+    ]);
+    expect(events[0].before).toBeUndefined();
+    expect(events[0].after).toBeUndefined();
+    expect(JSON.stringify(events)).not.toMatch(/\$2[aby]\$|BrandNewPass1/);
+  });
+
+  it('records a new profile picture as the stored key it replaced', async () => {
+    const mocks = makeService();
+    mocks.findFirst.mockResolvedValue(
+      liveRow({ avatarKey: 'avatars/old.png' }),
+    );
+
+    await mocks.service.setAvatar(OTHER, {
+      originalname: 'me.png',
+      mimetype: 'image/png',
+      size: 1024,
+      buffer: Buffer.from('x'),
+    } as Express.Multer.File);
+
+    expect(auditRows(mocks.auditCreateMany)).toEqual([
+      expect.objectContaining({
+        action: 'UPDATED',
+        source: 'users.avatar',
+        before: { avatarKey: 'avatars/old.png' },
+        after: { avatarKey: 'avatars/x.png' },
+      }),
+    ]);
   });
 });

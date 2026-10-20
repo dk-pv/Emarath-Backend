@@ -184,7 +184,7 @@ export class TodayLeadsReportService {
    * in batches and written straight to the response, so memory stays flat regardless of
    * match count.
    */
-  async exportCsv(query: TodayLeadsQueryDto, res: Response): Promise<void> {
+  async exportCsv(query: TodayLeadsQueryDto, res: Response): Promise<number> {
     const user = await this.currentUser.resolve();
     const where = buildTodayLeadsWhere(user, query);
 
@@ -202,6 +202,7 @@ export class TodayLeadsReportService {
       EXPORT_HEADERS.map((header) => csvCell(header)).join(',') + '\r\n',
     );
 
+    let exported = 0;
     let skip = 0;
     while (skip < MAX_EXPORT_ROWS) {
       const leads = await this.prisma.lead.findMany({
@@ -212,6 +213,7 @@ export class TodayLeadsReportService {
         take: EXPORT_BATCH_SIZE,
       });
       if (leads.length === 0) break;
+      exported += leads.length;
 
       const ids = leads.map((lead) => lead.id);
       const [lastById, nextById] = await Promise.all([
@@ -249,6 +251,7 @@ export class TodayLeadsReportService {
     }
 
     res.end();
+    return exported;
   }
 
   /**

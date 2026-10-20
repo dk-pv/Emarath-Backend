@@ -9,6 +9,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AppConfig } from '../config/configuration';
 import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { recordAuditEvents, userActor } from '../audit/audit-events';
+import { openAccountsRecord } from '../accounts/accounts-record';
 import { applyLeadChanges } from '../leads/lead-audit';
 import { escapeLike } from '../leads/lead-search';
 import { assertMayChangeLead } from '../pipelines/pipeline-access';
@@ -81,9 +82,10 @@ const EDIT_REFUSAL: Readonly<Record<OrderEdit, string>> = {
  * Free text over what the queue shows — the order number, the customer's name and phone, and
  * the AWB — matched as the other lists match: case-insensitive, with `%`/`_` literal. A term
  * that is a number also matches the order number exactly, with or without the `#` it is shown
- * with. It narrows the caller's scope and can never widen it: it is one more AND term.
+ * with. It narrows the caller's scope and can never widen it: it is one more AND term. Accounts
+ * searches its records' orders with it too.
  */
-function orderSearchWhere(
+export function orderSearchWhere(
   term: string | undefined,
 ): Prisma.LogisticsOrderWhereInput {
   const trimmed = term?.trim();
@@ -562,16 +564,21 @@ export class LogisticsOrdersService {
       );
     }
     const courier = dto.courier?.trim() || null;
-    return this.run(
-      id,
-      'DISPATCH',
-      (now) => ({ awbNumber, courier, dispatchedAt: now }),
-      { awbNumber, courier },
-      (tx) => assertAwbFree(tx, awbNumber, id),
+    return withAwbClash(() =>
+      this.run(
+        id,
+        'DISPATCH',
+        (now) => ({ awbNumber, courier, dispatchedAt: now }),
+        { awbNumber, courier },
+        (tx) => assertAwbFree(tx, awbNumber, id),
+      ),
     );
   }
 
-  /** DISPATCHED → DELIVERED. Terminal: Accounts attaches here in a later phase. */
+  /**
+   * DISPATCHED → DELIVERED. Terminal. The order enters Accounts in the same transaction (`move`,
+   * specification §4 step 11).
+   */
   async deliver(id: string): Promise<LogisticsOrderResponse> {
     return this.run(id, 'DELIVER', (now) => ({ deliveredAt: now }));
   }
@@ -812,15 +819,13 @@ export class LogisticsOrdersService {
     check?: (tx: Prisma.TransactionClient) => Promise<void>,
   ): Promise<LogisticsOrderResponse> {
     const user = await this.currentUser.resolve();
-    return withAwbClash(() =>
-      this.prisma.$transaction(async (tx) => {
-        const order = await this.loadState(tx, id, user);
-        assertDatedFor(action, order);
-        await check?.(tx);
-        await this.move(tx, order, action, fields, user, details);
-        return this.loadFull(tx, id, user);
-      }),
-    );
+    return this.prisma.$transaction(async (tx) => {
+      const order = await this.loadState(tx, id, user);
+      assertDatedFor(action, order);
+      await check?.(tx);
+      await this.move(tx, order, action, fields, user, details);
+      return this.loadFull(tx, id, user);
+    });
   }
 
   /** A transition that also writes the lead's status back, atomically. */
@@ -909,6 +914,17 @@ export class LogisticsOrdersService {
         ...(details === undefined ? {} : { metadata: details }),
       },
     ]);
+
+    // A delivered order enters Accounts (specification §4 step 11), here, so every path that
+    // reaches DELIVERED opens its record in the same transaction as the move itself.
+    if (transition.to === LogisticsStatus.DELIVERED) {
+      await openAccountsRecord(
+        tx,
+        order,
+        userActor(user),
+        `logistics.${action.toLowerCase()}`,
+      );
+    }
   }
 
   /**

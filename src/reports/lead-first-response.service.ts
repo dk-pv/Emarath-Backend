@@ -234,7 +234,7 @@ export class LeadFirstResponseService {
   async exportCsv(
     query: LeadFirstResponseQueryDto,
     res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     const user = await this.currentUser.resolve();
     const changedIds = await this.changedLeadIds(query.activityType);
     const where = buildLeadFirstResponseWhere(user, {
@@ -252,7 +252,8 @@ export class LeadFirstResponseService {
       EXPORT_HEADERS.map((header) => csvCell(header)).join(',') + '\r\n',
     );
 
-    for (const row of await this.allRows(where)) {
+    const rows = await this.allRows(where);
+    for (const row of rows) {
       res.write(
         [
           csvCell(row.name),
@@ -271,6 +272,7 @@ export class LeadFirstResponseService {
       );
     }
     res.end();
+    return rows.length;
   }
 
   /**

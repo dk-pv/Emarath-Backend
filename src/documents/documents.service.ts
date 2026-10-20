@@ -9,6 +9,14 @@ import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { documentScopeWhere, documentDeletableWhere } from './document-scope';
+import {
+  AuditActor,
+  AuditEventInput,
+  AuditState,
+  recordAuditEvents,
+  stateChangeEvents,
+  userActor,
+} from '../audit/audit-events';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import {
@@ -32,6 +40,31 @@ import {
 
 const DOCUMENT_OUT_OF_SCOPE =
   'That document does not exist or is not in your scope.';
+
+type DocumentRow = Prisma.DocumentGetPayload<{
+  select: typeof DOCUMENT_SELECT;
+}>;
+
+/** A document as its history records it (AUD-01): never the stored bytes or their key. */
+function documentState(row: DocumentRow): AuditState {
+  return {
+    title: row.title,
+    fileName: row.fileName,
+    category: row.category,
+    sizeBytes: row.sizeBytes,
+    contentType: row.contentType,
+    uploaderId: row.uploader.id,
+    accessUserIds: row.access.map((entry) => entry.user.id).sort(),
+  };
+}
+
+function documentBase(
+  id: string,
+  actor: AuditActor,
+  source: string,
+): Omit<AuditEventInput, 'action'> {
+  return { entityType: 'DOCUMENT', entityId: id, leadId: null, actor, source };
+}
 
 /**
  * Maps a validated sort column to a Prisma `orderBy`. `uploadedBy` orders by the
@@ -183,24 +216,34 @@ export class DocumentsService {
     });
 
     const userIds = [...new Set(dto.userIds ?? [])];
-    let row: Prisma.DocumentGetPayload<{ select: typeof DOCUMENT_SELECT }>;
+    let row: DocumentRow;
     try {
-      row = await this.prisma.document.create({
-        data: {
-          title: dto.title,
-          fileName: file.originalname,
-          storageKey: stored.key,
-          sizeBytes: stored.sizeBytes,
-          contentType: stored.contentType,
-          category: dto.category ?? null,
-          uploader: { connect: { id: user.id } },
-          access: {
-            create: userIds.map((userId) => ({
-              user: { connect: { id: userId } },
-            })),
+      row = await this.prisma.$transaction(async (tx) => {
+        const created = await tx.document.create({
+          data: {
+            title: dto.title,
+            fileName: file.originalname,
+            storageKey: stored.key,
+            sizeBytes: stored.sizeBytes,
+            contentType: stored.contentType,
+            category: dto.category ?? null,
+            uploader: { connect: { id: user.id } },
+            access: {
+              create: userIds.map((userId) => ({
+                user: { connect: { id: userId } },
+              })),
+            },
           },
-        },
-        select: DOCUMENT_SELECT,
+          select: DOCUMENT_SELECT,
+        });
+        await recordAuditEvents(tx, [
+          {
+            ...documentBase(created.id, userActor(user), 'documents.upload'),
+            action: 'CREATED',
+            after: documentState(created),
+          },
+        ]);
+        return created;
       });
     } catch (error) {
       // The bytes are already stored; a failed metadata write would orphan them.
@@ -280,10 +323,26 @@ export class DocumentsService {
     }
 
     try {
-      const row = await this.prisma.document.update({
-        where: { id },
-        data,
-        select: DOCUMENT_SELECT,
+      const row = await this.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM documents WHERE id = ${id}::uuid FOR UPDATE`;
+        const before = await tx.document.findUniqueOrThrow({
+          where: { id },
+          select: DOCUMENT_SELECT,
+        });
+        const updated = await tx.document.update({
+          where: { id },
+          data,
+          select: DOCUMENT_SELECT,
+        });
+        // Who may see the document is its access grant, so a change to it is a permission change.
+        const events = stateChangeEvents(
+          documentBase(id, userActor(user), 'documents.update'),
+          documentState(before),
+          documentState(updated),
+          [['PERMISSIONS_CHANGED', ['accessUserIds']]],
+        );
+        if (events.length > 0) await recordAuditEvents(tx, events);
+        return updated;
       });
       return this.signedResponse(row);
     } catch (error) {
@@ -323,7 +382,7 @@ export class DocumentsService {
     this.assertCanEdit(user, existing.uploaderId);
 
     await this.storage.delete(existing.storageKey);
-    await this.prisma.document.delete({ where: { id } });
+    await this.deleteRecorded(user, [id], 'documents.delete');
     return { id };
   }
 
@@ -351,12 +410,45 @@ export class DocumentsService {
       actionable.map((row) => this.storage.delete(row.storageKey)),
     );
     if (actionable.length > 0) {
-      await this.prisma.document.deleteMany({
-        where: { id: { in: actionable.map((row) => row.id) } },
-      });
+      await this.deleteRecorded(
+        user,
+        actionable.map((row) => row.id),
+        'documents.bulk-delete',
+      );
     }
 
     return documentBulkResponse(ids, new Set(actionable.map((row) => row.id)));
+  }
+
+  /**
+   * Deletes the rows and records each as it stood (AUD-01), in one transaction. The rows are
+   * locked and re-read first, so a document a concurrent delete already removed is neither
+   * deleted twice nor recorded twice.
+   */
+  private async deleteRecorded(
+    user: CurrentUser,
+    ids: string[],
+    source: string,
+  ): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM documents WHERE id = ANY(${ids}::uuid[]) ORDER BY id FOR UPDATE`;
+      const rows = await tx.document.findMany({
+        where: { id: { in: ids } },
+        select: DOCUMENT_SELECT,
+      });
+      if (rows.length === 0) return;
+      await tx.document.deleteMany({
+        where: { id: { in: rows.map((row) => row.id) } },
+      });
+      await recordAuditEvents(
+        tx,
+        rows.map((row) => ({
+          ...documentBase(row.id, userActor(user), source),
+          action: 'DELETED' as const,
+          before: documentState(row),
+        })),
+      );
+    });
   }
 
   /** Only the uploader (owner) or a SUPERADMIN may edit; a view grant is not enough. */

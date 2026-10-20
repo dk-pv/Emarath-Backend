@@ -157,7 +157,7 @@ export class NoActivityReportService {
    * always reflects the active period/agent/source filters. Rows are pulled in batches and
    * written straight to the response, so memory stays flat regardless of match count.
    */
-  async exportCsv(query: NoActivityQueryDto, res: Response): Promise<void> {
+  async exportCsv(query: NoActivityQueryDto, res: Response): Promise<number> {
     const user = await this.currentUser.resolve();
     const where = buildNoActivityWhere(user, query);
 
@@ -175,6 +175,7 @@ export class NoActivityReportService {
       EXPORT_HEADERS.map((header) => csvCell(header)).join(',') + '\r\n',
     );
 
+    let exported = 0;
     let skip = 0;
     while (skip < MAX_EXPORT_ROWS) {
       const leads = await this.prisma.lead.findMany({
@@ -185,6 +186,7 @@ export class NoActivityReportService {
         take: EXPORT_BATCH_SIZE,
       });
       if (leads.length === 0) break;
+      exported += leads.length;
 
       const lastById = await this.lastActivityByLead(
         leads.map((lead) => lead.id),
@@ -216,6 +218,7 @@ export class NoActivityReportService {
     }
 
     res.end();
+    return exported;
   }
 
   /**

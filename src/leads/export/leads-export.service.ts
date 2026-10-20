@@ -44,7 +44,8 @@ export class LeadsExportService {
     private readonly customFields: LeadCustomFieldsService,
   ) {}
 
-  async export(query: ExportLeadsQueryDto, res: Response): Promise<void> {
+  /** Streams the file and resolves to the number of leads written (the export's audit, AUD-01). */
+  async export(query: ExportLeadsQueryDto, res: Response): Promise<number> {
     const user = await this.currentUser.resolve();
     const where = await withSearchScope(
       user,
@@ -69,9 +70,16 @@ export class LeadsExportService {
     // fails up front is an ordinary error response — never a 200 file with no rows.
     const pages = this.batches(where, query.sort, query.direction, customKeys);
     const first = await pages.next();
+    let exported = 0;
     async function* rows(): AsyncGenerator<LeadExportRow[]> {
-      if (!first.done) yield first.value;
-      yield* pages;
+      if (!first.done) {
+        exported += first.value.length;
+        yield first.value;
+      }
+      for await (const page of pages) {
+        exported += page.length;
+        yield page;
+      }
     }
 
     try {
@@ -86,6 +94,7 @@ export class LeadsExportService {
       res.destroy(error instanceof Error ? error : undefined);
       throw error;
     }
+    return exported;
   }
 
   /** Yields matching rows in id-stable pages until the set is exhausted or capped. */

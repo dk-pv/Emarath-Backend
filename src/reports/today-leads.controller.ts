@@ -6,6 +6,7 @@ import {
   TodayLeadsListResponse,
   TodayLeadsSummaryResponse,
 } from './dto/today-leads-response.dto';
+import { AuditedExport } from '../audit/audited-export';
 
 /**
  * The Today Leads report's HTTP surface (RPT-02.2). Thin by design: the DTO validates the
@@ -32,10 +33,11 @@ export class TodayLeadsController {
 
   /** GET /api/reports/leads/today/export — the same scoped set as a CSV download. */
   @Get('export')
+  @AuditedExport('reports.today-leads.export')
   export(
     @Query() query: TodayLeadsQueryDto,
     @Res() res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     return this.todayLeads.exportCsv(query, res);
   }
 }

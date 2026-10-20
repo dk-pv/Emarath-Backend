@@ -7,6 +7,7 @@ import {
   LeadsBySourceListResponse,
   LeadsBySourceSummaryResponse,
 } from './dto/leads-by-source-response.dto';
+import { AuditedExport } from '../audit/audited-export';
 
 /**
  * The Leads By Source report's HTTP surface (RPT-02.4). Thin by design: the DTO validates the
@@ -41,10 +42,11 @@ export class LeadsBySourceController {
 
   /** GET /api/reports/leads/by-source/export — the same scoped set as a CSV download. */
   @Get('export')
+  @AuditedExport('reports.leads-by-source.export')
   export(
     @Query() query: LeadsBySourceQueryDto,
     @Res() res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     return this.leadsBySource.exportCsv(query, res);
   }
 }

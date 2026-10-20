@@ -366,7 +366,7 @@ export class LeadAgingReportService {
   }
 
   /** Streams the scoped leads to a CSV download; the same `where` the tables compose. */
-  async exportCsv(query: LeadAgingQueryDto, res: Response): Promise<void> {
+  async exportCsv(query: LeadAgingQueryDto, res: Response): Promise<number> {
     this.assertThresholds(query);
     const user = await this.currentUser.resolve();
     const where = buildLeadAgingWhere(user, query);
@@ -383,6 +383,7 @@ export class LeadAgingReportService {
       EXPORT_HEADERS.map((header) => csvCell(header)).join(',') + '\r\n',
     );
 
+    let exported = 0;
     let skip = 0;
     while (skip < MAX_ROWS) {
       const leads = await this.prisma.lead.findMany({
@@ -393,6 +394,7 @@ export class LeadAgingReportService {
         take: EXPORT_BATCH_SIZE,
       });
       if (leads.length === 0) break;
+      exported += leads.length;
 
       const lastEngagement = await this.lastEngagementByLead({
         id: { in: leads.map((lead) => lead.id) },
@@ -430,6 +432,7 @@ export class LeadAgingReportService {
       skip += EXPORT_BATCH_SIZE;
     }
     res.end();
+    return exported;
   }
 
   private toRow(

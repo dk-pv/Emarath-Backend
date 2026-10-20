@@ -2,6 +2,7 @@ import { ConfigService } from '@nestjs/config';
 import {
   ConflictException,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
@@ -106,6 +107,8 @@ function makeService(
       findUnique: txLeadFindUnique,
     },
     auditEvent: { createMany: auditCreateMany },
+    // A note and its history are one write (AUD-01).
+    leadNote: { create: leadNoteCreate },
     // The conversion hook (ADR-0085): `createManyAndReturn` echoes what it was asked to
     // insert, so a lead that becomes WON gets an order id on its CONVERTED event.
     logisticsOrder: {
@@ -131,15 +134,16 @@ function makeService(
   const userFindMany = jest.fn((args: { where: { id: { in: string[] } } }) =>
     Promise.resolve(args.where.id.in.map((id) => ({ id }))),
   );
-  // Writes exist only on the transaction: one that escaped it would throw.
+  // Writes exist only on the transaction: one that escaped it would throw. The one exception
+  // is a sent email's history, written after the provider accepted it (AUD-01): there is no
+  // database write for it to share a transaction with.
+  const emailAuditCreateMany = jest.fn();
   const prisma = {
     lead: {
       findFirst: leadFindFirst,
       findUnique: leadFindUnique,
     },
-    leadNote: {
-      create: leadNoteCreate,
-    },
+    auditEvent: { createMany: emailAuditCreateMany },
     pipeline: { findUnique: pipelineFindUnique },
     stage: { findFirst: stageFindFirst, findUnique: stageFindUnique },
     user: { findMany: userFindMany },
@@ -200,6 +204,7 @@ function makeService(
     userFindMany,
     auditFindMany,
     auditCreateMany,
+    emailAuditCreateMany,
     orderFindMany,
   };
 }
@@ -1071,6 +1076,63 @@ describe('LeadRowActionsService.sendEmail', () => {
       InternalServerErrorException,
     );
   });
+
+  it('records the send on the lead’s journey — subject and counts, never addresses or body (AUD-01)', async () => {
+    const { service, leadFindFirst, sendMail, emailAuditCreateMany } =
+      makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+
+    await service.sendEmail(LEAD_ID, payload);
+
+    expect(emailAuditCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          entityType: 'LEAD',
+          entityId: LEAD_ID,
+          leadId: LEAD_ID,
+          action: 'EMAIL_SENT',
+          actorType: 'USER',
+          actorId: 'u1',
+          source: 'leads.email',
+          metadata: { subject: 'Hi', to: 1, cc: 1, bcc: 0 },
+        }),
+      ],
+    });
+    // Recorded after the provider accepted the message, never before.
+    expect(sendMail.mock.invocationCallOrder[0]).toBeLessThan(
+      emailAuditCreateMany.mock.invocationCallOrder[0],
+    );
+    const stored = JSON.stringify(emailAuditCreateMany.mock.calls);
+    expect(stored).not.toContain('someone@example.com');
+    expect(stored).not.toContain('Body');
+  });
+
+  it('records nothing when the provider refuses the send (AUD-01)', async () => {
+    const { service, leadFindFirst, sendMail, emailAuditCreateMany } =
+      makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    sendMail.mockRejectedValue(new Error('provider down'));
+
+    await expect(service.sendEmail(LEAD_ID, payload)).rejects.toBeInstanceOf(
+      InternalServerErrorException,
+    );
+    expect(emailAuditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('still reports a sent email as sent when only its history write fails, so a retry cannot send it twice (AUD-01)', async () => {
+    const { service, leadFindFirst, emailAuditCreateMany } = makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    emailAuditCreateMany.mockRejectedValue(new Error('db down'));
+    const logged = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+
+    await expect(service.sendEmail(LEAD_ID, payload)).resolves.toEqual({
+      sent: true,
+    });
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('EMAIL_SENT'));
+    logged.mockRestore();
+  });
 });
 
 describe('LeadRowActionsService.addNote', () => {
@@ -1093,6 +1155,39 @@ describe('LeadRowActionsService.addNote', () => {
     expect(args.data.leadId).toBe(LEAD_ID);
     expect(args.data.authorId).toBe('u1');
     expect(args.data.body).toBe('Called, will follow up');
+  });
+
+  it('records the note on the lead’s journey in the note’s own transaction (AUD-01)', async () => {
+    const { service, leadFindFirst, leadNoteCreate, auditCreateMany } =
+      makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    leadNoteCreate.mockResolvedValue({ id: NOTE_ID });
+
+    await service.addNote(LEAD_ID, { body: 'Called, will follow up' });
+
+    expect(recorded(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityType: 'LEAD_NOTE',
+        entityId: NOTE_ID,
+        leadId: LEAD_ID,
+        action: 'CREATED',
+        actorId: 'u1',
+        source: 'leads.note',
+        after: { body: 'Called, will follow up' },
+      }),
+    ]);
+  });
+
+  it('records nothing when the note is not written (AUD-01)', async () => {
+    const { service, leadFindFirst, leadNoteCreate, auditCreateMany } =
+      makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+    leadNoteCreate.mockRejectedValue(new Error('write failed'));
+
+    await expect(service.addNote(LEAD_ID, { body: 'x' })).rejects.toThrow(
+      'write failed',
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 
   it('404s (and never writes) for an out-of-scope lead', async () => {

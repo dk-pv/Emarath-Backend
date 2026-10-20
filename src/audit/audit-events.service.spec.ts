@@ -50,8 +50,12 @@ interface Options {
   /** Whether the caller's lead scope matches this lead, and whether its order does. */
   lead?: boolean;
   order?: boolean;
+  /** Whether the order has an Accounts record (ADR-0096); a scope that matches nothing never finds it. */
+  record?: boolean;
   rows?: Row[];
   total?: number;
+  /** Activities on the lead that the caller's activity scope does not reach (AUD-01). */
+  hiddenActivities?: string[];
 }
 
 function makeService(options: Options = {}) {
@@ -74,12 +78,25 @@ function makeService(options: Options = {}) {
   const orderFindFirst = jest
     .fn()
     .mockResolvedValue(options.order ? { id: ORDER } : null);
+  const recordFindFirst = jest.fn((args: { where: unknown }) =>
+    Promise.resolve(
+      options.record && !JSON.stringify(args.where).includes('"in":[]')
+        ? { id: 'record-1' }
+        : null,
+    ),
+  );
+
+  const activityFindMany = jest
+    .fn()
+    .mockResolvedValue((options.hiddenActivities ?? []).map((id) => ({ id })));
 
   const prisma = {
     $transaction: jest.fn((arg: Promise<unknown>[]) => Promise.all(arg)),
     auditEvent: { findMany, count, ...writes },
     lead: { findFirst: leadFindFirst },
     logisticsOrder: { findFirst: orderFindFirst },
+    accountsRecord: { findFirst: recordFindFirst },
+    activity: { findMany: activityFindMany },
   } as unknown as PrismaService;
 
   const user = {
@@ -99,8 +116,57 @@ function makeService(options: Options = {}) {
     writes,
     leadFindFirst,
     orderFindFirst,
+    recordFindFirst,
+    activityFindMany,
   };
 }
+
+describe('AuditEventsService.list — activity events (AUD-01)', () => {
+  const ACT_HIDDEN = '44444444-4444-4444-8444-444444444444';
+
+  it('leaves out the events of activities on the lead that the caller cannot see', async () => {
+    const { service, findMany, activityFindMany } = makeService({
+      role: UserRole.SALES_AGENT,
+      hiddenActivities: [ACT_HIDDEN],
+    });
+
+    await service.list(query());
+
+    const [{ where }] = findMany.mock.calls[0] as [{ where: unknown }];
+    expect(where).toEqual({
+      leadId: LEAD,
+      NOT: { entityType: 'ACTIVITY', entityId: { in: [ACT_HIDDEN] } },
+    });
+    // The hidden set is this lead's activities outside the caller's activity scope (for an
+    // agent: assigned to someone else).
+    const [{ where: activityWhere }] = activityFindMany.mock.calls[0] as [
+      { where: { leadId: string; NOT: unknown } },
+    ];
+    expect(activityWhere.leadId).toBe(LEAD);
+    expect(JSON.stringify(activityWhere.NOT)).toContain(USER);
+  });
+
+  it('reads the whole journey when every activity is in reach', async () => {
+    const { service, findMany } = makeService({ role: UserRole.SUPERADMIN });
+
+    await service.list(query());
+
+    const [{ where }] = findMany.mock.calls[0] as [{ where: unknown }];
+    expect(where).toEqual({ leadId: LEAD });
+  });
+
+  it('never asks about activities for a caller who reaches only the order', async () => {
+    const { service, activityFindMany } = makeService({
+      role: UserRole.LOGISTICS_MANAGER,
+      lead: false,
+      order: true,
+    });
+
+    await service.list(query());
+
+    expect(activityFindMany).not.toHaveBeenCalled();
+  });
+});
 
 const query = (overrides: Partial<ListAuditEventsDto> = {}) =>
   Object.assign(new ListAuditEventsDto(), { leadId: LEAD, ...overrides });
@@ -311,6 +377,67 @@ describe('AuditEventsService authorization', () => {
       role,
       lead: false,
       order: true,
+    });
+
+    await service.list(query());
+
+    expect(whereOf(findMany)).toEqual({
+      leadId: LEAD,
+      entityType: 'LOGISTICS_ORDER',
+    });
+  });
+
+  /*
+    ADR-0096: the Accounts record's events join a journey for whoever the Accounts scope reaches
+    — Accounts — and for no one else who comes in through the order. The Logistics roles and QC
+    keep reading the order's events only, even once the order has a record.
+  */
+  it.each([
+    UserRole.LOGISTICS_MANAGER,
+    UserRole.LOGISTICS_EXECUTIVE,
+    UserRole.QC,
+  ])('keeps the Accounts events from %s', async (role) => {
+    const { service, findMany } = makeService({
+      role,
+      lead: false,
+      order: true,
+      record: true,
+    });
+
+    await service.list(query());
+
+    expect(whereOf(findMany)).toEqual({
+      leadId: LEAD,
+      entityType: 'LOGISTICS_ORDER',
+    });
+  });
+
+  it('gives Accounts a delivered order’s events and its Accounts record’s, never the lead’s', async () => {
+    const { service, findMany, recordFindFirst } = makeService({
+      role: UserRole.ACCOUNTS_EXECUTIVE,
+      lead: false,
+      order: true,
+      record: true,
+    });
+
+    await service.list(query());
+
+    expect(firstArg<QueryArgs>(recordFindFirst)).toEqual({
+      where: { AND: [{}, { order: { leadId: LEAD } }] },
+      select: { id: true },
+    });
+    expect(whereOf(findMany)).toEqual({
+      leadId: LEAD,
+      entityType: { in: ['LOGISTICS_ORDER', 'ACCOUNTS_RECORD'] },
+    });
+  });
+
+  it('gives Accounts only the order’s events while the order has no record', async () => {
+    const { service, findMany } = makeService({
+      role: UserRole.ACCOUNTS_EXECUTIVE,
+      lead: false,
+      order: true,
+      record: false,
     });
 
     await service.list(query());

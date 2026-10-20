@@ -7,6 +7,7 @@ import {
   LeadsByStatusListResponse,
   LeadsByStatusSummaryResponse,
 } from './dto/leads-by-status-response.dto';
+import { AuditedExport } from '../audit/audited-export';
 
 /**
  * The Leads By Status report's HTTP surface (RPT-02.3). Thin by design: the DTO validates the
@@ -41,10 +42,11 @@ export class LeadsByStatusController {
 
   /** GET /api/reports/leads/by-status/export — the same scoped set as a CSV download. */
   @Get('export')
+  @AuditedExport('reports.leads-by-status.export')
   export(
     @Query() query: LeadsByStatusQueryDto,
     @Res() res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     return this.leadsByStatus.exportCsv(query, res);
   }
 }

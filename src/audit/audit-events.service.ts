@@ -4,6 +4,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { leadScopeWhere } from '../leads/lead-scope';
 import { logisticsOrderScopeWhere } from '../logistics/logistics-roles';
+import { accountsRecordScopeWhere } from '../accounts/accounts-roles';
+import { activityScopeWhere } from '../activities/activity-scope';
 import {
   AUDIT_EVENT_SELECT,
   AuditEventListResponse,
@@ -62,11 +64,12 @@ export class AuditEventsService {
    * What of this journey the caller may read, or a 404 if none of it.
    *
    * The lead scope comes first: a sales caller who can open the lead gets every event on it,
-   * including the Logistics ones, which is the Lead → Logistics → Accounts timeline the client
-   * asked for. Failing that, the order scope is tried, which is how the Logistics roles and QC
-   * reach a journey at all — they hold no sales access (ADR-0084), so they get their own record's
-   * events and never the lead's. A lead the caller can reach by neither route is a 404 in the
-   * same words the lead reads use, so this endpoint cannot be used to probe for leads.
+   * including the Logistics and Accounts ones, which is the Lead → Logistics → Accounts timeline
+   * the client asked for. Failing that, the order scope is tried, which is how the Logistics
+   * roles, QC and Accounts reach a journey at all — they hold no sales access (ADR-0084), so they
+   * get their own records' events and never the lead's: the order's, plus its Accounts record's
+   * when the Accounts scope reaches that record. A lead the caller can reach by neither route is a
+   * 404 in the same words the lead reads use, so this endpoint cannot be used to probe for leads.
    */
   private async journeyWhere(
     user: CurrentUser,
@@ -76,13 +79,46 @@ export class AuditEventsService {
       where: { AND: [leadScopeWhere(user), { id: leadId }] },
       select: { id: true },
     });
-    if (lead) return { leadId };
+    if (lead) {
+      // An agent or manager may share a lead without sharing all of its follow-ups, so an
+      // activity's events are left out unless the activity scope reaches it (AUD-01) — deleted
+      // ones included, whose history stays with whoever could see them.
+      const hidden = await this.prisma.activity.findMany({
+        where: {
+          leadId,
+          NOT: activityScopeWhere(user, { includeDeleted: true }),
+        },
+        select: { id: true },
+      });
+      return hidden.length === 0
+        ? { leadId }
+        : {
+            leadId,
+            NOT: {
+              entityType: 'ACTIVITY',
+              entityId: { in: hidden.map((row) => row.id) },
+            },
+          };
+    }
 
     const order = await this.prisma.logisticsOrder.findFirst({
       where: { AND: [logisticsOrderScopeWhere(user), { leadId }] },
       select: { id: true },
     });
-    if (order) return { leadId, entityType: 'LOGISTICS_ORDER' };
+    if (order) {
+      const record = await this.prisma.accountsRecord.findFirst({
+        where: {
+          AND: [accountsRecordScopeWhere(user), { order: { leadId } }],
+        },
+        select: { id: true },
+      });
+      return record
+        ? {
+            leadId,
+            entityType: { in: ['LOGISTICS_ORDER', 'ACCOUNTS_RECORD'] },
+          }
+        : { leadId, entityType: 'LOGISTICS_ORDER' };
+    }
 
     throw new NotFoundException(
       'That lead does not exist or is not in your scope.',

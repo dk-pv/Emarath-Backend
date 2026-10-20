@@ -6,6 +6,7 @@ import {
   NoActivityListResponse,
   NoActivitySummaryResponse,
 } from './dto/no-activity-response.dto';
+import { AuditedExport } from '../audit/audited-export';
 
 /**
  * The Reports module's HTTP surface (RPT-02.1). Thin by design: the DTO validates the
@@ -32,10 +33,11 @@ export class ReportsController {
 
   /** GET /api/reports/leads/no-activity/export — the same scoped set as a CSV download. */
   @Get('export')
+  @AuditedExport('reports.no-activity.export')
   export(
     @Query() query: NoActivityQueryDto,
     @Res() res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     return this.noActivity.exportCsv(query, res);
   }
 }

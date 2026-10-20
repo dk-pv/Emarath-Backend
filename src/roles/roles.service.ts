@@ -8,6 +8,14 @@ import { Prisma } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  AuditActor,
+  AuditEventInput,
+  AuditState,
+  recordAuditEvents,
+  stateChangeEvents,
+  userActor,
+} from '../audit/audit-events';
+import {
   CreateRoleDto,
   MAX_ROLE_DEPTH,
   MoveRoleDto,
@@ -28,6 +36,33 @@ const ROLE_SELECT = {
 } satisfies Prisma.RoleSelect;
 
 type RoleRow = Prisma.RoleGetPayload<{ select: typeof ROLE_SELECT }>;
+
+/** A role as its history records it (AUD-01): what it is called, grants and hangs under. */
+function roleState(role: {
+  name: string;
+  baseRole: string;
+  parentId: string | null;
+}): AuditState {
+  return { name: role.name, baseRole: role.baseRole, parentId: role.parentId };
+}
+
+function roleEvent(
+  id: string,
+  action: AuditEventInput['action'],
+  actor: AuditActor,
+  source: string,
+  states: { before?: AuditState; after?: AuditState },
+): AuditEventInput {
+  return {
+    entityType: 'ROLE',
+    entityId: id,
+    leadId: null,
+    action,
+    actor,
+    source,
+    ...states,
+  };
+}
 
 /**
  * The role hierarchy behind Settings → Users & Access → Roles & Permissions (ADR-0056).
@@ -74,15 +109,23 @@ export class RolesService {
     }
 
     const parentId = dto.parentId ?? null;
-    const created = await this.prisma.role.create({
-      data: {
-        name: dto.name.trim(),
-        baseRole: dto.baseRole,
-        parentId,
-        position: this.nextPosition(rows, parentId),
-        createdById: actor.id,
-      },
-      select: { id: true },
+    const created = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.role.create({
+        data: {
+          name: dto.name.trim(),
+          baseRole: dto.baseRole,
+          parentId,
+          position: this.nextPosition(rows, parentId),
+          createdById: actor.id,
+        },
+        select: { id: true, name: true, baseRole: true, parentId: true },
+      });
+      await recordAuditEvents(tx, [
+        roleEvent(row.id, 'CREATED', userActor(actor), 'roles.create', {
+          after: roleState(row),
+        }),
+      ]);
+      return row;
     });
 
     return this.requireNode(created.id);
@@ -114,10 +157,24 @@ export class RolesService {
       }
     }
 
-    await this.prisma.role.update({
-      where: { id },
-      data,
-      select: { id: true },
+    const actor = userActor(await this.currentUser.resolve());
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM roles WHERE id = ${id}::uuid FOR UPDATE`;
+      const select = { name: true, baseRole: true, parentId: true } as const;
+      const before = await tx.role.findUniqueOrThrow({ where: { id }, select });
+      const after = await tx.role.update({ where: { id }, data, select });
+      const events = stateChangeEvents(
+        {
+          entityType: 'ROLE',
+          entityId: id,
+          leadId: null,
+          actor,
+          source: 'roles.update',
+        },
+        roleState(before),
+        roleState(after),
+      );
+      if (events.length > 0) await recordAuditEvents(tx, events);
     });
     return this.requireNode(id);
   }
@@ -140,16 +197,31 @@ export class RolesService {
     const index = Math.min(Math.max(dto.position, 0), siblings.length);
     siblings.splice(index, 0, { ...role, parentId: nextParent });
 
+    // Only the dragged role is recorded: its siblings' renumbering is a consequence of it.
+    const actor = userActor(await this.currentUser.resolve());
+    const moved = stateChangeEvents(
+      {
+        entityType: 'ROLE',
+        entityId: id,
+        leadId: null,
+        actor,
+        source: 'roles.move',
+      },
+      { parentId: role.parentId, position: role.position },
+      { parentId: nextParent, position: index },
+    ).map((event) => ({ ...event, action: 'MOVED' as const }));
+
     // One transaction: a half-applied reorder would leave duplicate positions behind.
-    await this.prisma.$transaction(
-      siblings.map((sibling, order) =>
+    await this.prisma.$transaction([
+      ...siblings.map((sibling, order) =>
         this.prisma.role.update({
           where: { id: sibling.id },
           data: { parentId: nextParent, position: order },
           select: { id: true },
         }),
       ),
-    );
+      ...(moved.length > 0 ? [recordAuditEvents(this.prisma, moved)] : []),
+    ]);
 
     return this.list();
   }
@@ -181,10 +253,22 @@ export class RolesService {
       );
     }
 
-    await this.prisma.role.update({
-      where: { id },
-      data: { deletedAt: new Date() },
-      select: { id: true },
+    const actor = userActor(await this.currentUser.resolve());
+    await this.prisma.$transaction(async (tx) => {
+      const removed = await tx.role.updateMany({
+        where: { id, deletedAt: null },
+        data: { deletedAt: new Date() },
+      });
+      if (removed.count !== 1) throw new NotFoundException('Role not found.');
+      const before = await tx.role.findUniqueOrThrow({
+        where: { id },
+        select: { name: true, baseRole: true, parentId: true },
+      });
+      await recordAuditEvents(tx, [
+        roleEvent(id, 'DELETED', actor, 'roles.delete', {
+          before: roleState(before),
+        }),
+      ]);
     });
     return { id };
   }

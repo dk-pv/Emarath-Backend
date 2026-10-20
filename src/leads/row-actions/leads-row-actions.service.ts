@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -13,7 +14,11 @@ import { CurrentUser, CurrentUserService } from '../../auth/current-user';
 import { ASSIGNABLE_USER_WHERE, REASSIGN_ROLES } from '../../auth/role-groups';
 import { MailerService } from '../../auth/mailer.service';
 import { PrismaService } from '../../prisma/prisma.service';
-import { userActor } from '../../audit/audit-events';
+import {
+  recordAfterEffect,
+  recordAuditEvents,
+  userActor,
+} from '../../audit/audit-events';
 import { TagAccessService } from '../../tag-access/tag-access.service';
 import {
   auditLeadChanges,
@@ -106,6 +111,8 @@ const LEAD_COPY_SELECT = {
  */
 @Injectable()
 export class LeadRowActionsService {
+  private readonly logger = new Logger(LeadRowActionsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
@@ -325,6 +332,23 @@ export class LeadRowActionsService {
         'The email could not be sent. Please try again.',
       );
     }
+
+    // Recorded only once the provider has accepted it, so a failed send is never history.
+    // The subject and how many were addressed, never the addresses or the body (AUD-01).
+    await recordAfterEffect(this.prisma, this.logger, {
+      entityType: 'LEAD',
+      entityId: id,
+      leadId: id,
+      action: 'EMAIL_SENT',
+      actor: userActor(user),
+      source: 'leads.email',
+      metadata: {
+        subject: dto.subject ?? '',
+        to: dto.to.length,
+        cc: dto.cc?.length ?? 0,
+        bcc: dto.bcc?.length ?? 0,
+      },
+    });
     return { sent: true };
   }
 
@@ -349,9 +373,24 @@ export class LeadRowActionsService {
     if (!lead) throw new NotFoundException(OUT_OF_SCOPE_REASON);
     assertMayChangeLead(user, lead);
 
-    const note = await this.prisma.leadNote.create({
-      data: { leadId: id, authorId: user.id, body: dto.body },
-      select: { id: true },
+    // On the lead's journey (AUD-01): whoever reads the lead reads its notes already.
+    const note = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.leadNote.create({
+        data: { leadId: id, authorId: user.id, body: dto.body },
+        select: { id: true },
+      });
+      await recordAuditEvents(tx, [
+        {
+          entityType: 'LEAD_NOTE',
+          entityId: row.id,
+          leadId: id,
+          action: 'CREATED',
+          actor: userActor(user),
+          source: 'leads.note',
+          after: { body: dto.body },
+        },
+      ]);
+      return row;
     });
     return { id: note.id };
   }

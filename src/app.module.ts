@@ -6,6 +6,7 @@ import mailConfig from './config/mail.config';
 import storageConfig from './config/storage.config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { AccountsModule } from './accounts/accounts.module';
 import { ActivitiesModule } from './activities/activities.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
@@ -58,6 +59,7 @@ const nodeEnv = process.env.NODE_ENV ?? 'development';
     PrismaModule,
     RolesModule,
     StorageModule,
+    AccountsModule,
     ActivitiesModule,
     CategoriesModule,
     PipelinesModule,

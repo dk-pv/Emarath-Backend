@@ -429,7 +429,7 @@ export class LeadsByOwnershipReportService {
   async exportCsv(
     query: LeadsByOwnershipQueryDto,
     res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     const user = await this.currentUser.resolve();
     const where = buildLeadsByOwnershipWhere(user, query);
 
@@ -447,6 +447,7 @@ export class LeadsByOwnershipReportService {
       EXPORT_HEADERS.map((header) => csvCell(header)).join(',') + '\r\n',
     );
 
+    let exported = 0;
     let skip = 0;
     while (skip < MAX_EXPORT_ROWS) {
       const leads = await this.prisma.lead.findMany({
@@ -457,6 +458,7 @@ export class LeadsByOwnershipReportService {
         take: EXPORT_BATCH_SIZE,
       });
       if (leads.length === 0) break;
+      exported += leads.length;
 
       let chunk = '';
       for (const lead of leads) {
@@ -479,6 +481,7 @@ export class LeadsByOwnershipReportService {
     }
 
     res.end();
+    return exported;
   }
 
   /** The team values the filter offers (AC3): the distinct non-empty `User.team` labels. */

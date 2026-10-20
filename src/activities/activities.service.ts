@@ -11,6 +11,14 @@ import { leadScopeWhere } from '../leads/lead-scope';
 import { withPipelineAccess } from '../pipelines/pipeline-access';
 import { activityScopeWhere } from './activity-scope';
 import {
+  AuditActor,
+  AuditEventInput,
+  AuditState,
+  recordAuditEvents,
+  stateChangeEvents,
+  userActor,
+} from '../audit/audit-events';
+import {
   activityBucketWhere,
   DayBoundaries,
   overdueCutoff,
@@ -33,6 +41,40 @@ import {
   toActivityItem,
   toActivityListItem,
 } from './dto/activity-response.dto';
+
+type ActivityRow = Prisma.ActivityGetPayload<{
+  select: typeof ACTIVITY_SELECT;
+}>;
+
+/** An activity as its history records it (AUD-01); completion has its own COMPLETED event. */
+function activityState(row: ActivityRow): AuditState {
+  return {
+    type: row.type,
+    description: row.description,
+    dueAt: row.dueAt.toISOString(),
+    endAt: row.endAt?.toISOString() ?? null,
+    assigneeIds: row.assignees.map((a) => a.userId).sort(),
+  };
+}
+
+/**
+ * Activity events sit on their lead's journey (`leadId`), where the read side shows each one only
+ * to a caller whose activity scope reaches it (AuditEventsService) — never more than the
+ * Activities list itself would.
+ */
+function activityBase(
+  row: { id: string; leadId: string },
+  actor: AuditActor,
+  source: string,
+): Omit<AuditEventInput, 'action'> {
+  return {
+    entityType: 'ACTIVITY',
+    entityId: row.id,
+    leadId: row.leadId,
+    actor,
+    source,
+  };
+}
 
 const LEAD_OUT_OF_SCOPE = 'That lead does not exist or is not in your scope.';
 const ACTIVITY_OUT_OF_SCOPE =
@@ -178,16 +220,34 @@ export class ActivitiesService {
       where: { AND: [activityScopeWhere(user), { id }] },
       select: {
         id: true,
-        completedAt: true,
+        leadId: true,
         lead: { select: { name: true } },
       },
     });
     if (!activity) throw new NotFoundException(ACTIVITY_OUT_OF_SCOPE);
 
-    const updated = await this.prisma.activity.update({
-      where: { id },
-      data: { completedAt: activity.completedAt ?? new Date() },
-      select: ACTIVITY_SELECT,
+    // Completing is idempotent: only the request that actually sets the date records it, so a
+    // repeat — or a second request racing the first — keeps the original date and no second event.
+    const completedAt = new Date();
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const done = await tx.activity.updateMany({
+        where: { id, completedAt: null },
+        data: { completedAt },
+      });
+      if (done.count === 1) {
+        await recordAuditEvents(tx, [
+          {
+            ...activityBase(activity, userActor(user), 'activities.complete'),
+            action: 'COMPLETED',
+            before: { completedAt: null },
+            after: { completedAt: completedAt.toISOString() },
+          },
+        ]);
+      }
+      return tx.activity.findUniqueOrThrow({
+        where: { id },
+        select: ACTIVITY_SELECT,
+      });
     });
     return toActivityItem(updated, activity.lead.name);
   }
@@ -221,21 +281,35 @@ export class ActivitiesService {
     await this.assertAssigneesCanAccess(activity.leadId, assigneeIds);
 
     try {
-      const updated = await this.prisma.activity.update({
-        where: { id },
-        data: {
-          type: dto.type,
-          description: dto.description,
-          dueAt,
-          endAt,
-          assignees: {
-            deleteMany: {},
-            create: [...assigneeIds].map((userId) => ({
-              user: { connect: { id: userId } },
-            })),
+      const updated = await this.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM activities WHERE id = ${id}::uuid FOR UPDATE`;
+        const before = await tx.activity.findUniqueOrThrow({
+          where: { id },
+          select: ACTIVITY_SELECT,
+        });
+        const after = await tx.activity.update({
+          where: { id },
+          data: {
+            type: dto.type,
+            description: dto.description,
+            dueAt,
+            endAt,
+            assignees: {
+              deleteMany: {},
+              create: [...assigneeIds].map((userId) => ({
+                user: { connect: { id: userId } },
+              })),
+            },
           },
-        },
-        select: ACTIVITY_SELECT,
+          select: ACTIVITY_SELECT,
+        });
+        const events = stateChangeEvents(
+          activityBase(after, userActor(user), 'activities.update'),
+          activityState(before),
+          activityState(after),
+        );
+        if (events.length > 0) await recordAuditEvents(tx, events);
+        return after;
       });
       return toActivityItem(updated, activity.lead.name);
     } catch (error) {
@@ -268,10 +342,26 @@ export class ActivitiesService {
     });
     if (!activity) throw new NotFoundException(ACTIVITY_OUT_OF_SCOPE);
 
+    // Idempotent like before; conditional on still being live, so only the request that
+    // actually deletes it records the deletion.
     if (!activity.deletedAt) {
-      await this.prisma.activity.update({
-        where: { id },
-        data: { deletedAt: new Date() },
+      await this.prisma.$transaction(async (tx) => {
+        const removed = await tx.activity.updateMany({
+          where: { id, deletedAt: null },
+          data: { deletedAt: new Date() },
+        });
+        if (removed.count !== 1) return;
+        const row = await tx.activity.findUniqueOrThrow({
+          where: { id },
+          select: ACTIVITY_SELECT,
+        });
+        await recordAuditEvents(tx, [
+          {
+            ...activityBase(row, userActor(user), 'activities.delete'),
+            action: 'DELETED',
+            before: activityState(row),
+          },
+        ]);
       });
     }
     return { id };
@@ -307,20 +397,31 @@ export class ActivitiesService {
       new Set(source.assignees.map((a) => a.userId)),
     );
 
-    const created = await this.prisma.activity.create({
-      data: {
-        type: source.type,
-        lead: { connect: { id: source.lead.id } },
-        description: source.description,
-        dueAt: source.dueAt,
-        endAt: source.endAt,
-        assignees: {
-          create: source.assignees.map((a) => ({
-            user: { connect: { id: a.userId } },
-          })),
+    const created = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.activity.create({
+        data: {
+          type: source.type,
+          lead: { connect: { id: source.lead.id } },
+          description: source.description,
+          dueAt: source.dueAt,
+          endAt: source.endAt,
+          assignees: {
+            create: source.assignees.map((a) => ({
+              user: { connect: { id: a.userId } },
+            })),
+          },
         },
-      },
-      select: ACTIVITY_SELECT,
+        select: ACTIVITY_SELECT,
+      });
+      await recordAuditEvents(tx, [
+        {
+          ...activityBase(row, userActor(user), 'activities.duplicate'),
+          action: 'CREATED',
+          after: activityState(row),
+          metadata: { duplicatedFrom: id },
+        },
+      ]);
+      return row;
     });
     return toActivityItem(created, source.lead.name);
   }
@@ -415,20 +516,30 @@ export class ActivitiesService {
     await this.assertAssigneesCanAccess(lead.id, assigneeIds);
 
     try {
-      const activity = await this.prisma.activity.create({
-        data: {
-          type: dto.type,
-          lead: { connect: { id: lead.id } },
-          description: dto.description,
-          dueAt,
-          endAt,
-          assignees: {
-            create: [...assigneeIds].map((userId) => ({
-              user: { connect: { id: userId } },
-            })),
+      const activity = await this.prisma.$transaction(async (tx) => {
+        const row = await tx.activity.create({
+          data: {
+            type: dto.type,
+            lead: { connect: { id: lead.id } },
+            description: dto.description,
+            dueAt,
+            endAt,
+            assignees: {
+              create: [...assigneeIds].map((userId) => ({
+                user: { connect: { id: userId } },
+              })),
+            },
           },
-        },
-        select: ACTIVITY_SELECT,
+          select: ACTIVITY_SELECT,
+        });
+        await recordAuditEvents(tx, [
+          {
+            ...activityBase(row, userActor(user), 'activities.create'),
+            action: 'CREATED',
+            after: activityState(row),
+          },
+        ]);
+        return row;
       });
       return toActivityItem(activity, lead.name);
     } catch (error) {

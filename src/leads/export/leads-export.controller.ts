@@ -2,6 +2,7 @@ import { Controller, Get, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { LeadsExportService } from './leads-export.service';
 import { ExportLeadsQueryDto } from './dto/export-leads-query.dto';
+import { AuditedExport } from '../../audit/audited-export';
 
 /**
  * Lead export (LEAD-08.1), at `GET /api/leads/export`.
@@ -15,10 +16,11 @@ export class LeadsExportController {
   constructor(private readonly service: LeadsExportService) {}
 
   @Get()
+  @AuditedExport('leads.export')
   export(
     @Query() query: ExportLeadsQueryDto,
     @Res() res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     return this.service.export(query, res);
   }
 }

@@ -7,6 +7,13 @@ import {
 import { randomUUID } from 'node:crypto';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { CurrentUserService } from '../auth/current-user';
+import {
+  AuditState,
+  recordAuditEvents,
+  stateChangeEvents,
+  userActor,
+} from '../audit/audit-events';
 import {
   CustomFieldNames,
   LEAD_DISPLAY_MODES,
@@ -166,9 +173,65 @@ import { CURRENCY_CODES } from '../lookups/lookups.data';
  * than the whole screen. The DTO already guards the way in — this is the second half of
  * the same contract, and it is what lets the payload be JSON instead of 17 columns.
  */
+/** A stored payload as its history compares it: an object by field, anything else whole. */
+function settingState(
+  value: Prisma.JsonValue | Prisma.InputJsonValue,
+): AuditState {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as AuditState)
+    : { value };
+}
+
 @Injectable()
 export class SettingsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly currentUser: CurrentUserService,
+  ) {}
+
+  /**
+   * Replaces one screen's payload and records what changed (AUD-01, ADR-0083), in one
+   * transaction. The row is locked and read by the same statement, so the before-state is the
+   * value this save replaces; a save that changes nothing records nothing. Before a screen's
+   * first save its fields read as null — the shipped defaults were never stored. A list payload
+   * (follow-up types, call statuses) is compared as one value.
+   */
+  private async saveSetting(key: string, settings: object): Promise<void> {
+    // A typed interface lacks the index signature Prisma's JSON input requires; the write
+    // is the object itself, the cast only satisfies that column type.
+    const value = settings as unknown as Prisma.InputJsonValue;
+    const actor = userActor(await this.currentUser.resolve());
+
+    await this.prisma.$transaction(async (tx) => {
+      const [stored] = await tx.$queryRaw<
+        { value: Prisma.JsonValue }[]
+      >`SELECT value FROM app_settings WHERE key = ${key} FOR UPDATE`;
+      const row = await tx.appSetting.upsert({
+        where: { key },
+        update: { value },
+        create: { key, value },
+        select: { id: true },
+      });
+
+      const after = settingState(value);
+      const previous = settingState(stored?.value ?? null);
+      const before: AuditState = Object.fromEntries(
+        Object.keys(after).map((field) => [field, previous[field] ?? null]),
+      );
+      const events = stateChangeEvents(
+        {
+          entityType: 'SETTING',
+          entityId: row.id,
+          leadId: null,
+          actor,
+          source: `settings.${key}`,
+        },
+        before,
+        after,
+      );
+      if (events.length > 0) await recordAuditEvents(tx, events);
+    });
+  }
 
   /** The Organization → General Settings payload, or the shipped defaults. */
   async getOrganizationGeneral(): Promise<OrganizationGeneralSettings> {
@@ -203,15 +266,7 @@ export class SettingsService {
       productModuleEnabled: dto.productModuleEnabled,
     };
 
-    await this.prisma.appSetting.upsert({
-      where: { key: ORGANIZATION_GENERAL_KEY },
-      update: { value: settings as unknown as Prisma.InputJsonValue },
-      create: {
-        key: ORGANIZATION_GENERAL_KEY,
-        value: settings as unknown as Prisma.InputJsonValue,
-      },
-      select: { id: true },
-    });
+    await this.saveSetting(ORGANIZATION_GENERAL_KEY, settings);
     return settings;
   }
 
@@ -249,15 +304,7 @@ export class SettingsService {
       longitude: dto.longitude,
     };
 
-    await this.prisma.appSetting.upsert({
-      where: { key: ORGANIZATION_COMPANY_KEY },
-      update: { value: settings as unknown as Prisma.InputJsonValue },
-      create: {
-        key: ORGANIZATION_COMPANY_KEY,
-        value: settings as unknown as Prisma.InputJsonValue,
-      },
-      select: { id: true },
-    });
+    await this.saveSetting(ORGANIZATION_COMPANY_KEY, settings);
     return settings;
   }
 
@@ -326,15 +373,7 @@ export class SettingsService {
   ): Promise<OrganizationHostMapping> {
     const mapping: OrganizationHostMapping = { domains };
 
-    await this.prisma.appSetting.upsert({
-      where: { key: ORGANIZATION_HOST_MAPPING_KEY },
-      update: { value: mapping as unknown as Prisma.InputJsonValue },
-      create: {
-        key: ORGANIZATION_HOST_MAPPING_KEY,
-        value: mapping as unknown as Prisma.InputJsonValue,
-      },
-      select: { id: true },
-    });
+    await this.saveSetting(ORGANIZATION_HOST_MAPPING_KEY, mapping);
     return mapping;
   }
 
@@ -361,15 +400,7 @@ export class SettingsService {
       alertsEnabled: dto.alertsEnabled,
     };
 
-    await this.prisma.appSetting.upsert({
-      where: { key: COMMUNICATION_ALERTS_KEY },
-      update: { value: settings as unknown as Prisma.InputJsonValue },
-      create: {
-        key: COMMUNICATION_ALERTS_KEY,
-        value: settings as unknown as Prisma.InputJsonValue,
-      },
-      select: { id: true },
-    });
+    await this.saveSetting(COMMUNICATION_ALERTS_KEY, settings);
     return settings;
   }
 
@@ -407,15 +438,7 @@ export class SettingsService {
       saveFirstIncomingMessageAsNote: dto.saveFirstIncomingMessageAsNote,
     };
 
-    await this.prisma.appSetting.upsert({
-      where: { key: ASSIGNMENT_GENERAL_KEY },
-      update: { value: settings as unknown as Prisma.InputJsonValue },
-      create: {
-        key: ASSIGNMENT_GENERAL_KEY,
-        value: settings as unknown as Prisma.InputJsonValue,
-      },
-      select: { id: true },
-    });
+    await this.saveSetting(ASSIGNMENT_GENERAL_KEY, settings);
     return settings;
   }
 
@@ -438,15 +461,7 @@ export class SettingsService {
       callProviderMode: dto.callProviderMode,
     };
 
-    await this.prisma.appSetting.upsert({
-      where: { key: CALL_TRACKING_GENERAL_KEY },
-      update: { value: settings as unknown as Prisma.InputJsonValue },
-      create: {
-        key: CALL_TRACKING_GENERAL_KEY,
-        value: settings as unknown as Prisma.InputJsonValue,
-      },
-      select: { id: true },
-    });
+    await this.saveSetting(CALL_TRACKING_GENERAL_KEY, settings);
     return settings;
   }
 
@@ -485,15 +500,7 @@ export class SettingsService {
         : status,
     );
 
-    await this.prisma.appSetting.upsert({
-      where: { key: CALL_TRACKING_STATUSES_KEY },
-      update: { value: statuses as unknown as Prisma.InputJsonValue },
-      create: {
-        key: CALL_TRACKING_STATUSES_KEY,
-        value: statuses as unknown as Prisma.InputJsonValue,
-      },
-      select: { id: true },
-    });
+    await this.saveSetting(CALL_TRACKING_STATUSES_KEY, statuses);
     return statuses;
   }
 
@@ -550,15 +557,7 @@ export class SettingsService {
             ].slice(0, DUPLICATE_LOG_LIMIT),
     };
 
-    await this.prisma.appSetting.upsert({
-      where: { key: SALES_CRM_DUPLICATE_KEY },
-      update: { value: settings as unknown as Prisma.InputJsonValue },
-      create: {
-        key: SALES_CRM_DUPLICATE_KEY,
-        value: settings as unknown as Prisma.InputJsonValue,
-      },
-      select: { id: true },
-    });
+    await this.saveSetting(SALES_CRM_DUPLICATE_KEY, settings);
     return settings;
   }
 
@@ -609,15 +608,7 @@ export class SettingsService {
       noActivityNotifications: dto.noActivityNotifications,
     };
 
-    // A typed interface lacks the index signature Prisma's JSON input requires; the write
-    // is the object above, the cast only satisfies that column type.
-    const value = settings as unknown as Prisma.InputJsonValue;
-
-    await this.prisma.appSetting.upsert({
-      where: { key: SALES_CRM_GENERAL_KEY },
-      create: { key: SALES_CRM_GENERAL_KEY, value },
-      update: { value },
-    });
+    await this.saveSetting(SALES_CRM_GENERAL_KEY, settings);
 
     return settings;
   }
@@ -644,15 +635,7 @@ export class SettingsService {
       overdueAfterMinutes: dto.overdueAfterMinutes,
     };
 
-    await this.prisma.appSetting.upsert({
-      where: { key: ACTIVITY_GENERAL_KEY },
-      update: { value: settings as unknown as Prisma.InputJsonValue },
-      create: {
-        key: ACTIVITY_GENERAL_KEY,
-        value: settings as unknown as Prisma.InputJsonValue,
-      },
-      select: { id: true },
-    });
+    await this.saveSetting(ACTIVITY_GENERAL_KEY, settings);
     return settings;
   }
 
@@ -790,15 +773,7 @@ export class SettingsService {
   private async writeFollowUpTypes(
     types: FollowUpType[],
   ): Promise<FollowUpType[]> {
-    await this.prisma.appSetting.upsert({
-      where: { key: ACTIVITY_FOLLOW_UP_TYPES_KEY },
-      update: { value: types as unknown as Prisma.InputJsonValue },
-      create: {
-        key: ACTIVITY_FOLLOW_UP_TYPES_KEY,
-        value: types as unknown as Prisma.InputJsonValue,
-      },
-      select: { id: true },
-    });
+    await this.saveSetting(ACTIVITY_FOLLOW_UP_TYPES_KEY, types);
     return types;
   }
 
@@ -821,15 +796,7 @@ export class SettingsService {
       selfieVerificationOnLogin: dto.selfieVerificationOnLogin,
     };
 
-    await this.prisma.appSetting.upsert({
-      where: { key: APPLICATION_GENERAL_KEY },
-      update: { value: settings as unknown as Prisma.InputJsonValue },
-      create: {
-        key: APPLICATION_GENERAL_KEY,
-        value: settings as unknown as Prisma.InputJsonValue,
-      },
-      select: { id: true },
-    });
+    await this.saveSetting(APPLICATION_GENERAL_KEY, settings);
     return settings;
   }
 
@@ -917,15 +884,7 @@ export class SettingsService {
       ),
     };
 
-    await this.prisma.appSetting.upsert({
-      where: { key: APPLICATION_DASHBOARD_KEY },
-      update: { value: settings as unknown as Prisma.InputJsonValue },
-      create: {
-        key: APPLICATION_DASHBOARD_KEY,
-        value: settings as unknown as Prisma.InputJsonValue,
-      },
-      select: { id: true },
-    });
+    await this.saveSetting(APPLICATION_DASHBOARD_KEY, settings);
     return settings;
   }
 }

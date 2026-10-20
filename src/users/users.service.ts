@@ -11,6 +11,13 @@ import { CurrentUserService } from '../auth/current-user';
 import { RefreshTokenService } from '../auth/refresh-token.service';
 import { StorageService } from '../storage/storage.service';
 import { extensionOf } from '../storage/storage-policy';
+import { recordAuditEvents, userActor } from '../audit/audit-events';
+import {
+  lockUser,
+  readUserAuditState,
+  userChangeEvents,
+  userEvent,
+} from './user-audit';
 import {
   CreateUserDto,
   ListUsersQueryDto,
@@ -176,6 +183,7 @@ export class UsersService {
     await this.assertCredentialsFree(dto.email, username);
     const baseRole = await this.resolveBaseRole(dto.roleId);
     await this.validateConfig(dto, null);
+    const actor = userActor(await this.currentUser.resolve());
 
     const row = await this.prisma.$transaction(async (tx) => {
       const created = await tx.user.create({
@@ -206,6 +214,11 @@ export class UsersService {
       });
 
       await this.writePermissions(tx, created.id, dto.permissions);
+      await recordAuditEvents(tx, [
+        userEvent(created.id, 'CREATED', actor, 'users.create', {
+          after: await readUserAuditState(tx, created.id),
+        }),
+      ]);
 
       return tx.user.findUniqueOrThrow({
         where: { id: created.id },
@@ -253,6 +266,9 @@ export class UsersService {
         : undefined;
 
     const row = await this.prisma.$transaction(async (tx) => {
+      await lockUser(tx, id);
+      const before = await readUserAuditState(tx, id);
+
       await tx.user.update({
         where: { id },
         data: {
@@ -283,6 +299,15 @@ export class UsersService {
         await tx.userModulePermission.deleteMany({ where: { userId: id } });
         await this.writePermissions(tx, id, dto.permissions);
       }
+
+      const events = userChangeEvents(
+        id,
+        before,
+        await readUserAuditState(tx, id),
+        userActor({ id: actorId }),
+        'users.update',
+      );
+      if (events.length > 0) await recordAuditEvents(tx, events);
 
       return tx.user.findUniqueOrThrow({
         where: { id },
@@ -319,6 +344,7 @@ export class UsersService {
     }
 
     const existing = await this.findLive(id);
+    const actor = userActor(await this.currentUser.resolve());
 
     const stored = await this.storage.put({
       body: file.buffer,
@@ -327,10 +353,18 @@ export class UsersService {
       keyPrefix: 'avatars',
     });
 
-    await this.prisma.user.update({
-      where: { id },
-      data: { avatarKey: stored.key },
-    });
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id },
+        data: { avatarKey: stored.key },
+      }),
+      recordAuditEvents(this.prisma, [
+        userEvent(id, 'UPDATED', actor, 'users.avatar', {
+          before: { avatarKey: existing.avatarKey },
+          after: { avatarKey: stored.key },
+        }),
+      ]),
+    ]);
 
     // Replaced, not orphaned — the old picture has no remaining reference.
     if (existing.avatarKey) {
@@ -354,9 +388,23 @@ export class UsersService {
     }
     await this.findLive(id);
 
-    await this.prisma.user.update({
-      where: { id },
-      data: { deletedAt: new Date() },
+    // Conditional on still being live, so of two concurrent removals one deletes and records,
+    // and the other is the same 404 as removing an account that is already gone.
+    await this.prisma.$transaction(async (tx) => {
+      await lockUser(tx, id);
+      const before = await readUserAuditState(tx, id);
+      const removed = await tx.user.updateMany({
+        where: { id, deletedAt: null },
+        data: { deletedAt: new Date() },
+      });
+      if (removed.count !== 1) {
+        throw new NotFoundException('Team member not found.');
+      }
+      await recordAuditEvents(tx, [
+        userEvent(id, 'DELETED', userActor({ id: actorId }), 'users.delete', {
+          before,
+        }),
+      ]);
     });
     await this.refreshTokens.revokeAllForUser(id);
 
@@ -370,11 +418,17 @@ export class UsersService {
    */
   async setPassword(id: string, password: string): Promise<{ id: string }> {
     await this.findLive(id);
+    const actor = userActor(await this.currentUser.resolve());
 
-    await this.prisma.user.update({
-      where: { id },
-      data: { passwordHash: await bcrypt.hash(password, BCRYPT_ROUNDS) },
-    });
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id },
+        data: { passwordHash: await bcrypt.hash(password, BCRYPT_ROUNDS) },
+      }),
+      recordAuditEvents(this.prisma, [
+        userEvent(id, 'PASSWORD_CHANGED', actor, 'users.password'),
+      ]),
+    ]);
     await this.refreshTokens.revokeAllForUser(id);
 
     return { id };

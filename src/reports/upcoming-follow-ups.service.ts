@@ -99,7 +99,7 @@ export class UpcomingFollowUpsReportService {
   async exportCsv(
     query: UpcomingFollowUpsQueryDto,
     res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     const user = await this.currentUser.resolve();
     const where = buildUpcomingFollowUpsWhere(user, query);
 
@@ -117,6 +117,7 @@ export class UpcomingFollowUpsReportService {
       EXPORT_HEADERS.map((header) => csvCell(header)).join(',') + '\r\n',
     );
 
+    let exported = 0;
     let skip = 0;
     while (skip < MAX_EXPORT_ROWS) {
       const rows = await this.prisma.activity.findMany({
@@ -127,6 +128,7 @@ export class UpcomingFollowUpsReportService {
         take: EXPORT_BATCH_SIZE,
       });
       if (rows.length === 0) break;
+      exported += rows.length;
 
       let chunk = '';
       for (const activity of rows) {
@@ -147,6 +149,7 @@ export class UpcomingFollowUpsReportService {
     }
 
     res.end();
+    return exported;
   }
 
   /**

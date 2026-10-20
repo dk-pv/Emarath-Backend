@@ -179,7 +179,7 @@ export function allowedActions(
  * sees an order only when its lead is one they can already see, which reuses `leadScopeWhere`
  * verbatim: a sales agent reads their own converted leads' orders and no one else's. Accounts
  * reads the Delivered orders only — the client's "display logistics status with Delivered data
- * only" — until its own payment pipeline exists. Any other role matches nothing, so a route
+ * only" — beside its own payment records (ADR-0096). Any other role matches nothing, so a route
  * opened to it by mistake still returns none.
  */
 export function logisticsOrderScopeWhere(

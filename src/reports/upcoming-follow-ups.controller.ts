@@ -3,6 +3,7 @@ import type { Response } from 'express';
 import { UpcomingFollowUpsReportService } from './upcoming-follow-ups.service';
 import { UpcomingFollowUpsQueryDto } from './dto/upcoming-follow-ups-query.dto';
 import { UpcomingFollowUpsListResponse } from './dto/upcoming-follow-ups-response.dto';
+import { AuditedExport } from '../audit/audited-export';
 
 /**
  * The Upcoming Follow Ups report's HTTP surface (RPT-03.3). Thin by design: the DTO validates the
@@ -24,10 +25,11 @@ export class UpcomingFollowUpsController {
 
   /** GET /api/reports/follow-ups/upcoming/export — the same scoped set as a CSV download. */
   @Get('export')
+  @AuditedExport('reports.upcoming-follow-ups.export')
   export(
     @Query() query: UpcomingFollowUpsQueryDto,
     @Res() res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     return this.upcoming.exportCsv(query, res);
   }
 }

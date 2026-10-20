@@ -165,7 +165,7 @@ export class OverdueFollowUpsReportService {
   async exportCsv(
     query: OverdueFollowUpsQueryDto,
     res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     const user = await this.currentUser.resolve();
     const where = buildOverdueFollowUpsWhere(user, query);
 
@@ -183,6 +183,7 @@ export class OverdueFollowUpsReportService {
       EXPORT_HEADERS.map((header) => csvCell(header)).join(',') + '\r\n',
     );
 
+    let exported = 0;
     let skip = 0;
     while (skip < MAX_EXPORT_ROWS) {
       const rows = await this.prisma.activity.findMany({
@@ -193,6 +194,7 @@ export class OverdueFollowUpsReportService {
         take: EXPORT_BATCH_SIZE,
       });
       if (rows.length === 0) break;
+      exported += rows.length;
 
       let chunk = '';
       for (const activity of rows) {
@@ -213,6 +215,7 @@ export class OverdueFollowUpsReportService {
     }
 
     res.end();
+    return exported;
   }
 
   /**

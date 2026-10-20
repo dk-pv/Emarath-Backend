@@ -3,6 +3,7 @@ import type { Response } from 'express';
 import { TodaysFollowUpsReportService } from './todays-follow-ups.service';
 import { TodaysFollowUpsQueryDto } from './dto/todays-follow-ups-query.dto';
 import { TodaysFollowUpsListResponse } from './dto/todays-follow-ups-response.dto';
+import { AuditedExport } from '../audit/audited-export';
 
 /**
  * The Today's Follow Ups report's HTTP surface (RPT-03.1). Thin by design: the DTO validates the
@@ -24,10 +25,11 @@ export class TodaysFollowUpsController {
 
   /** GET /api/reports/follow-ups/today/export — the same scoped set as a CSV download. */
   @Get('export')
+  @AuditedExport('reports.todays-follow-ups.export')
   export(
     @Query() query: TodaysFollowUpsQueryDto,
     @Res() res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     return this.today.exportCsv(query, res);
   }
 }

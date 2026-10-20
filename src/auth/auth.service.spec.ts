@@ -34,8 +34,12 @@ function makeService(row: typeof USER_ROW | null) {
   const issueFor = jest.fn().mockResolvedValue('raw-reset-token');
   const consume = jest.fn().mockResolvedValue(USER_ROW.id);
   const sendPasswordReset = jest.fn().mockResolvedValue(undefined);
+  // A reset's new hash and its history are one array transaction (AUD-01).
+  const auditCreateMany = jest.fn();
   const prisma = {
     user: { findFirst, update },
+    auditEvent: { createMany: auditCreateMany },
+    $transaction: jest.fn((ops: unknown[]) => Promise.all(ops)),
   } as unknown as PrismaService;
   const jwt = { signAsync } as unknown as JwtService;
   const refreshTokens = {
@@ -80,6 +84,7 @@ function makeService(row: typeof USER_ROW | null) {
     issueFor,
     consume,
     sendPasswordReset,
+    auditCreateMany,
   };
 }
 
@@ -309,5 +314,40 @@ describe('AuthService.resetPassword (AUTH-03.1)', () => {
       service.resetPassword('raw-reset-token', 'new-strong-password'),
     ).rejects.toBeInstanceOf(UnauthorizedException);
     expect(update).not.toHaveBeenCalled();
+  });
+
+  it('records the reset with the account as its own actor, and never the hash (AUD-01)', async () => {
+    const { service, auditCreateMany } = makeService(USER_ROW);
+
+    await service.resetPassword('raw-reset-token', 'new-strong-password');
+
+    expect(auditCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          entityType: 'USER',
+          entityId: USER_ROW.id,
+          leadId: null,
+          action: 'PASSWORD_RESET',
+          actorType: 'USER',
+          actorId: USER_ROW.id,
+          source: 'auth.reset-password',
+        }),
+      ],
+    });
+    expect(JSON.stringify(auditCreateMany.mock.calls)).not.toMatch(
+      /\$2[aby]\$|new-strong-password/,
+    );
+  });
+
+  it('records nothing for a refused reset (AUD-01)', async () => {
+    const { service, consume, auditCreateMany } = makeService(USER_ROW);
+    consume.mockRejectedValue(
+      new UnauthorizedException('Invalid or expired reset link.'),
+    );
+
+    await expect(
+      service.resetPassword('bad-token', 'new-strong-password'),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 });

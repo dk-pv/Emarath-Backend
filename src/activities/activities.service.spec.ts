@@ -66,8 +66,17 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
   const pipelineFindMany = jest.fn().mockResolvedValue([]);
   // $transaction runs the ops array and resolves to the ops' return values —
   // exactly what the real client does, so the mocked findMany/count values flow
-  // straight through.
-  const $transaction = jest.fn((ops: unknown[]) => Promise.resolve(ops));
+  // straight through. A write's callback (AUD-01) runs against this same double.
+  const $transaction = jest.fn((arg: unknown) =>
+    typeof arg === 'function'
+      ? (arg as (tx: unknown) => unknown)(prisma)
+      : Promise.resolve(arg),
+  );
+  // History (AUD-01): the conditional complete/delete, the locked reads and the event table.
+  const activityUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+  const activityFindUniqueOrThrow = jest.fn().mockResolvedValue(activityRow());
+  const queryRaw = jest.fn().mockResolvedValue([]);
+  const auditCreateMany = jest.fn();
 
   const prisma = {
     lead: { findFirst: leadFindFirst, count: leadCount },
@@ -78,8 +87,12 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
       findMany: activityFindMany,
       count: activityCount,
       findFirst: activityFindFirst,
+      findUniqueOrThrow: activityFindUniqueOrThrow,
       update: activityUpdate,
+      updateMany: activityUpdateMany,
     },
+    auditEvent: { createMany: auditCreateMany },
+    $queryRaw: queryRaw,
     $transaction,
   } as unknown as PrismaService;
 
@@ -109,10 +122,21 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     activityCount,
     activityFindFirst,
     activityUpdate,
+    activityUpdateMany,
+    activityFindUniqueOrThrow,
+    queryRaw,
+    auditCreateMany,
     userFindMany,
     leadCount,
     pipelineFindMany,
   };
+}
+
+/** The rows each history write received, flattened across calls. */
+function auditRows(createMany: jest.Mock): Record<string, unknown>[] {
+  return (createMany.mock.calls as [{ data: Record<string, unknown>[] }][])
+    .map(([arg]) => arg.data)
+    .flat();
 }
 
 /** A row shaped like LEAD_LIST_SELECT — enough for toLeadListItem to run. */
@@ -554,14 +578,20 @@ describe('ActivitiesService.list', () => {
 });
 
 describe('ActivitiesService.complete', () => {
-  it('completes an in-scope activity and returns it', async () => {
-    const { service, activityFindFirst, activityUpdate } = makeService();
+  it('completes an in-scope activity, records it on the lead’s journey, and returns it', async () => {
+    const {
+      service,
+      activityFindFirst,
+      activityUpdateMany,
+      activityFindUniqueOrThrow,
+      auditCreateMany,
+    } = makeService();
     activityFindFirst.mockResolvedValue({
       id: ACT_ID,
-      completedAt: null,
+      leadId: LEAD_ID,
       lead: { name: 'Acme' },
     });
-    activityUpdate.mockResolvedValue(
+    activityFindUniqueOrThrow.mockResolvedValue(
       activityRow({ completedAt: new Date('2026-07-24T10:00:00.000Z') }),
     );
 
@@ -569,41 +599,62 @@ describe('ActivitiesService.complete', () => {
 
     expect(item.completedAt).toBe('2026-07-24T10:00:00.000Z');
     expect(item.title).toBe('Call with Acme');
-    const args = (activityUpdate.mock.calls as unknown[][])[0][0] as {
-      where: { id: string };
+    const args = (activityUpdateMany.mock.calls as unknown[][])[0][0] as {
+      where: { id: string; completedAt: null };
       data: { completedAt: Date };
     };
-    expect(args.where.id).toBe(ACT_ID);
+    expect(args.where).toEqual({ id: ACT_ID, completedAt: null });
     expect(args.data.completedAt).toBeInstanceOf(Date);
+    expect(auditRows(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityType: 'ACTIVITY',
+        entityId: ACT_ID,
+        leadId: LEAD_ID,
+        action: 'COMPLETED',
+        actorId: 'u1',
+        source: 'activities.complete',
+        before: { completedAt: null },
+        after: { completedAt: args.data.completedAt.toISOString() },
+      }),
+    ]);
   });
 
-  it('is idempotent — keeps the original completedAt when already complete', async () => {
+  it('is idempotent — an already-completed activity keeps its original date and records nothing', async () => {
     const done = new Date('2026-07-20T08:00:00.000Z');
-    const { service, activityFindFirst, activityUpdate } = makeService();
+    const {
+      service,
+      activityFindFirst,
+      activityUpdateMany,
+      activityFindUniqueOrThrow,
+      auditCreateMany,
+    } = makeService();
     activityFindFirst.mockResolvedValue({
       id: ACT_ID,
-      completedAt: done,
+      leadId: LEAD_ID,
       lead: { name: 'Acme' },
     });
-    activityUpdate.mockResolvedValue(activityRow({ completedAt: done }));
+    // The conditional update matches no row: completedAt is no longer null.
+    activityUpdateMany.mockResolvedValue({ count: 0 });
+    activityFindUniqueOrThrow.mockResolvedValue(
+      activityRow({ completedAt: done }),
+    );
 
-    await service.complete(ACT_ID);
+    const item = await service.complete(ACT_ID);
 
-    const args = (activityUpdate.mock.calls as unknown[][])[0][0] as {
-      data: { completedAt: Date };
-    };
-    // reuses the existing timestamp, not a fresh now()
-    expect(args.data.completedAt).toBe(done);
+    expect(item.completedAt).toBe(done.toISOString());
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 
   it('404s (and never updates) an out-of-scope or missing activity', async () => {
-    const { service, activityFindFirst, activityUpdate } = makeService();
+    const { service, activityFindFirst, activityUpdateMany, auditCreateMany } =
+      makeService();
     activityFindFirst.mockResolvedValue(null);
 
     await expect(service.complete(ACT_ID)).rejects.toBeInstanceOf(
       NotFoundException,
     );
-    expect(activityUpdate).not.toHaveBeenCalled();
+    expect(activityUpdateMany).not.toHaveBeenCalled();
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 });
 
@@ -778,24 +829,37 @@ describe('ActivitiesService.duplicate', () => {
 });
 
 describe('ActivitiesService.delete', () => {
-  it('soft-deletes an in-scope activity and returns its id', async () => {
-    const { service, activityFindFirst, activityUpdate } = makeService();
+  it('soft-deletes an in-scope activity, records it as it stood, and returns its id', async () => {
+    const { service, activityFindFirst, activityUpdateMany, auditCreateMany } =
+      makeService();
     activityFindFirst.mockResolvedValue({ id: ACT_ID, deletedAt: null });
-    activityUpdate.mockResolvedValue({ id: ACT_ID });
 
     const result = await service.delete(ACT_ID);
 
     expect(result).toEqual({ id: ACT_ID });
-    const args = (activityUpdate.mock.calls as unknown[][])[0][0] as {
-      where: { id: string };
+    const args = (activityUpdateMany.mock.calls as unknown[][])[0][0] as {
+      where: { id: string; deletedAt: null };
       data: { deletedAt: Date };
     };
-    expect(args.where.id).toBe(ACT_ID);
+    expect(args.where).toEqual({ id: ACT_ID, deletedAt: null });
     expect(args.data.deletedAt).toBeInstanceOf(Date);
+    expect(auditRows(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityType: 'ACTIVITY',
+        leadId: LEAD_ID,
+        action: 'DELETED',
+        source: 'activities.delete',
+        before: expect.objectContaining({
+          description: 'call them',
+          assigneeIds: [AGENT_ID],
+        }) as unknown,
+      }),
+    ]);
   });
 
   it('is idempotent — a second delete keeps the original deletedAt', async () => {
-    const { service, activityFindFirst, activityUpdate } = makeService();
+    const { service, activityFindFirst, activityUpdateMany, auditCreateMany } =
+      makeService();
     activityFindFirst.mockResolvedValue({
       id: ACT_ID,
       deletedAt: new Date('2026-07-20T08:00:00.000Z'),
@@ -804,17 +868,128 @@ describe('ActivitiesService.delete', () => {
     const result = await service.delete(ACT_ID);
 
     expect(result).toEqual({ id: ACT_ID });
-    // already deleted → no re-stamp
-    expect(activityUpdate).not.toHaveBeenCalled();
+    // already deleted → no re-stamp, no second event
+    expect(activityUpdateMany).not.toHaveBeenCalled();
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records nothing when a concurrent delete got there first', async () => {
+    const { service, activityFindFirst, activityUpdateMany, auditCreateMany } =
+      makeService();
+    activityFindFirst.mockResolvedValue({ id: ACT_ID, deletedAt: null });
+    activityUpdateMany.mockResolvedValue({ count: 0 });
+
+    await expect(service.delete(ACT_ID)).resolves.toEqual({ id: ACT_ID });
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 
   it('404s (and never updates) an out-of-scope or missing activity', async () => {
-    const { service, activityFindFirst, activityUpdate } = makeService();
+    const { service, activityFindFirst, activityUpdateMany } = makeService();
     activityFindFirst.mockResolvedValue(null);
 
     await expect(service.delete(ACT_ID)).rejects.toBeInstanceOf(
       NotFoundException,
     );
-    expect(activityUpdate).not.toHaveBeenCalled();
+    expect(activityUpdateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('ActivitiesService — history (AUD-01)', () => {
+  it('records a new follow-up on its lead’s journey with what was scheduled', async () => {
+    const { service, leadFindFirst, activityCreate, auditCreateMany } =
+      makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID, name: 'Acme' });
+    activityCreate.mockResolvedValue(activityRow());
+
+    await service.create(makeDto());
+
+    expect(auditRows(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityType: 'ACTIVITY',
+        entityId: ACT_ID,
+        leadId: LEAD_ID,
+        action: 'CREATED',
+        actorId: 'u1',
+        source: 'activities.create',
+        after: {
+          type: ActivityType.CALL,
+          description: 'call them',
+          dueAt: new Date(DUE).toISOString(),
+          endAt: null,
+          assigneeIds: [AGENT_ID],
+        },
+      }),
+    ]);
+  });
+
+  it('records nothing when the create fails', async () => {
+    const { service, leadFindFirst, activityCreate, auditCreateMany } =
+      makeService();
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID, name: 'Acme' });
+    activityCreate.mockRejectedValue(new Error('write failed'));
+
+    await expect(service.create(makeDto())).rejects.toThrow('write failed');
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records an edit as only the fields it changed, under a row lock', async () => {
+    const {
+      service,
+      activityFindFirst,
+      activityUpdate,
+      queryRaw,
+      auditCreateMany,
+    } = makeService();
+    activityFindFirst.mockResolvedValue({
+      id: ACT_ID,
+      leadId: LEAD_ID,
+      lead: { name: 'Acme' },
+    });
+    activityUpdate.mockResolvedValue(
+      activityRow({ description: 'call them back' }),
+    );
+
+    await service.update(ACT_ID, {
+      type: ActivityType.CALL,
+      description: 'call them back',
+      dueAt: DUE,
+      assigneeIds: [AGENT_ID],
+    });
+
+    expect(queryRaw).toHaveBeenCalledTimes(1);
+    expect(auditRows(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        action: 'UPDATED',
+        source: 'activities.update',
+        before: { description: 'call them' },
+        after: { description: 'call them back' },
+      }),
+    ]);
+  });
+
+  it('records a duplicate as a new follow-up that names its source', async () => {
+    const { service, activityFindFirst, activityCreate, auditCreateMany } =
+      makeService();
+    activityFindFirst.mockResolvedValue({
+      type: ActivityType.CALL,
+      description: 'call them',
+      dueAt: new Date(DUE),
+      endAt: null,
+      lead: { id: LEAD_ID, name: 'Acme' },
+      assignees: [{ userId: AGENT_ID }],
+    });
+    const COPY = '99999999-9999-4999-8999-999999999999';
+    activityCreate.mockResolvedValue(activityRow({ id: COPY }));
+
+    await service.duplicate(ACT_ID);
+
+    expect(auditRows(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityId: COPY,
+        action: 'CREATED',
+        source: 'activities.duplicate',
+        metadata: { duplicatedFrom: ACT_ID },
+      }),
+    ]);
   });
 });

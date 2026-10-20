@@ -1,6 +1,7 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { TagAccessMode, UserRole } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { CurrentUserService } from '../auth/current-user';
 import { PolicyRow } from './tag-access.service';
 import { TagPermissionsService } from './tag-permissions.service';
 
@@ -49,12 +50,23 @@ function setup(
   const grantCreateMany = jest.fn().mockResolvedValue({ count: 0 });
   const tagCount = jest.fn().mockResolvedValue(data.tagCount ?? 0);
 
+  // The policy as the history reads it, before and after the write (AUD-01). None by default.
+  const policyFindUnique = jest.fn().mockResolvedValue(null);
+  const queryRaw = jest.fn().mockResolvedValue([]);
+  const auditCreateMany = jest.fn();
+
   const tx = {
-    tagAccessPolicy: { upsert },
+    $queryRaw: queryRaw,
+    tagAccessPolicy: {
+      upsert,
+      findUnique: policyFindUnique,
+      deleteMany: policyDeleteMany,
+    },
     tagAccessGrant: {
       deleteMany: grantDeleteMany,
       createMany: grantCreateMany,
     },
+    auditEvent: { createMany: auditCreateMany },
   };
   const prisma = {
     user: { groupBy, findMany: userFindMany, findFirst: userFindFirst },
@@ -64,9 +76,14 @@ function setup(
       run(tx),
     ),
   } as unknown as PrismaService;
+  const currentUser = {
+    resolve: jest
+      .fn()
+      .mockResolvedValue({ id: 'admin-1', role: UserRole.SUPERADMIN }),
+  } as unknown as CurrentUserService;
 
   return {
-    service: new TagPermissionsService(prisma),
+    service: new TagPermissionsService(prisma, currentUser),
     upsert,
     policyDeleteMany,
     grantDeleteMany,
@@ -74,8 +91,122 @@ function setup(
     tagCount,
     userFindMany,
     policyFindMany,
+    policyFindUnique,
+    queryRaw,
+    auditCreateMany,
   };
 }
+
+describe('TagPermissionsService — history (AUD-01)', () => {
+  it('records a team policy change as PERMISSIONS_CHANGED with what it replaced', async () => {
+    const { service, policyFindUnique, auditCreateMany, queryRaw } = setup({
+      tagCount: 1,
+    });
+    policyFindUnique
+      .mockResolvedValueOnce(
+        policy({
+          id: 'pol-1',
+          team: 'Sales',
+          canCreate: true,
+          tagAccess: TagAccessMode.ALL,
+        }),
+      )
+      .mockResolvedValueOnce(
+        policy({
+          id: 'pol-1',
+          team: 'Sales',
+          canCreate: false,
+          tagAccess: TagAccessMode.LISTED,
+          tagIds: [A],
+        }),
+      );
+
+    await service.saveTeam({
+      team: 'Sales',
+      canCreate: false,
+      tagAccess: TagAccessMode.LISTED,
+      tagIds: [A],
+    });
+
+    expect(queryRaw).toHaveBeenCalledTimes(1);
+    expect(auditCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          entityType: 'TAG_ACCESS_POLICY',
+          entityId: 'pol-1',
+          leadId: null,
+          action: 'PERMISSIONS_CHANGED',
+          actorType: 'USER',
+          actorId: 'admin-1',
+          source: 'tag-access.team',
+          before: { canCreate: true, tagAccess: 'ALL', tagIds: [] },
+          after: { canCreate: false, tagAccess: 'LISTED', tagIds: [A] },
+          metadata: { team: 'Sales' },
+        }),
+      ],
+    });
+  });
+
+  it('records a reset as the policy going back to inherited (all null)', async () => {
+    const { service, policyFindUnique, auditCreateMany } = setup();
+    policyFindUnique
+      .mockResolvedValueOnce(
+        policy({ id: 'pol-2', userId: USER, canCreate: true }),
+      )
+      .mockResolvedValueOnce(null);
+
+    await service.resetUser(USER);
+
+    expect(auditCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          entityId: 'pol-2',
+          action: 'PERMISSIONS_CHANGED',
+          source: 'tag-access.user-reset',
+          before: { canCreate: true },
+          after: { canCreate: null },
+          metadata: { userId: USER },
+        }),
+      ],
+    });
+  });
+
+  it('records nothing for a reset of a policy that does not exist, or a save that changes nothing', async () => {
+    const { service, policyFindUnique, auditCreateMany } = setup();
+    await service.resetTeam('Nobody');
+
+    const same = policy({
+      id: 'pol-3',
+      team: 'Sales',
+      canCreate: true,
+      tagAccess: TagAccessMode.ALL,
+    });
+    policyFindUnique.mockResolvedValueOnce(same).mockResolvedValueOnce(same);
+    await service.saveTeam({
+      team: 'Sales',
+      canCreate: true,
+      tagAccess: TagAccessMode.ALL,
+      tagIds: [],
+    });
+
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records nothing when the write fails', async () => {
+    const { service, upsert, auditCreateMany } = setup();
+    upsert.mockRejectedValue(new Error('write failed'));
+
+    await expect(
+      service.saveTeam({
+        team: 'Sales',
+        canCreate: true,
+        tagAccess: TagAccessMode.ALL,
+        tagIds: [],
+      }),
+    ).rejects.toThrow('write failed');
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+});
 
 describe('TagPermissionsService.overview', () => {
   it('lists every team, with unconfigured ones at the pre-feature default', async () => {

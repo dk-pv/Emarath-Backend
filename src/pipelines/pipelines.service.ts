@@ -7,7 +7,14 @@ import {
 import { Prisma } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
-import { recordAuditEvents, userActor } from '../audit/audit-events';
+import {
+  AuditActor,
+  AuditEventInput,
+  AuditState,
+  recordAuditEvents,
+  stateChangeEvents,
+  userActor,
+} from '../audit/audit-events';
 import {
   CreatePipelineDto,
   PipelinePermissionDto,
@@ -59,6 +66,81 @@ type PipelineRow = Prisma.PipelineGetPayload<{
   select: typeof PIPELINE_SELECT;
 }>;
 
+/** What a pipeline's history compares (AUD-01). The name has its own RENAMED event. */
+const PIPELINE_AUDIT_SELECT = {
+  shortCode: true,
+  accessMode: true,
+  defaultStageId: true,
+  mandatoryValueStageId: true,
+  qualifiedStageId: true,
+  autoConvertAtWon: true,
+  expiryEnabled: true,
+  expiryScope: true,
+  expiryDays: true,
+  expiredStageId: true,
+  reassignedStageId: true,
+  reassignExpiredToId: true,
+  permissions: { select: { permissionType: true, roleId: true, userId: true } },
+} satisfies Prisma.PipelineSelect;
+
+type PipelineAuditRow = Prisma.PipelineGetPayload<{
+  select: typeof PIPELINE_AUDIT_SELECT;
+}>;
+type GrantRow = PipelineAuditRow['permissions'][number];
+
+function grantState(grants: readonly GrantRow[]): Prisma.InputJsonValue {
+  return grants
+    .map((grant) => ({
+      permissionType: grant.permissionType,
+      roleId: grant.roleId,
+      userId: grant.userId,
+    }))
+    .sort((a, b) =>
+      `${a.permissionType}:${a.roleId}:${a.userId}`.localeCompare(
+        `${b.permissionType}:${b.roleId}:${b.userId}`,
+      ),
+    );
+}
+
+function pipelineState(row: PipelineAuditRow): AuditState {
+  return {
+    shortCode: row.shortCode,
+    accessMode: row.accessMode,
+    grants: grantState(row.permissions),
+    defaultStageId: row.defaultStageId,
+    mandatoryValueStageId: row.mandatoryValueStageId,
+    qualifiedStageId: row.qualifiedStageId,
+    autoConvertAtWon: row.autoConvertAtWon,
+    expiryEnabled: row.expiryEnabled,
+    expiryScope: row.expiryScope,
+    expiryDays: row.expiryDays,
+    expiredStageId: row.expiredStageId,
+    reassignedStageId: row.reassignedStageId,
+    reassignExpiredToId: row.reassignExpiredToId,
+  };
+}
+
+/** Who may open the pipeline is a permission change; anything else is an UPDATED. */
+function pipelineChangeEvents(
+  id: string,
+  before: AuditState,
+  after: AuditState,
+  actor: AuditActor,
+): AuditEventInput[] {
+  return stateChangeEvents(
+    {
+      entityType: 'PIPELINE',
+      entityId: id,
+      leadId: null,
+      actor,
+      source: 'pipelines.update',
+    },
+    before,
+    after,
+    [['PERMISSIONS_CHANGED', ['accessMode', 'grants']]],
+  );
+}
+
 /**
  * The sales pipeline catalogue behind Settings → Sales & CRM Configuration → Sales Pipeline.
  *
@@ -97,17 +179,38 @@ export class PipelinesService {
     const grants = this.grantRows(accessMode, dto.permissions);
 
     const existing = await this.prisma.pipeline.count();
-    const created = await this.prisma.pipeline.create({
-      data: {
-        name: dto.name.trim(),
-        shortCode: dto.shortCode,
-        isDefault: existing === 0,
-        createdById: actor.id,
-        accessMode,
-        templateKey: dto.templateKey ?? null,
-        permissions: grants.length > 0 ? { create: grants } : undefined,
-      },
-      select: { id: true, name: true },
+    const created = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.pipeline.create({
+        data: {
+          name: dto.name.trim(),
+          shortCode: dto.shortCode,
+          isDefault: existing === 0,
+          createdById: actor.id,
+          accessMode,
+          templateKey: dto.templateKey ?? null,
+          permissions: grants.length > 0 ? { create: grants } : undefined,
+        },
+        select: { id: true, name: true, isDefault: true, templateKey: true },
+      });
+      await recordAuditEvents(tx, [
+        {
+          entityType: 'PIPELINE',
+          entityId: row.id,
+          leadId: null,
+          action: 'CREATED',
+          actor: userActor(actor),
+          source: 'pipelines.create',
+          after: {
+            name: row.name,
+            shortCode: dto.shortCode,
+            isDefault: row.isDefault,
+            templateKey: row.templateKey,
+            accessMode,
+            grants: grantState(grants),
+          },
+        },
+      ]);
+      return row;
     });
 
     // Cloning copies the template's stages into the new pipeline. Every template's set is
@@ -142,6 +245,17 @@ export class PipelinesService {
       ? await this.settingsData(pipeline.name, dto.settings)
       : undefined;
 
+    // ponytail: the before-state is the row read above, outside the write's transaction; two
+    // administrators saving the same pipeline at once could each record against the older one.
+    // Lock the row first if pipeline edits ever become concurrent traffic.
+    const actor = userActor(await this.currentUser.resolve());
+    const before = pipelineState(pipeline);
+    const changed: AuditState = {
+      ...before,
+      ...settings,
+      ...(dto.shortCode !== undefined ? { shortCode: dto.shortCode } : {}),
+    };
+
     const newName = dto.name?.trim();
     if (newName !== undefined && newName !== pipeline.name) {
       await this.assertNameFree(newName, id);
@@ -150,7 +264,6 @@ export class PipelinesService {
         where: { pipelines: { has: pipeline.name } },
         select: { id: true, pipelines: true },
       });
-      const user = await this.currentUser.resolve();
 
       // The rename relabels every lead on the board without moving any of them, so it is
       // recorded once, on the pipeline, rather than as a PIPELINE_CHANGED per lead (ADR-0083).
@@ -191,11 +304,12 @@ export class PipelinesService {
             entityId: id,
             leadId: null,
             action: 'RENAMED',
-            actor: userActor(user),
+            actor,
             source: 'pipelines.update',
             before: { name: pipeline.name },
             after: { name: newName },
           },
+          ...pipelineChangeEvents(id, before, changed, actor),
         ]),
       ]);
 
@@ -216,14 +330,20 @@ export class PipelinesService {
         deleteMany: {},
         ...(grants.length > 0 ? { create: grants } : {}),
       };
+      changed.accessMode = accessMode;
+      changed.grants = grantState(grants);
     }
 
     if (Object.keys(rest).length > 0) {
-      await this.prisma.pipeline.update({
-        where: { id },
-        data: rest,
-        select: { id: true },
-      });
+      const events = pipelineChangeEvents(id, before, changed, actor);
+      await this.prisma.$transaction([
+        this.prisma.pipeline.update({
+          where: { id },
+          data: rest,
+          select: { id: true },
+        }),
+        ...(events.length > 0 ? [recordAuditEvents(this.prisma, events)] : []),
+      ]);
     }
     return this.requireNode(id);
   }
@@ -392,8 +512,10 @@ export class PipelinesService {
    * the catalogue can never hold two defaults — or, between two writes, none.
    */
   async setDefault(id: string): Promise<PipelineNode[]> {
-    await this.requireRow(id);
+    const pipeline = await this.requireRow(id);
+    const actor = userActor(await this.currentUser.resolve());
 
+    // Recorded on the new default only; the previous one losing the flag follows from it.
     await this.prisma.$transaction([
       this.prisma.pipeline.updateMany({
         where: { isDefault: true, id: { not: id } },
@@ -404,6 +526,22 @@ export class PipelinesService {
         data: { isDefault: true },
         select: { id: true },
       }),
+      ...(pipeline.isDefault
+        ? []
+        : [
+            recordAuditEvents(this.prisma, [
+              {
+                entityType: 'PIPELINE',
+                entityId: id,
+                leadId: null,
+                action: 'UPDATED',
+                actor,
+                source: 'pipelines.default',
+                before: { isDefault: false },
+                after: { isDefault: true },
+              },
+            ]),
+          ]),
     ]);
 
     return this.list();
@@ -438,9 +576,21 @@ export class PipelinesService {
       );
     }
 
+    const actor = userActor(await this.currentUser.resolve());
     await this.prisma.$transaction([
       this.prisma.stage.deleteMany({ where: { pipeline: pipeline.name } }),
       this.prisma.pipeline.delete({ where: { id } }),
+      recordAuditEvents(this.prisma, [
+        {
+          entityType: 'PIPELINE',
+          entityId: id,
+          leadId: null,
+          action: 'DELETED',
+          actor,
+          source: 'pipelines.delete',
+          before: { name: pipeline.name, ...pipelineState(pipeline) },
+        },
+      ]),
     ]);
     return { id };
   }
@@ -463,9 +613,8 @@ export class PipelinesService {
       select: {
         id: true,
         name: true,
-        shortCode: true,
         isDefault: true,
-        accessMode: true,
+        ...PIPELINE_AUDIT_SELECT,
       },
     });
     if (!found) throw new NotFoundException('Pipeline not found.');

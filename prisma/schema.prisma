@@ -1753,6 +1753,10 @@ model LogisticsOrder {
   rtoAt     DateTime? @map("rto_at")
   rtoReason String?   @map("rto_reason") @db.VarChar(500)
 
+  /// The order's payment record (ADR-0096): created in the transaction that moves the order to
+  /// DELIVERED, and by nothing else, so every other order has none.
+  accountsRecord AccountsRecord?
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -1763,4 +1767,42 @@ model LogisticsOrder {
   // without approval). Redundant now; dropping it is a separate, approved migration.
   @@index([awbNumber])
   @@map("logistics_orders")
+}
+
+/// The Accounts pipeline's statuses, the client's own list (specification §6). INITIAL is where a
+/// delivered order arrives (§4 step 11). Which moves between them are allowed is provisional —
+/// the client has confirmed the statuses, not their order — and lives in `accounts-status.ts`.
+/// Postgres cannot drop an enum value: removing one later means recreating the type.
+enum PaymentStatus {
+  INITIAL
+  PAYMENT_PENDING
+  PAYMENT_RECEIVED
+  PAYMENT_FAILED
+  PARTIALLY_PAID
+}
+
+/// The payment record a delivered order becomes (ADR-0096; specification §4 steps 11-12, §5, §6).
+///
+/// One per order, ever (`order_id` UNIQUE). It is created inside the DISPATCHED → DELIVERED
+/// transaction and nowhere else, and DELIVERED is terminal, so no order is delivered twice; the
+/// unique key is the backstop that keeps a second record impossible whatever path is added later.
+/// `onDelete: Restrict` keeps the order, and through it the lead, from being hard deleted while
+/// the record exists (§5: the three records stay linked as one journey).
+///
+/// Its history is the audit log (ADR-0083), not columns: every move and correction is an
+/// ACCOUNTS_RECORD event on the order's lead journey. Never deleted, so there is no `deletedAt`.
+model AccountsRecord {
+  id String @id @default(uuid()) @db.Uuid
+
+  orderId String         @unique @map("order_id") @db.Uuid
+  order   LogisticsOrder @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  status          PaymentStatus @default(INITIAL)
+  statusChangedAt DateTime      @default(now()) @map("status_changed_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([status, createdAt])
+  @@map("accounts_records")
 }

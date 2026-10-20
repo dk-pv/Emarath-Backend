@@ -9,6 +9,8 @@ import { RefreshTokenService } from './refresh-token.service';
 import { PasswordResetService } from './password-reset.service';
 import { MailerService } from './mailer.service';
 import type { MailConfig } from '../config/mail.config';
+import { recordAuditEvents, userActor } from '../audit/audit-events';
+import { userEvent } from '../users/user-audit';
 
 /** bcrypt work factor for a stored password hash (matches the seed's rounds). */
 const BCRYPT_ROUNDS = 10;
@@ -189,10 +191,21 @@ export class AuthService {
     }
 
     const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: { passwordHash },
-    });
+    // The holder of the reset link is the account itself, so the account is the actor.
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: user.id },
+        data: { passwordHash },
+      }),
+      recordAuditEvents(this.prisma, [
+        userEvent(
+          user.id,
+          'PASSWORD_RESET',
+          userActor(user),
+          'auth.reset-password',
+        ),
+      ]),
+    ]);
     await this.refreshTokens.revokeAllForUser(user.id);
   }
 

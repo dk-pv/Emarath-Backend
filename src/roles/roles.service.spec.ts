@@ -39,16 +39,31 @@ function makeService() {
   const roleCreate = jest.fn();
   const roleUpdate = jest.fn();
   const userCount = jest.fn();
-  const transaction = jest.fn();
+  // History (AUD-01): the before-read, the conditional soft delete and the event table.
+  const roleFindUniqueOrThrow = jest.fn().mockResolvedValue({
+    name: 'User',
+    baseRole: UserRole.SALES_AGENT,
+    parentId: ROOT,
+  });
+  const roleUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+  const auditCreateMany = jest.fn();
+  // Callback transactions run against the same double; array ones resolve their operations.
+  const transaction = jest.fn((arg: ((tx: unknown) => unknown) | unknown[]) =>
+    typeof arg === 'function' ? arg(prisma) : Promise.all(arg),
+  );
 
   const prisma = {
     role: {
       findMany: roleFindMany,
       findFirst: roleFindFirst,
+      findUniqueOrThrow: roleFindUniqueOrThrow,
       create: roleCreate,
       update: roleUpdate,
+      updateMany: roleUpdateMany,
     },
     user: { count: userCount },
+    auditEvent: { createMany: auditCreateMany },
+    $queryRaw: jest.fn().mockResolvedValue([]),
     $transaction: transaction,
   } as unknown as PrismaService;
 
@@ -64,8 +79,11 @@ function makeService() {
     roleFindFirst,
     roleCreate,
     roleUpdate,
+    roleUpdateMany,
+    roleFindUniqueOrThrow,
     userCount,
     transaction,
+    auditCreateMany,
   };
 }
 
@@ -112,7 +130,12 @@ describe('RolesService.create', () => {
     const { service, roleFindMany, roleFindFirst, roleCreate } = makeService();
     roleFindMany.mockResolvedValueOnce(graph()).mockResolvedValue(fullRows());
     roleFindFirst.mockResolvedValue(null);
-    roleCreate.mockResolvedValue({ id: CHILD });
+    roleCreate.mockResolvedValue({
+      id: CHILD,
+      name: 'User',
+      baseRole: UserRole.SALES_AGENT,
+      parentId: ROOT,
+    });
 
     await service.create({
       name: 'User',
@@ -232,18 +255,117 @@ describe('RolesService.update — hierarchy invariants', () => {
   });
 });
 
+describe('RolesService — history (AUD-01)', () => {
+  it('records a new role as CREATED, by its author', async () => {
+    const mocks = makeService();
+    mocks.roleFindMany
+      .mockResolvedValueOnce(graph())
+      .mockResolvedValue(fullRows());
+    mocks.roleFindFirst.mockResolvedValue(null);
+    mocks.roleCreate.mockResolvedValue({
+      id: CHILD,
+      name: 'User',
+      baseRole: UserRole.SALES_AGENT,
+      parentId: ROOT,
+    });
+
+    await mocks.service.create({
+      name: 'User',
+      baseRole: UserRole.SALES_AGENT,
+      parentId: ROOT,
+    });
+
+    expect(mocks.auditCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          entityType: 'ROLE',
+          entityId: CHILD,
+          leadId: null,
+          action: 'CREATED',
+          actorType: 'USER',
+          actorId: ADMIN,
+          source: 'roles.create',
+          after: { name: 'User', baseRole: 'SALES_AGENT', parentId: ROOT },
+        }),
+      ],
+    });
+  });
+
+  it('records what an edit changed — a new base role is what the members get', async () => {
+    const mocks = makeService();
+    mocks.roleFindMany
+      .mockResolvedValueOnce(graph())
+      .mockResolvedValue(fullRows());
+    mocks.roleUpdate.mockResolvedValue({
+      name: 'User',
+      baseRole: UserRole.SALES_MANAGER,
+      parentId: ROOT,
+    });
+
+    await mocks.service.update(CHILD, { baseRole: UserRole.SALES_MANAGER });
+
+    expect(mocks.auditCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          entityId: CHILD,
+          action: 'UPDATED',
+          source: 'roles.update',
+          before: { baseRole: 'SALES_AGENT' },
+          after: { baseRole: 'SALES_MANAGER' },
+        }),
+      ],
+    });
+  });
+
+  it('records nothing for an edit that changes nothing', async () => {
+    const mocks = makeService();
+    mocks.roleFindMany
+      .mockResolvedValueOnce(graph())
+      .mockResolvedValue(fullRows());
+    mocks.roleUpdate.mockResolvedValue({
+      name: 'User',
+      baseRole: UserRole.SALES_AGENT,
+      parentId: ROOT,
+    });
+
+    await mocks.service.update(CHILD, { baseRole: UserRole.SALES_AGENT });
+
+    expect(mocks.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records a move on the dragged role only, with its old and new place', async () => {
+    const mocks = makeService();
+    mocks.roleFindMany
+      .mockResolvedValueOnce(graph())
+      .mockResolvedValue(fullRows());
+
+    await mocks.service.move(GRANDCHILD, { parentId: null, position: 0 });
+
+    expect(mocks.auditCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          entityId: GRANDCHILD,
+          action: 'MOVED',
+          source: 'roles.move',
+          before: { parentId: CHILD },
+          after: { parentId: null },
+        }),
+      ],
+    });
+  });
+});
+
 describe('RolesService.move', () => {
   it('renumbers the destination siblings in one transaction', async () => {
     const { service, roleFindMany, transaction } = makeService();
     roleFindMany.mockResolvedValueOnce(graph()).mockResolvedValue(fullRows());
-    transaction.mockResolvedValue([]);
 
     await service.move(GRANDCHILD, { parentId: null, position: 0 });
 
     expect(transaction).toHaveBeenCalledTimes(1);
-    // both roots plus the arriving role are rewritten together
+    // both roots plus the arriving role are rewritten together, with the move's history
     const [batch] = transaction.mock.calls[0] as [unknown[]];
-    expect(batch).toHaveLength(2);
+    expect(batch).toHaveLength(3);
   });
 
   it('will not drop a role into its own subtree', async () => {
@@ -275,17 +397,52 @@ describe('RolesService.remove', () => {
   });
 
   it('soft-deletes an unused leaf rather than erasing the row', async () => {
-    const { service, roleFindMany, userCount, roleUpdate } = makeService();
+    const { service, roleFindMany, userCount, roleUpdateMany } = makeService();
     roleFindMany.mockResolvedValue(graph());
     userCount.mockResolvedValue(0);
-    roleUpdate.mockResolvedValue({ id: GRANDCHILD });
 
     await expect(service.remove(GRANDCHILD)).resolves.toEqual({
       id: GRANDCHILD,
     });
-    const [removed] = roleUpdate.mock.calls[0] as [PrismaCall];
-    expect(removed.where).toEqual({ id: GRANDCHILD });
+    const [removed] = roleUpdateMany.mock.calls[0] as [
+      PrismaCall & { where: { id: string; deletedAt: null } },
+    ];
+    expect(removed.where).toEqual({ id: GRANDCHILD, deletedAt: null });
     expect(removed.data.deletedAt).toBeInstanceOf(Date);
+  });
+
+  it('records the removal with the role as it stood; a removal that lost the race is a 404 and records nothing', async () => {
+    const mocks = makeService();
+    mocks.roleFindMany.mockResolvedValue(graph());
+    mocks.userCount.mockResolvedValue(0);
+    mocks.roleFindUniqueOrThrow.mockResolvedValue({
+      name: 'Agent',
+      baseRole: UserRole.SALES_AGENT,
+      parentId: CHILD,
+    });
+
+    await mocks.service.remove(GRANDCHILD);
+    expect(mocks.auditCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          entityType: 'ROLE',
+          entityId: GRANDCHILD,
+          action: 'DELETED',
+          actorId: ADMIN,
+          source: 'roles.delete',
+          before: { name: 'Agent', baseRole: 'SALES_AGENT', parentId: CHILD },
+        }),
+      ],
+    });
+
+    const late = makeService();
+    late.roleFindMany.mockResolvedValue(graph());
+    late.userCount.mockResolvedValue(0);
+    late.roleUpdateMany.mockResolvedValue({ count: 0 });
+    await expect(late.service.remove(GRANDCHILD)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(late.auditCreateMany).not.toHaveBeenCalled();
   });
 
   it('counts only live members when deciding (soft-deleted users do not block)', async () => {

@@ -104,6 +104,8 @@ function admits(route: Route, role: UserRole): boolean {
 */
 const ADMIN_ONLY_CONTROLLERS = new Set([
   'AssignmentRulesController',
+  // The administrator's audit log (AUD-02): every route Super Admin only.
+  'AuditLogController',
   'CategoriesController',
   'LeadFormsController',
   'LeadSourcesController',
@@ -193,6 +195,22 @@ const LOGISTICS_DATE_CORRECTION_LABELS = new Set([
 */
 const JOURNEY_LABELS = new Set(['GET /api/audit/events']);
 
+/*
+  Accounts v1 (ADR-0096): the Accounts Executive reads its records and moves their payment status;
+  the correction is the Super Admin's alone until the client names the Accounts head. No sales or
+  Logistics role reaches any of it.
+*/
+const ACCOUNTS_READ_LABELS = new Set([
+  'GET /api/accounts/records',
+  'GET /api/accounts/records/summary',
+  'GET /api/accounts/records/filter-options',
+  'GET /api/accounts/records/:id',
+]);
+const ACCOUNTS_MOVE_LABELS = new Set(['POST /api/accounts/records/:id/status']);
+const ACCOUNTS_CORRECTION_LABELS = new Set([
+  'POST /api/accounts/records/:id/correction',
+]);
+
 function isLogisticsRoute(label: string): boolean {
   return (
     LOGISTICS_READ_LABELS.has(label) ||
@@ -202,17 +220,25 @@ function isLogisticsRoute(label: string): boolean {
     LOGISTICS_MANAGER_LABELS.has(label) ||
     LOGISTICS_RESUBMIT_LABELS.has(label) ||
     LOGISTICS_DELIVERY_DATE_LABELS.has(label) ||
-    LOGISTICS_DATE_CORRECTION_LABELS.has(label)
+    LOGISTICS_DATE_CORRECTION_LABELS.has(label) ||
+    ACCOUNTS_READ_LABELS.has(label) ||
+    ACCOUNTS_MOVE_LABELS.has(label) ||
+    ACCOUNTS_CORRECTION_LABELS.has(label)
   );
 }
 
 /**
- * Who each Logistics route admits: QC checks, both Logistics roles ship, the Manager corrects
- * and records RTO, the Sales Manager resubmits, the sales agent and the Sales Manager set the
- * delivery date, and Customer Service, Marketing and Accounts (Delivered orders) only read.
+ * Who each Logistics and Accounts route admits: QC checks, both Logistics roles ship, the Manager
+ * corrects and records RTO, the Sales Manager resubmits, the sales agent and the Sales Manager set
+ * the delivery date, Customer Service and Marketing only read, and Accounts reads the Delivered
+ * orders and works its own records.
  */
 function logisticsAdmits(label: string, role: UserRole): boolean {
   if (role === UserRole.SUPERADMIN) return isLogisticsRoute(label);
+  if (ACCOUNTS_READ_LABELS.has(label) || ACCOUNTS_MOVE_LABELS.has(label)) {
+    return role === UserRole.ACCOUNTS_EXECUTIVE;
+  }
+  if (ACCOUNTS_CORRECTION_LABELS.has(label)) return false;
   if (LOGISTICS_READ_LABELS.has(label) || JOURNEY_LABELS.has(label)) {
     return true;
   }
@@ -291,12 +317,17 @@ describe('Operational roles across every route (ADR-0084)', () => {
       'POST /api/lead-custom-fields',
       'GET /api/lead-forms/default',
       'GET /api/settings/activity-reminders/workflow',
+      'GET /api/audit/log',
+      'GET /api/audit/log/filter-options',
       ...LOGISTICS_READ_LABELS,
       ...JOURNEY_LABELS,
       ...LOGISTICS_QC_LABELS,
       ...LOGISTICS_SHIPMENT_LABELS,
       ...LOGISTICS_MANAGER_LABELS,
       ...LOGISTICS_RESUBMIT_LABELS,
+      ...ACCOUNTS_READ_LABELS,
+      ...ACCOUNTS_MOVE_LABELS,
+      ...ACCOUNTS_CORRECTION_LABELS,
     ]) {
       expect(labels).toContain(expected);
     }

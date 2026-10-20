@@ -1,5 +1,11 @@
 import { Prisma } from '../generated/prisma/client';
-import { AuditEventInput, recordAuditEvents, userActor } from './audit-events';
+import {
+  AuditEventInput,
+  recordAfterEffect,
+  recordAuditEvents,
+  stateChangeEvents,
+  userActor,
+} from './audit-events';
 
 function makeClient() {
   const createMany = jest.fn().mockReturnValue('prisma-promise');
@@ -62,5 +68,79 @@ describe('recordAuditEvents', () => {
   it('returns the unawaited Prisma promise, so it can join an array transaction', () => {
     const { client } = makeClient();
     expect(recordAuditEvents(client, [base])).toBe('prisma-promise');
+  });
+});
+
+describe('stateChangeEvents (AUD-01)', () => {
+  const head = {
+    entityType: 'USER' as const,
+    entityId: 'user-9',
+    leadId: null,
+    actor: userActor({ id: 'admin-1' }),
+    source: 'users.update',
+  };
+
+  it('gives each changed own group its action and everything else one UPDATED, changed fields only', () => {
+    const events = stateChangeEvents(
+      head,
+      { role: 'SALES_AGENT', pipelines: ['A'], jobTitle: 'BDE', phone: '1' },
+      { role: 'SALES_MANAGER', pipelines: ['A'], jobTitle: 'Lead', phone: '1' },
+      [
+        ['ROLE_CHANGED', ['role']],
+        ['PERMISSIONS_CHANGED', ['pipelines']],
+      ],
+    );
+
+    expect(events).toEqual([
+      {
+        ...head,
+        action: 'ROLE_CHANGED',
+        before: { role: 'SALES_AGENT' },
+        after: { role: 'SALES_MANAGER' },
+      },
+      {
+        ...head,
+        action: 'UPDATED',
+        before: { jobTitle: 'BDE' },
+        after: { jobTitle: 'Lead' },
+      },
+    ]);
+  });
+
+  it('compares lists and objects by value, and an unchanged record yields no event', () => {
+    expect(
+      stateChangeEvents(
+        head,
+        { ids: ['a', 'b'], matrix: { leads: true }, none: null },
+        { ids: ['a', 'b'], matrix: { leads: true }, none: null },
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe('recordAfterEffect (AUD-01)', () => {
+  it('writes the event once the effect has happened', async () => {
+    const { client, createMany } = makeClient();
+    const logger = { error: jest.fn() };
+
+    await recordAfterEffect(client, logger, base);
+
+    expect(createMany).toHaveBeenCalledTimes(1);
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('logs a failed write instead of throwing, because the effect cannot be taken back', async () => {
+    const { client, createMany } = makeClient();
+    createMany.mockRejectedValue(new Error('db down'));
+    const logger = { error: jest.fn() };
+
+    await expect(
+      recordAfterEffect(client, logger, base),
+    ).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'STATUS_CHANGED (leads.status) was not recorded: db down',
+      ),
+    );
   });
 });

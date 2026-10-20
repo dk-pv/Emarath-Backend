@@ -356,8 +356,14 @@ describe('the delivery-date migration', () => {
     );
   });
 
-  it('comes after every migration already in the history, the GPS removal included', () => {
-    expect(folders.sort().at(-1)).toBe(name);
+  it('comes after every migration in the history before it, the GPS removal included', () => {
+    const sorted = folders.sort();
+    expect(sorted.indexOf(name ?? '')).toBeGreaterThan(
+      sorted.indexOf('20261014090000_rename_tag_access_department_to_team'),
+    );
+    expect(sorted.indexOf(name ?? '')).toBeGreaterThan(
+      sorted.indexOf('20261008120000_remove_gps_module'),
+    );
     expect(folders).toContain('20261008120000_remove_gps_module');
   });
 });

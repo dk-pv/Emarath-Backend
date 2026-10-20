@@ -3,6 +3,7 @@ import type { Response } from 'express';
 import { ConvertedLeadsReportService } from './converted-leads.service';
 import { ConvertedLeadsQueryDto } from './dto/converted-leads-query.dto';
 import { ConvertedLeadsListResponse } from './dto/converted-leads-response.dto';
+import { AuditedExport } from '../audit/audited-export';
 
 /**
  * The Converted Leads report's HTTP surface (RPT-02.6). Thin by design: the DTO validates the
@@ -23,10 +24,11 @@ export class ConvertedLeadsController {
 
   /** GET /api/reports/leads/converted/export — the same scoped set as a CSV download. */
   @Get('export')
+  @AuditedExport('reports.converted-leads.export')
   export(
     @Query() query: ConvertedLeadsQueryDto,
     @Res() res: Response,
-  ): Promise<void> {
+  ): Promise<number> {
     return this.convertedLeads.exportCsv(query, res);
   }
 }

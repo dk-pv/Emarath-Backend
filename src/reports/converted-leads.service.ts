@@ -111,7 +111,10 @@ export class ConvertedLeadsReportService {
    * raw number (no currency glyph), so a spreadsheet reads it as a value — matching the Leads
    * export.
    */
-  async exportCsv(query: ConvertedLeadsQueryDto, res: Response): Promise<void> {
+  async exportCsv(
+    query: ConvertedLeadsQueryDto,
+    res: Response,
+  ): Promise<number> {
     const user = await this.currentUser.resolve();
     const where = buildConvertedLeadsWhere(user, query);
 
@@ -129,6 +132,7 @@ export class ConvertedLeadsReportService {
       EXPORT_HEADERS.map((header) => csvCell(header)).join(',') + '\r\n',
     );
 
+    let exported = 0;
     let skip = 0;
     while (skip < MAX_ROWS) {
       const leads = await this.prisma.lead.findMany({
@@ -139,6 +143,7 @@ export class ConvertedLeadsReportService {
         take: BATCH_SIZE,
       });
       if (leads.length === 0) break;
+      exported += leads.length;
 
       let chunk = '';
       for (const lead of leads) {
@@ -159,6 +164,7 @@ export class ConvertedLeadsReportService {
     }
 
     res.end();
+    return exported;
   }
 }
 
