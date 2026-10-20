@@ -116,8 +116,9 @@ export class AuditLogService {
 
   /**
    * What each record on the page is called, read in one query per kind: a person's or role's
-   * name, a lead's, an order's number. An activity, note or email has no name of its own and
-   * reads as its lead. A record since deleted has no label; its event still says what it was.
+   * name, a lead's, an order's number, a configuration record's name. An activity, note or
+   * email has no name of its own and reads as its lead. A record since deleted has no label;
+   * its event still says what it was.
    */
   private async entityLabels(
     rows: { entityType: string; entityId: string; leadId: string | null }[],
@@ -139,51 +140,100 @@ export class AuditLogService {
       ids.length > 0 ? query(ids) : Promise.resolve([] as T[]);
     const named = { id: true, name: true } as const;
 
-    const [users, roles, pipelines, integrations, documents, orders, leads] =
-      await Promise.all([
-        read(idsOf('USER'), (ids) =>
-          this.prisma.user.findMany({
-            where: { id: { in: ids } },
-            select: named,
-          }),
-        ),
-        read(idsOf('ROLE'), (ids) =>
-          this.prisma.role.findMany({
-            where: { id: { in: ids } },
-            select: named,
-          }),
-        ),
-        read(idsOf('PIPELINE'), (ids) =>
-          this.prisma.pipeline.findMany({
-            where: { id: { in: ids } },
-            select: named,
-          }),
-        ),
-        read(idsOf('INTEGRATION'), (ids) =>
-          this.prisma.integration.findMany({
-            where: { id: { in: ids } },
-            select: named,
-          }),
-        ),
-        read(idsOf('DOCUMENT'), (ids) =>
-          this.prisma.document.findMany({
-            where: { id: { in: ids } },
-            select: { id: true, title: true },
-          }),
-        ),
-        read(idsOf('LOGISTICS_ORDER'), (ids) =>
-          this.prisma.logisticsOrder.findMany({
-            where: { id: { in: ids } },
-            select: { id: true, orderNumber: true },
-          }),
-        ),
-        read(leadIds, (ids) =>
-          this.prisma.lead.findMany({
-            where: { id: { in: ids } },
-            select: named,
-          }),
-        ),
-      ]);
+    const [
+      users,
+      roles,
+      pipelines,
+      integrations,
+      documents,
+      orders,
+      leads,
+      stages,
+      forms,
+      fields,
+      sources,
+      rules,
+      tags,
+    ] = await Promise.all([
+      read(idsOf('USER'), (ids) =>
+        this.prisma.user.findMany({
+          where: { id: { in: ids } },
+          select: named,
+        }),
+      ),
+      read(idsOf('ROLE'), (ids) =>
+        this.prisma.role.findMany({
+          where: { id: { in: ids } },
+          select: named,
+        }),
+      ),
+      read(idsOf('PIPELINE'), (ids) =>
+        this.prisma.pipeline.findMany({
+          where: { id: { in: ids } },
+          select: named,
+        }),
+      ),
+      read(idsOf('INTEGRATION'), (ids) =>
+        this.prisma.integration.findMany({
+          where: { id: { in: ids } },
+          select: named,
+        }),
+      ),
+      read(idsOf('DOCUMENT'), (ids) =>
+        this.prisma.document.findMany({
+          where: { id: { in: ids } },
+          select: { id: true, title: true },
+        }),
+      ),
+      read(idsOf('LOGISTICS_ORDER'), (ids) =>
+        this.prisma.logisticsOrder.findMany({
+          where: { id: { in: ids } },
+          select: { id: true, orderNumber: true },
+        }),
+      ),
+      read(leadIds, (ids) =>
+        this.prisma.lead.findMany({
+          where: { id: { in: ids } },
+          select: named,
+        }),
+      ),
+      read(idsOf('STAGE'), (ids) =>
+        this.prisma.stage.findMany({
+          where: { id: { in: ids } },
+          select: named,
+        }),
+      ),
+      read(idsOf('LEAD_FORM'), (ids) =>
+        this.prisma.leadForm.findMany({
+          where: { id: { in: ids } },
+          select: named,
+        }),
+      ),
+      read(idsOf('CUSTOM_FIELD'), (ids) =>
+        this.prisma.leadCustomField.findMany({
+          where: { id: { in: ids } },
+          select: named,
+        }),
+      ),
+      read(idsOf('LEAD_SOURCE'), (ids) =>
+        this.prisma.leadSource.findMany({
+          where: { id: { in: ids } },
+          select: named,
+        }),
+      ),
+      read(idsOf('ASSIGNMENT_RULE'), (ids) =>
+        this.prisma.assignmentRule.findMany({
+          where: { id: { in: ids } },
+          select: named,
+        }),
+      ),
+      read(idsOf('TAG'), (ids) =>
+        this.prisma.tag.findMany({
+          where: { id: { in: ids } },
+          select: named,
+        }),
+      ),
+    ]);
 
     const labels = new Map<string, string>();
     for (const [type, list] of [
@@ -192,6 +242,12 @@ export class AuditLogService {
       ['PIPELINE', pipelines],
       ['INTEGRATION', integrations],
       ['LEAD', leads],
+      ['STAGE', stages],
+      ['LEAD_FORM', forms],
+      ['CUSTOM_FIELD', fields],
+      ['LEAD_SOURCE', sources],
+      ['ASSIGNMENT_RULE', rules],
+      ['TAG', tags],
     ] as const) {
       for (const item of list) labels.set(`${type}:${item.id}`, item.name);
     }

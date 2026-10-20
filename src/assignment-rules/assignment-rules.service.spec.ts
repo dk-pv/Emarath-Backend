@@ -8,6 +8,7 @@ import {
   AssignmentTarget,
   UserRole,
 } from '../generated/prisma/client';
+import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { AssignmentRulesService } from './assignment-rules.service';
@@ -68,10 +69,16 @@ function makeService() {
   );
   let ruleExists = true;
   const groupDeleteMany = jest.fn().mockResolvedValue({ count: 1 });
+  // The rule as the locked reads inside a change's transaction find it, before and after.
+  const findUniqueOrThrow = jest.fn().mockResolvedValue(storedRule());
+  const auditCreateMany = jest.fn().mockResolvedValue({ count: 1 });
+  const $queryRaw = jest.fn().mockResolvedValue([]);
 
   const tx = {
-    assignmentRule: { update },
+    assignmentRule: { update, create, findUniqueOrThrow },
     assignmentRuleGroup: { deleteMany: groupDeleteMany },
+    auditEvent: { createMany: auditCreateMany },
+    $queryRaw,
   };
 
   const prisma = {
@@ -82,8 +89,15 @@ function makeService() {
     ),
   } as unknown as PrismaService;
 
+  const currentUser = {
+    resolve: jest.fn().mockResolvedValue({ id: ACTOR, role: 'SUPERADMIN' }),
+  } as unknown as CurrentUserService;
+
   return {
-    service: new AssignmentRulesService(prisma),
+    service: new AssignmentRulesService(prisma, currentUser),
+    findUniqueOrThrow,
+    auditCreateMany,
+    $queryRaw,
     findMany,
     count,
     create,
@@ -361,6 +375,158 @@ describe('AssignmentRulesService — create, update, delete', () => {
     await expect(service.remove(ID)).resolves.toEqual({ id: ID });
     const args = (update.mock.calls[0] as [{ data: { deletedAt: Date } }])[0];
     expect(args.data.deletedAt).toBeInstanceOf(Date);
+  });
+});
+
+describe('AssignmentRulesService — configuration audit (AUD-03)', () => {
+  const auditRows = (auditCreateMany: jest.Mock) =>
+    (
+      auditCreateMany.mock.calls as [{ data: Record<string, unknown>[] }][]
+    ).flatMap(([args]) => args.data);
+
+  it('records a new rule as CREATED with its groups, by its author, in the create’s transaction', async () => {
+    const { service, auditCreateMany } = makeService();
+
+    await service.create(dto(), ACTOR);
+
+    expect(auditRows(auditCreateMany)).toEqual([
+      {
+        entityType: 'ASSIGNMENT_RULE',
+        entityId: ID,
+        leadId: null,
+        action: 'CREATED',
+        actorType: 'USER',
+        actorId: ACTOR,
+        source: 'assignment-rules.create',
+        before: undefined,
+        after: {
+          name: 'Round robin everyone',
+          description: 'Everything to everyone',
+          algorithm: AssignmentAlgorithm.ROUND_ROBIN,
+          status: AssignmentRuleStatus.ACTIVE,
+          groups: [
+            {
+              name: 'New Rule',
+              applyTo: AssignmentApplyTo.ALL_RECORDS,
+              target: AssignmentTarget.ALL_USERS,
+            },
+          ],
+        },
+        metadata: undefined,
+      },
+    ]);
+  });
+
+  it('records a rename as RENAMED and a deactivation with new groups as one UPDATED', async () => {
+    const { service, findUniqueOrThrow, auditCreateMany } = makeService();
+    findUniqueOrThrow.mockResolvedValueOnce(storedRule()).mockResolvedValueOnce(
+      storedRule({
+        name: 'Renamed',
+        status: AssignmentRuleStatus.INACTIVE,
+        groups: [
+          {
+            id: 'g2',
+            name: 'Only',
+            position: 0,
+            applyTo: AssignmentApplyTo.ALL_RECORDS,
+            target: AssignmentTarget.ALL_USERS,
+          },
+        ],
+      }),
+    );
+
+    await service.update(ID, { name: 'Renamed' });
+
+    expect(
+      auditRows(auditCreateMany).map((row) => [
+        row.action,
+        row.before,
+        row.after,
+      ]),
+    ).toEqual([
+      ['RENAMED', { name: 'Round robin everyone' }, { name: 'Renamed' }],
+      [
+        'UPDATED',
+        {
+          status: AssignmentRuleStatus.ACTIVE,
+          groups: [
+            {
+              name: 'New Rule',
+              applyTo: AssignmentApplyTo.ALL_RECORDS,
+              target: AssignmentTarget.ALL_USERS,
+            },
+          ],
+        },
+        {
+          status: AssignmentRuleStatus.INACTIVE,
+          groups: [
+            {
+              name: 'Only',
+              applyTo: AssignmentApplyTo.ALL_RECORDS,
+              target: AssignmentTarget.ALL_USERS,
+            },
+          ],
+        },
+      ],
+    ]);
+  });
+
+  it('records nothing when the rule is resent unchanged, although its groups are rewritten', async () => {
+    const { service, groupDeleteMany, auditCreateMany } = makeService();
+
+    await service.update(ID, {
+      name: 'Round robin everyone',
+      groups: [
+        {
+          name: 'New Rule',
+          applyTo: AssignmentApplyTo.ALL_RECORDS,
+          target: AssignmentTarget.ALL_USERS,
+        },
+      ],
+    });
+
+    expect(groupDeleteMany).toHaveBeenCalled();
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('locks the rule before reading the state it compares against', async () => {
+    const { service, findUniqueOrThrow, $queryRaw } = makeService();
+
+    await service.update(ID, { name: 'Renamed' });
+
+    expect($queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      findUniqueOrThrow.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('records a soft delete as DELETED with what the rule was; a missing rule records nothing', async () => {
+    const deleted = makeService();
+    await deleted.service.remove(ID);
+    expect(auditRows(deleted.auditCreateMany)).toMatchObject([
+      {
+        entityType: 'ASSIGNMENT_RULE',
+        entityId: ID,
+        action: 'DELETED',
+        actorId: ACTOR,
+        source: 'assignment-rules.delete',
+        before: { name: 'Round robin everyone' },
+      },
+    ]);
+
+    const gone = makeService();
+    gone.setRuleExists(false);
+    await expect(gone.service.remove(ID)).rejects.toThrow(NotFoundException);
+    expect(gone.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records nothing when the write fails inside the transaction', async () => {
+    const { service, update, auditCreateMany } = makeService();
+    update.mockRejectedValue(new Error('write failed'));
+
+    await expect(service.update(ID, { name: 'Renamed' })).rejects.toThrow(
+      'write failed',
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 });
 

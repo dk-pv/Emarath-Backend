@@ -33,10 +33,20 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
   const remove = jest.fn();
   const leadTagDeleteMany = jest.fn();
 
-  // A non-admin's create runs in a transaction so the tag and the creator's grant commit
-  // together: the writes exist on `tx` only, and a write that escaped it would throw.
+  // Every create runs in a transaction so the tag, a non-admin creator's grant and the CREATED
+  // event commit together (AUD-03): the create exists on `tx` only, and one that escaped it
+  // would throw. Updates and deletes run in one too, against the same mocks.
   const txCreate = jest.fn();
-  const tx = { tag: { create: txCreate } };
+  const findUniqueOrThrow = jest
+    .fn()
+    .mockResolvedValue({ name: 'BDE RISK', isActive: true });
+  const auditCreateMany = jest.fn().mockResolvedValue({ count: 1 });
+  const $queryRaw = jest.fn().mockResolvedValue([]);
+  const tx = {
+    tag: { create: txCreate, update, findUniqueOrThrow },
+    auditEvent: { createMany: auditCreateMany },
+    $queryRaw,
+  };
   const prisma = {
     tag: { findMany, findFirst, create, update, delete: remove },
     leadTag: { deleteMany: leadTagDeleteMany },
@@ -48,7 +58,7 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
     resolve: jest.fn().mockResolvedValue({ id: 'u1', role }),
   } as unknown as CurrentUserService;
   const assertMayCreate = jest.fn().mockResolvedValue(undefined);
-  const grantToCreator = jest.fn().mockResolvedValue(undefined);
+  const grantToCreator = jest.fn().mockResolvedValue(true);
   const access = {
     assertMayCreate,
     grantToCreator,
@@ -56,6 +66,9 @@ function makeService(role: UserRole = UserRole.SUPERADMIN) {
 
   return {
     txCreate,
+    findUniqueOrThrow,
+    auditCreateMany,
+    $queryRaw,
     assertMayCreate,
     grantToCreator,
     service: new TagsService(prisma, currentUser, access),
@@ -113,22 +126,22 @@ describe('TagsService.list', () => {
 
 describe('TagsService.create', () => {
   it('trims the name and defaults to active', async () => {
-    const { service, create } = makeService();
-    create.mockResolvedValue(row({ name: 'DISPATCHED' }));
+    const { service, txCreate } = makeService();
+    txCreate.mockResolvedValue(row({ name: 'DISPATCHED' }));
 
     await service.create({ name: '  DISPATCHED  ' });
 
-    const [call] = create.mock.calls[0] as [DataCall];
+    const [call] = txCreate.mock.calls[0] as [DataCall];
     expect(call.data).toEqual({ name: 'DISPATCHED', isActive: true });
   });
 
   it('honours an explicitly inactive tag', async () => {
-    const { service, create } = makeService();
-    create.mockResolvedValue(row({ isActive: false }));
+    const { service, txCreate } = makeService();
+    txCreate.mockResolvedValue(row({ isActive: false }));
 
     await service.create({ name: 'RETIRED', isActive: false });
 
-    const [call] = create.mock.calls[0] as [DataCall];
+    const [call] = txCreate.mock.calls[0] as [DataCall];
     expect(call.data.isActive).toBe(false);
   });
 
@@ -149,14 +162,17 @@ describe('TagsService.create', () => {
 
 describe('TagsService.create — Tag Permissions (ADR-0091)', () => {
   it('lets an administrator create without consulting the policy', async () => {
-    const { service, create, assertMayCreate, txCreate } = makeService();
-    create.mockResolvedValue(row({ name: 'NEW' }));
+    const { service, create, assertMayCreate, grantToCreator, txCreate } =
+      makeService();
+    txCreate.mockResolvedValue(row({ name: 'NEW' }));
 
     await service.create({ name: 'NEW' });
 
-    expect(create).toHaveBeenCalledTimes(1);
+    // In a transaction with its event (AUD-03), and still no policy and no grant.
+    expect(txCreate).toHaveBeenCalledTimes(1);
+    expect(create).not.toHaveBeenCalled();
     expect(assertMayCreate).not.toHaveBeenCalled();
-    expect(txCreate).not.toHaveBeenCalled();
+    expect(grantToCreator).not.toHaveBeenCalled();
   });
 
   it('refuses a user the Admin has not allowed to create tags, writing nothing', async () => {
@@ -277,5 +293,130 @@ describe('TagsService.remove', () => {
     await expect(service.remove('nope')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+});
+
+describe('TagsService — configuration audit (AUD-03)', () => {
+  const auditRows = (auditCreateMany: jest.Mock) =>
+    (
+      auditCreateMany.mock.calls as [{ data: Record<string, unknown>[] }][]
+    ).flatMap(([args]) => args.data);
+
+  it('records an administrator’s new tag as CREATED, inside the create’s transaction', async () => {
+    const { service, txCreate, auditCreateMany } = makeService();
+    txCreate.mockResolvedValue(row({ id: 't9', name: 'NEW', isActive: false }));
+
+    await service.create({ name: 'NEW', isActive: false });
+
+    expect(auditRows(auditCreateMany)).toEqual([
+      {
+        entityType: 'TAG',
+        entityId: 't9',
+        leadId: null,
+        action: 'CREATED',
+        actorType: 'USER',
+        actorId: 'u1',
+        source: 'tags.create',
+        before: undefined,
+        after: { name: 'NEW', isActive: false },
+        metadata: undefined,
+      },
+    ]);
+  });
+
+  it('notes on the CREATED event when a non-admin creator was granted the new tag', async () => {
+    const granted = makeService(UserRole.SALES_AGENT);
+    granted.txCreate.mockResolvedValue(row({ id: 't9', name: 'MINE' }));
+    await granted.service.create({ name: 'MINE' });
+    expect(auditRows(granted.auditCreateMany)).toEqual([
+      expect.objectContaining({
+        action: 'CREATED',
+        actorId: 'u1',
+        metadata: { accessGrantedToCreator: true },
+      }),
+    ]);
+
+    const open = makeService(UserRole.SALES_AGENT);
+    open.grantToCreator.mockResolvedValue(false);
+    open.txCreate.mockResolvedValue(row({ id: 't8', name: 'OPEN' }));
+    await open.service.create({ name: 'OPEN' });
+    expect(auditRows(open.auditCreateMany)).toEqual([
+      expect.objectContaining({ action: 'CREATED', metadata: undefined }),
+    ]);
+  });
+
+  it('records nothing when a user may not create tags', async () => {
+    const { service, assertMayCreate, auditCreateMany } = makeService(
+      UserRole.SALES_AGENT,
+    );
+    assertMayCreate.mockRejectedValue(
+      new ForbiddenException(TAG_CREATE_NOT_PERMITTED),
+    );
+
+    await expect(service.create({ name: 'SNEAKY' })).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records a rename as RENAMED and a status change as UPDATED; an unchanged save records nothing', async () => {
+    const changed = makeService();
+    changed.findFirst.mockResolvedValueOnce({ id: 't1', name: 'BDE RISK' });
+    changed.update.mockResolvedValue(
+      row({ name: 'BDE REVIEW', isActive: false }),
+    );
+    await changed.service.update('t1', { name: 'BDE REVIEW', isActive: false });
+    expect(
+      auditRows(changed.auditCreateMany).map((r) => [
+        r.action,
+        r.before,
+        r.after,
+      ]),
+    ).toEqual([
+      ['RENAMED', { name: 'BDE RISK' }, { name: 'BDE REVIEW' }],
+      ['UPDATED', { isActive: true }, { isActive: false }],
+    ]);
+
+    const same = makeService();
+    same.findFirst.mockResolvedValueOnce({ id: 't1', name: 'BDE RISK' });
+    same.update.mockResolvedValue(row());
+    await same.service.update('t1', { name: 'BDE RISK', isActive: true });
+    expect(same.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('locks the tag before reading the state it compares against', async () => {
+    const { service, findFirst, update, findUniqueOrThrow, $queryRaw } =
+      makeService();
+    findFirst.mockResolvedValueOnce({ id: 't1', name: 'BDE RISK' });
+    update.mockResolvedValue(row({ isActive: false }));
+
+    await service.update('t1', { isActive: false });
+
+    expect($queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      findUniqueOrThrow.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('records a soft delete as DELETED with what the tag was; an unknown tag records nothing', async () => {
+    const deleted = makeService();
+    deleted.findFirst.mockResolvedValue({ id: 't1', name: 'BDE RISK' });
+    deleted.update.mockResolvedValue({ id: 't1' });
+    await deleted.service.remove('t1');
+    expect(auditRows(deleted.auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityType: 'TAG',
+        entityId: 't1',
+        action: 'DELETED',
+        source: 'tags.delete',
+        before: { name: 'BDE RISK', isActive: true },
+      }),
+    ]);
+
+    const unknown = makeService();
+    unknown.findFirst.mockResolvedValue(null);
+    await expect(unknown.service.remove('nope')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(unknown.auditCreateMany).not.toHaveBeenCalled();
   });
 });

@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
+import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { LeadCustomFieldsService } from './lead-custom-fields.service';
 import {
@@ -18,13 +19,28 @@ import {
  * Settings > Data & Schema Management > Custom Field (ADR-0072), over the definition
  * store that LEAD-05.1 already shipped.
  */
+/** A field in the shape FIELD_SELECT returns. */
+const fieldRow = (over: Record<string, unknown> = {}) => ({
+  id: 'f1',
+  key: 'cf_national_code',
+  name: 'National Code',
+  type: 'TEXT',
+  position: 1,
+  isActive: true,
+  options: [] as { id: string; label: string; position: number }[],
+  ...over,
+});
+
 function makeService() {
   const findMany = jest.fn().mockResolvedValue([]);
   const findFirst = jest.fn();
   const findUnique = jest.fn().mockResolvedValue(null);
-  const findUniqueOrThrow = jest.fn();
-  const create = jest.fn();
-  const update = jest.fn();
+  // The field as the locked read inside a change's transaction finds it (AUD-03).
+  const findUniqueOrThrow = jest.fn().mockResolvedValue(fieldRow());
+  const create = jest.fn().mockResolvedValue(fieldRow());
+  const update = jest.fn().mockResolvedValue(fieldRow());
+  const auditCreateMany = jest.fn().mockResolvedValue({ count: 1 });
+  const $queryRaw = jest.fn().mockResolvedValue([]);
   const count = jest.fn().mockResolvedValue(0);
   const aggregate = jest.fn().mockResolvedValue({ _max: { position: 4 } });
 
@@ -32,10 +48,6 @@ function makeService() {
   const valueFindMany = jest.fn().mockResolvedValue([]);
   const optionDeleteMany = jest.fn().mockResolvedValue({ count: 0 });
   const formFieldDeleteMany = jest.fn().mockResolvedValue({ count: 0 });
-
-  const $transaction = jest.fn((ops: unknown) =>
-    Array.isArray(ops) ? Promise.all(ops) : Promise.resolve(ops),
-  );
 
   const prisma = {
     leadCustomField: {
@@ -51,11 +63,24 @@ function makeService() {
     leadCustomFieldValue: { count: valueCount, findMany: valueFindMany },
     leadCustomFieldOption: { deleteMany: optionDeleteMany },
     leadFormField: { deleteMany: formFieldDeleteMany },
-    $transaction,
+    auditEvent: { createMany: auditCreateMany },
+    $queryRaw,
   } as unknown as PrismaService;
+  // An array runs as a batch; a callback gets the client as its transaction.
+  const $transaction = jest.fn((arg: unknown) =>
+    typeof arg === 'function'
+      ? (arg as (tx: PrismaService) => Promise<unknown>)(prisma)
+      : Promise.all(arg as Promise<unknown>[]),
+  );
+  Object.assign(prisma, { $transaction });
+  const currentUser = {
+    resolve: jest.fn().mockResolvedValue({ id: 'admin-1', role: 'SUPERADMIN' }),
+  } as unknown as CurrentUserService;
 
   return {
-    service: new LeadCustomFieldsService(prisma),
+    service: new LeadCustomFieldsService(prisma, currentUser),
+    auditCreateMany,
+    $queryRaw,
     findMany,
     findFirst,
     findUniqueOrThrow,
@@ -152,7 +177,6 @@ describe('LeadCustomFieldsService', () => {
   describe('create', () => {
     it('derives a stable cf_ key the client never sends', async () => {
       const { service, create } = makeService();
-      create.mockResolvedValue({});
 
       await service.create({ name: 'National Code', type: 'TEXT' });
 
@@ -166,7 +190,6 @@ describe('LeadCustomFieldsService', () => {
 
     it('stores a dropdown’s options, renumbered from 1', async () => {
       const { service, create } = makeService();
-      create.mockResolvedValue({});
 
       await service.create({
         name: 'Payment Method',
@@ -259,21 +282,20 @@ describe('LeadCustomFieldsService', () => {
     });
 
     it('renames without touching the key that stored values point at', async () => {
-      const { service, findFirst, findUniqueOrThrow, $transaction } =
+      const { service, findFirst, update, optionDeleteMany, $transaction } =
         makeService();
       findFirst
         .mockResolvedValueOnce(existing) // the field itself
         .mockResolvedValueOnce(null); // no name clash
-      findUniqueOrThrow.mockResolvedValue({ id: 'f1' });
-      $transaction.mockResolvedValue([]);
 
       await service.update('f1', dto());
 
-      const ops = ($transaction.mock.calls as unknown[][])[0][0] as unknown[];
-      // The definition update and the option replacement travel together.
-      expect(ops).toHaveLength(2);
+      // The definition update and the option replacement travel together, in one transaction.
+      expect($transaction).toHaveBeenCalledTimes(1);
+      expect(optionDeleteMany).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledTimes(1);
       const written = JSON.stringify(
-        ($transaction.mock.calls as unknown[][])[0][0],
+        (update.mock.calls as [{ data: unknown }][])[0][0].data,
       );
       expect(written).not.toContain('"key"');
     });
@@ -313,17 +335,19 @@ describe('LeadCustomFieldsService', () => {
         service,
         findFirst,
         findUniqueOrThrow,
+        update,
         valueCount,
         $transaction,
       } = makeService();
       findFirst.mockResolvedValueOnce(existing).mockResolvedValueOnce(null);
       valueCount.mockResolvedValue(0);
-      findUniqueOrThrow.mockResolvedValue({ id: 'f1' });
-      $transaction.mockResolvedValue([]);
+      findUniqueOrThrow.mockResolvedValue(fieldRow());
+      update.mockResolvedValue(fieldRow({ type: 'NUMBER' }));
 
       await expect(
         service.update('f1', dto({ type: 'NUMBER' })),
-      ).resolves.toEqual({ id: 'f1' });
+      ).resolves.toMatchObject({ id: 'f1', type: 'NUMBER' });
+      expect($transaction).toHaveBeenCalledTimes(1);
     });
 
     it('refuses to drop an option leads have already chosen', async () => {
@@ -364,9 +388,9 @@ describe('LeadCustomFieldsService', () => {
       findFirst.mockResolvedValue({ id: 'f1', key: 'cf_spare', name: 'Spare' });
       valueCount.mockResolvedValue(0);
       update.mockResolvedValue({});
-      $transaction.mockResolvedValue([]);
 
       await service.remove('f1');
+      expect($transaction).toHaveBeenCalledTimes(1);
 
       const args = (update.mock.calls as unknown[][])[0][0] as {
         data: { deletedAt: Date };
@@ -457,6 +481,156 @@ describe('LeadCustomFieldsService', () => {
         service.prepareValues([{ fieldId: 'f1', value: 'three' }]),
       ).rejects.toThrow(/must be a number/);
     });
+  });
+});
+
+describe('LeadCustomFieldsService — configuration audit (AUD-03)', () => {
+  const auditRows = (auditCreateMany: jest.Mock) =>
+    (
+      auditCreateMany.mock.calls as [{ data: Record<string, unknown>[] }][]
+    ).flatMap(([args]) => args.data);
+  const existing = { id: 'f1', name: 'National Code', type: 'TEXT' as const };
+  const dto = (
+    over: Partial<UpdateLeadCustomFieldDto> = {},
+  ): UpdateLeadCustomFieldDto => ({
+    name: 'National Code',
+    type: 'TEXT',
+    isActive: true,
+    ...over,
+  });
+
+  it('records a new field as CREATED with its key, type and options', async () => {
+    const { service, create, auditCreateMany } = makeService();
+    create.mockResolvedValue(
+      fieldRow({
+        id: 'f9',
+        key: 'cf_payment_method',
+        name: 'Payment Method',
+        type: 'DROP_DOWN',
+        position: 5,
+        options: [
+          { id: 'o1', label: 'COD', position: 1 },
+          { id: 'o2', label: 'Card', position: 2 },
+        ],
+      }),
+    );
+
+    await service.create({
+      name: 'Payment Method',
+      type: 'DROP_DOWN',
+      options: options('COD', 'Card'),
+    });
+
+    expect(auditRows(auditCreateMany)).toEqual([
+      {
+        entityType: 'CUSTOM_FIELD',
+        entityId: 'f9',
+        leadId: null,
+        action: 'CREATED',
+        actorType: 'USER',
+        actorId: 'admin-1',
+        source: 'lead-custom-fields.create',
+        before: undefined,
+        after: {
+          key: 'cf_payment_method',
+          name: 'Payment Method',
+          type: 'DROP_DOWN',
+          isActive: true,
+          options: ['COD', 'Card'],
+          position: 5,
+        },
+        metadata: undefined,
+      },
+    ]);
+  });
+
+  it('records a new label as RENAMED and the rest as one UPDATED', async () => {
+    const { service, findFirst, findUniqueOrThrow, update, auditCreateMany } =
+      makeService();
+    findFirst.mockResolvedValueOnce(existing).mockResolvedValueOnce(null);
+    findUniqueOrThrow.mockResolvedValue(fieldRow());
+    update.mockResolvedValue(
+      fieldRow({ name: 'Emirates ID', isActive: false }),
+    );
+
+    await service.update('f1', dto({ name: 'Emirates ID', isActive: false }));
+
+    expect(
+      auditRows(auditCreateMany).map((row) => [
+        row.action,
+        row.before,
+        row.after,
+      ]),
+    ).toEqual([
+      ['RENAMED', { name: 'National Code' }, { name: 'Emirates ID' }],
+      ['UPDATED', { isActive: true }, { isActive: false }],
+    ]);
+  });
+
+  it('records nothing when the field is saved unchanged, although its options are rewritten', async () => {
+    const { service, findFirst, optionDeleteMany, auditCreateMany } =
+      makeService();
+    findFirst.mockResolvedValueOnce(existing).mockResolvedValueOnce(null);
+
+    await service.update('f1', dto());
+
+    expect(optionDeleteMany).toHaveBeenCalled();
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('locks the field before reading the state it compares against', async () => {
+    const { service, findFirst, findUniqueOrThrow, $queryRaw } = makeService();
+    findFirst.mockResolvedValueOnce(existing).mockResolvedValueOnce(null);
+
+    await service.update('f1', dto());
+
+    expect($queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      findUniqueOrThrow.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('records a delete as DELETED with the forms it was removed from; a refused delete records nothing', async () => {
+    const deleted = makeService();
+    deleted.findFirst.mockResolvedValue({
+      id: 'f1',
+      key: 'cf_spare',
+      name: 'Spare',
+    });
+    deleted.findUniqueOrThrow.mockResolvedValue(
+      fieldRow({ key: 'cf_spare', name: 'Spare' }),
+    );
+    deleted.formFieldDeleteMany.mockResolvedValue({ count: 2 });
+
+    await deleted.service.remove('f1');
+
+    expect(auditRows(deleted.auditCreateMany)).toMatchObject([
+      {
+        entityType: 'CUSTOM_FIELD',
+        action: 'DELETED',
+        source: 'lead-custom-fields.delete',
+        before: { key: 'cf_spare', name: 'Spare' },
+        metadata: { removedFromForms: 2 },
+      },
+    ]);
+
+    const refused = makeService();
+    refused.findFirst.mockResolvedValue({ id: 'f1', key: 'cf_x', name: 'X' });
+    refused.valueCount.mockResolvedValue(3);
+    await expect(refused.service.remove('f1')).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(refused.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records nothing for an update refused before the write (type change over stored values)', async () => {
+    const { service, findFirst, valueCount, auditCreateMany } = makeService();
+    findFirst.mockResolvedValueOnce(existing).mockResolvedValueOnce(null);
+    valueCount.mockResolvedValue(7);
+
+    await expect(
+      service.update('f1', dto({ type: 'NUMBER' })),
+    ).rejects.toThrow();
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 });
 

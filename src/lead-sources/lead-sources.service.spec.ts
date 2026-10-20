@@ -17,26 +17,49 @@ function makeService() {
   const findMany = jest.fn().mockResolvedValue([]);
   const findFirst = jest.fn().mockResolvedValue(null);
   const findUnique = jest.fn();
-  const create = jest.fn();
-  const update = jest.fn();
-  const remove = jest.fn();
+  // The writes answer with the row as written, so the audit sees what the database would.
+  const create = jest
+    .fn()
+    .mockImplementation((args: DataCall) =>
+      Promise.resolve({ id: 'new', ...args.data }),
+    );
+  // The source as the locked read inside an update's transaction finds it (AUD-03).
+  const findUniqueOrThrow = jest
+    .fn()
+    .mockResolvedValue({ name: 'Website', isActive: true });
+  const update = jest
+    .fn()
+    .mockImplementation((args: DataCall) =>
+      Promise.resolve({ name: 'Website', isActive: true, ...args.data }),
+    );
+  const remove = jest
+    .fn()
+    .mockResolvedValue({ name: 'Website', isActive: true });
   const groupBy = jest.fn().mockResolvedValue([]);
   const leadCount = jest.fn().mockResolvedValue(0);
-  const leadUpdateMany = jest.fn();
-  const $transaction = jest.fn().mockResolvedValue([]);
+  const leadUpdateMany = jest.fn().mockResolvedValue({ count: 4 });
+  const auditCreateMany = jest.fn().mockResolvedValue({ count: 1 });
+  const $queryRaw = jest.fn().mockResolvedValue([]);
 
   const prisma = {
     leadSource: {
       findMany,
       findFirst,
       findUnique,
+      findUniqueOrThrow,
       create,
       update,
       delete: remove,
     },
     lead: { groupBy, count: leadCount, updateMany: leadUpdateMany },
-    $transaction,
+    auditEvent: { createMany: auditCreateMany },
+    $queryRaw,
   } as unknown as PrismaService;
+  // A callback gets the client as its transaction.
+  const $transaction = jest.fn((run: (tx: PrismaService) => Promise<unknown>) =>
+    run(prisma),
+  );
+  Object.assign(prisma, { $transaction });
 
   const currentUser = {
     resolve: jest
@@ -55,9 +78,18 @@ function makeService() {
     groupBy,
     leadCount,
     leadUpdateMany,
+    findUniqueOrThrow,
+    auditCreateMany,
+    $queryRaw,
     $transaction,
   };
 }
+
+/** The rows the audit write was asked for, in call order. */
+const auditRows = (auditCreateMany: jest.Mock) =>
+  (
+    auditCreateMany.mock.calls as [{ data: Record<string, unknown>[] }][]
+  ).flatMap(([args]) => args.data);
 
 const row = (over: Record<string, unknown> = {}) => ({
   id: 's1',
@@ -225,7 +257,9 @@ describe('LeadSourcesService.remove', () => {
     leadCount.mockResolvedValue(0);
 
     await expect(service.remove('s1')).resolves.toEqual({ id: 's1' });
-    expect(remove).toHaveBeenCalledWith({ where: { id: 's1' } });
+    expect(remove).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 's1' } }),
+    );
   });
 
   it('refuses to delete a source that leads still carry, and touches no lead', async () => {
@@ -259,5 +293,133 @@ describe('LeadSourcesService.remove', () => {
     await expect(service.remove('nope')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+});
+
+describe('LeadSourcesService — configuration audit (AUD-03)', () => {
+  it('records a new source as CREATED, by the signed-in user, in the create’s transaction', async () => {
+    const { service, findMany, auditCreateMany, $transaction } = makeService();
+    findMany.mockResolvedValue([row({ id: 'new', name: 'Broadcast' })]);
+
+    await service.create({ name: 'Broadcast' });
+
+    expect($transaction).toHaveBeenCalledTimes(1);
+    expect(auditRows(auditCreateMany)).toEqual([
+      {
+        entityType: 'LEAD_SOURCE',
+        entityId: 'new',
+        leadId: null,
+        action: 'CREATED',
+        actorType: 'USER',
+        actorId: 'admin-1',
+        source: 'lead-sources.create',
+        before: undefined,
+        after: { name: 'Broadcast', isActive: true },
+        metadata: undefined,
+      },
+    ]);
+  });
+
+  it('records a rename as RENAMED, with how many leads it relabelled', async () => {
+    const { service, findUnique, findMany, auditCreateMany } = makeService();
+    findUnique.mockResolvedValue({ id: 's1', name: 'Website', isActive: true });
+    findMany.mockResolvedValue([row({ name: 'Web Site' })]);
+
+    await service.update('s1', { name: 'Web Site' });
+
+    expect(auditRows(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityType: 'LEAD_SOURCE',
+        entityId: 's1',
+        action: 'RENAMED',
+        source: 'lead-sources.update',
+        before: { name: 'Website' },
+        after: { name: 'Web Site' },
+        metadata: { leadsRelabelled: 4 },
+      }),
+    ]);
+  });
+
+  it('records a deactivation as UPDATED, and nothing for a save that changes nothing', async () => {
+    const changed = makeService();
+    changed.findUnique.mockResolvedValue({
+      id: 's1',
+      name: 'Website',
+      isActive: true,
+    });
+    changed.findMany.mockResolvedValue([row({ isActive: false })]);
+    await changed.service.update('s1', { isActive: false });
+    expect(auditRows(changed.auditCreateMany)).toEqual([
+      expect.objectContaining({
+        action: 'UPDATED',
+        before: { isActive: true },
+        after: { isActive: false },
+      }),
+    ]);
+
+    const same = makeService();
+    same.findUnique.mockResolvedValue({
+      id: 's1',
+      name: 'Website',
+      isActive: true,
+    });
+    same.findMany.mockResolvedValue([row()]);
+    await same.service.update('s1', { name: 'Website', isActive: true });
+    expect(same.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('locks the source before reading the state it compares against', async () => {
+    const { service, findUnique, findMany, findUniqueOrThrow, $queryRaw } =
+      makeService();
+    findUnique.mockResolvedValue({ id: 's1', name: 'Website', isActive: true });
+    findMany.mockResolvedValue([row({ isActive: false })]);
+
+    await service.update('s1', { isActive: false });
+
+    expect($queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      findUniqueOrThrow.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('records a delete as DELETED with what the source was; a refused delete records nothing', async () => {
+    const deleted = makeService();
+    deleted.findUnique.mockResolvedValue({
+      id: 's1',
+      name: 'Website',
+      isActive: true,
+    });
+    await deleted.service.remove('s1');
+    expect(auditRows(deleted.auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityType: 'LEAD_SOURCE',
+        action: 'DELETED',
+        source: 'lead-sources.delete',
+        before: { name: 'Website', isActive: true },
+      }),
+    ]);
+
+    const refused = makeService();
+    refused.findUnique.mockResolvedValue({
+      id: 's1',
+      name: 'Website',
+      isActive: true,
+    });
+    refused.leadCount.mockResolvedValue(7);
+    await expect(refused.service.remove('s1')).rejects.toThrow(
+      /used by 7 leads/,
+    );
+    expect(refused.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records nothing when the rename cascade fails — the change and its event roll back together', async () => {
+    const { service, findUnique, leadUpdateMany, auditCreateMany } =
+      makeService();
+    findUnique.mockResolvedValue({ id: 's1', name: 'Website', isActive: true });
+    leadUpdateMany.mockRejectedValue(new Error('cascade failed'));
+
+    await expect(service.update('s1', { name: 'Web Site' })).rejects.toThrow(
+      'cascade failed',
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 });

@@ -9,6 +9,7 @@ import {
   IsUUID,
   MaxLength,
 } from 'class-validator';
+import { LogisticsStatus } from '../../generated/prisma/client';
 import { normalizeFilterValues } from '../../leads/lead-filter';
 import { MAX_FILTER_VALUES } from './no-activity-query.dto';
 import { MAX_TEAM_LENGTH } from './leads-by-status-query.dto';
@@ -23,10 +24,11 @@ const values = ({ value }: { value: unknown }): unknown =>
   normalizeFilterValues(value);
 
 /**
- * The Team Performance query (Teams v1). `from`/`to` are ISO instants the browser computes for
- * its own day edges — the lead-creation window by default, or the last status change with
- * `dateField=statusChanged`, as in Leads By Ownership. `team`, `agent` and
- * `source` accept repeated params; `manager` narrows to that Sales Manager's team.
+ * The Team Performance query (Teams v1), which the Financial Dashboard reads too. `from`/`to`
+ * are ISO instants the browser computes for its own day edges — the lead-creation window by
+ * default, the last status change with `dateField=statusChanged` as in Leads By Ownership, or
+ * the day the lead's Logistics order was created with `dateField=orderCreated`. `team`, `agent`
+ * and `source` accept repeated params; `manager` narrows to that Sales Manager's team.
  */
 export class TeamPerformanceQueryDto {
   @Transform(trim)
@@ -39,13 +41,16 @@ export class TeamPerformanceQueryDto {
   @IsOptional()
   to?: string;
 
-  /** Which lead date the window applies to: creation (default) or the last status change. */
+  /**
+   * Which date the window applies to: the lead's creation (default), its last status change, or
+   * the creation of its Logistics order.
+   */
   @Transform(trim)
-  @IsIn(['created', 'statusChanged'], {
-    message: 'dateField must be created or statusChanged',
+  @IsIn(['created', 'statusChanged', 'orderCreated'], {
+    message: 'dateField must be created, statusChanged or orderCreated',
   })
   @IsOptional()
-  dateField?: 'created' | 'statusChanged';
+  dateField?: 'created' | 'statusChanged' | 'orderCreated';
 
   @Transform(values)
   @IsArray({ message: 'team must be one or more values' })
@@ -91,12 +96,31 @@ export class TeamPerformanceQueryDto {
 }
 
 /**
- * The figures every row carries, over the leads created in the window:
+ * One Logistics status among a row's orders (Financial Dashboard v1): how many orders are in it
+ * now and Σ their Order Value — the amount recorded on the order (the lead's Actual Amount at
+ * conversion, or the Logistics Manager's correction), never a payment.
+ */
+export interface OrderStatusFigures {
+  status: LogisticsStatus;
+  orders: number;
+  /** AED, a Decimal string. */
+  value: string;
+  /** Of `orders`, those with no Order Value recorded: counted, but adding nothing to `value`. */
+  unvalued: number;
+}
+
+/**
+ * The figures every row carries, over the leads in the window:
  * - `leads`: leads in the row's set;
  * - `won`: those whose stage is WON now (the Converted Leads definition);
  * - `orders`: those that have a Logistics order, whatever its status since;
  * - `conversionRate`: won ÷ leads, a percentage to two places (0 with no leads);
- * - `wonValue`: Σ actualAmount of the won leads, AED, as a Decimal string.
+ * - `wonValue`: Σ actualAmount of the won leads, AED, as a Decimal string — a sales value, not
+ *   money received; `wonUnvalued` of the won leads have no Actual Amount;
+ * - `orderValue`: Σ Order Value of those orders, whatever their status (AED, Decimal string);
+ * - `orderStatus`: the orders by their status now — every status, in pipeline order, the counts
+ *   adding up to `orders` and the values to `orderValue`.
+ * No figure is a payment: what was received, is outstanding or was collected is not recorded yet.
  */
 export interface TeamPerformanceFigures {
   leads: number;
@@ -104,6 +128,9 @@ export interface TeamPerformanceFigures {
   orders: number;
   conversionRate: number;
   wonValue: string;
+  wonUnvalued: number;
+  orderValue: string;
+  orderStatus: OrderStatusFigures[];
 }
 
 /**

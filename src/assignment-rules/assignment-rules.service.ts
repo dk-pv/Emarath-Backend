@@ -5,6 +5,15 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { CurrentUserService } from '../auth/current-user';
+import {
+  AuditActor,
+  AuditState,
+  RENAME,
+  recordAuditEvents,
+  recordStateChange,
+  userActor,
+} from '../audit/audit-events';
 import {
   AssignmentRuleGroupDto,
   AssignmentRuleList,
@@ -37,6 +46,29 @@ const SELECT = {
 } satisfies Prisma.AssignmentRuleSelect;
 
 type Selected = Prisma.AssignmentRuleGetPayload<{ select: typeof SELECT }>;
+
+/** A rule as its audit events describe it (AUD-03): its groups in order, as the engine reads them. */
+function ruleState(row: Selected): AuditState {
+  return {
+    name: row.name,
+    description: row.description,
+    algorithm: row.algorithm,
+    status: row.status,
+    groups: row.groups.map((group) => ({
+      name: group.name,
+      applyTo: group.applyTo,
+      target: group.target,
+    })),
+  };
+}
+
+const ruleEvent = (id: string, actor: AuditActor, source: string) => ({
+  entityType: 'ASSIGNMENT_RULE' as const,
+  entityId: id,
+  leadId: null,
+  actor,
+  source,
+});
 
 function toRow(row: Selected): AssignmentRuleRow {
   return {
@@ -83,7 +115,10 @@ const toGroupRows = (groups: AssignmentRuleGroupDto[]) =>
  */
 @Injectable()
 export class AssignmentRulesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly currentUser: CurrentUserService,
+  ) {}
 
   async list(query: ListAssignmentRulesQueryDto): Promise<AssignmentRuleList> {
     const page = query.page ?? 1;
@@ -126,16 +161,30 @@ export class AssignmentRulesService {
   ): Promise<AssignmentRuleRow> {
     await this.assertNameFree(dto.name, null);
 
-    const created = await this.prisma.assignmentRule.create({
-      data: {
-        name: dto.name,
-        description: dto.description,
-        algorithm: dto.algorithm,
-        status: dto.status,
-        createdById: actorId,
-        groups: { create: toGroupRows(dto.groups) },
-      },
-      select: SELECT,
+    const created = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.assignmentRule.create({
+        data: {
+          name: dto.name,
+          description: dto.description,
+          algorithm: dto.algorithm,
+          status: dto.status,
+          createdById: actorId,
+          groups: { create: toGroupRows(dto.groups) },
+        },
+        select: SELECT,
+      });
+      await recordAuditEvents(tx, [
+        {
+          ...ruleEvent(
+            row.id,
+            userActor({ id: actorId }),
+            'assignment-rules.create',
+          ),
+          action: 'CREATED',
+          after: ruleState(row),
+        },
+      ]);
+      return row;
     });
     return toRow(created);
   }
@@ -144,7 +193,8 @@ export class AssignmentRulesService {
    * Edits the rule in place. Groups, when sent, replace the whole list in one transaction:
    * the wizard hands back the finished set rather than a diff, and rewriting the list is
    * the only way a reorder, a rename and a deletion can land together without a moment
-   * where two groups hold the same position.
+   * where two groups hold the same position. The rule is compared whole, under a lock, with
+   * what was there, so resending it unchanged records nothing (AUD-03).
    */
   async update(
     id: string,
@@ -155,7 +205,13 @@ export class AssignmentRulesService {
 
     const groups = dto.groups;
 
+    const actor = userActor(await this.currentUser.resolve());
     await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM assignment_rules WHERE id = ${id}::uuid FOR UPDATE`;
+      const before = await tx.assignmentRule.findUniqueOrThrow({
+        where: { id },
+        select: SELECT,
+      });
       if (groups) {
         await tx.assignmentRuleGroup.deleteMany({ where: { ruleId: id } });
       }
@@ -172,6 +228,17 @@ export class AssignmentRulesService {
         },
         select: { id: true },
       });
+      const after = await tx.assignmentRule.findUniqueOrThrow({
+        where: { id },
+        select: SELECT,
+      });
+      await recordStateChange(
+        tx,
+        ruleEvent(id, actor, 'assignment-rules.update'),
+        ruleState(before),
+        ruleState(after),
+        [RENAME],
+      );
     });
 
     return this.byId(id);
@@ -181,10 +248,25 @@ export class AssignmentRulesService {
   async remove(id: string): Promise<{ id: string }> {
     await this.requireLive(id);
 
-    await this.prisma.assignmentRule.update({
-      where: { id },
-      data: { deletedAt: new Date() },
-      select: { id: true },
+    const actor = userActor(await this.currentUser.resolve());
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM assignment_rules WHERE id = ${id}::uuid FOR UPDATE`;
+      const before = await tx.assignmentRule.findUniqueOrThrow({
+        where: { id },
+        select: SELECT,
+      });
+      await tx.assignmentRule.update({
+        where: { id },
+        data: { deletedAt: new Date() },
+        select: { id: true },
+      });
+      await recordAuditEvents(tx, [
+        {
+          ...ruleEvent(id, actor, 'assignment-rules.delete'),
+          action: 'DELETED',
+          before: ruleState(before),
+        },
+      ]);
     });
     return { id };
   }

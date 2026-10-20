@@ -7,7 +7,13 @@ import {
 import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CurrentUserService } from '../auth/current-user';
-import { recordAuditEvents, userActor } from '../audit/audit-events';
+import {
+  AuditState,
+  RENAME,
+  recordAuditEvents,
+  recordStateChange,
+  userActor,
+} from '../audit/audit-events';
 import { assertPipelineOpen } from '../pipelines/pipeline-access';
 import { CONVERTED_STATUS } from '../reports/converted-leads-where';
 import { QC_REJECTED_LEAD_STATUS } from '../logistics/logistics-status';
@@ -30,6 +36,22 @@ const STAGE_SELECT = {
   probability: true,
   requireFollowUp: true,
 } satisfies Prisma.StageSelect;
+
+type StageRow = Prisma.StageGetPayload<{ select: typeof STAGE_SELECT }>;
+
+/** A stage as its audit events describe it (AUD-03); each event names the pipeline in metadata. */
+function stageState(row: StageRow): AuditState {
+  return {
+    name: row.name,
+    color: row.color,
+    position: row.position,
+    isClosed: row.isClosed,
+    outcome: row.outcome,
+    inclusion: row.inclusion,
+    probability: row.probability,
+    requireFollowUp: row.requireFollowUp,
+  };
+}
 
 /**
  * The Sales Pipeline wizard's fields, taken off a DTO only where the caller sent them
@@ -132,19 +154,42 @@ export class StagesService {
       select: { position: true },
     });
 
-    return this.prisma.stage.create({
-      data: {
-        pipeline,
-        name,
-        color,
-        position: last ? last.position + 1 : 0,
-        ...wizardFields(dto),
-      },
-      select: STAGE_SELECT,
+    const actor = userActor(await this.currentUser.resolve());
+    return this.prisma.$transaction(async (tx) => {
+      const row = await tx.stage.create({
+        data: {
+          pipeline,
+          name,
+          color,
+          position: last ? last.position + 1 : 0,
+          ...wizardFields(dto),
+        },
+        select: STAGE_SELECT,
+      });
+      await recordAuditEvents(tx, [
+        {
+          entityType: 'STAGE',
+          entityId: row.id,
+          leadId: null,
+          action: 'CREATED',
+          actor,
+          source: 'stages.create',
+          after: stageState(row),
+          metadata: { pipeline },
+        },
+      ]);
+      return row;
     });
   }
 
-  /** Renames and/or recolours a stage (AC2); a rename cascades to its leads. */
+  /**
+   * Renames, recolours and/or reconfigures a stage (AC2); a rename cascades to its leads.
+   *
+   * The change, a rename's lead cascade and its events commit together, read and compared under
+   * a lock on the stage. A rename relabels leads without moving any of them, so it is recorded
+   * once, on the stage (ADR-0083) — no lead gets a STATUS_CHANGED event. Any other field that
+   * changed is one UPDATED; a save that changes nothing records nothing (AUD-03).
+   */
   async update(id: string, dto: UpdateStageDto): Promise<StageResponse> {
     const stage = await this.prisma.stage.findUnique({
       where: { id },
@@ -157,7 +202,8 @@ export class StagesService {
     if (dto.color !== undefined) data.color = dto.color;
 
     const newName = dto.name;
-    if (newName !== undefined && newName !== stage.name) {
+    const renaming = newName !== undefined && newName !== stage.name;
+    if (renaming) {
       guardReservedStageName(stage.name, newName);
       const nameClash = await this.prisma.stage.findUnique({
         where: { pipeline_name: { pipeline: stage.pipeline, name: newName } },
@@ -168,46 +214,52 @@ export class StagesService {
           `A stage named “${newName}” already exists.`,
         );
       }
-      // The rename and the lead cascade succeed or fail together — a stage name and
-      // the statuses that point at it must never end up out of step. The rename is
-      // recorded once, on the stage, in the same transaction (ADR-0083): it relabels
-      // leads without moving any of them, so no lead gets a STATUS_CHANGED event.
-      const user = await this.currentUser.resolve();
-      const [updated] = await this.prisma.$transaction([
-        this.prisma.stage.update({
-          where: { id },
-          data: { ...data, name: newName },
-          select: STAGE_SELECT,
-        }),
-        this.prisma.lead.updateMany({
-          where: { status: stage.name, pipeline: stage.pipeline },
-          data: { status: newName },
-        }),
-        recordAuditEvents(this.prisma, [
-          {
-            entityType: 'STAGE',
-            entityId: stage.id,
-            leadId: null,
-            action: 'RENAMED',
-            actor: userActor(user),
-            source: 'stages.update',
-            before: { name: stage.name },
-            after: { name: newName },
-            metadata: { pipeline: stage.pipeline },
-          },
-        ]),
-      ]);
-      return updated;
+      data.name = newName;
     }
 
-    return this.prisma.stage.update({
-      where: { id },
-      data,
-      select: STAGE_SELECT,
+    // The rename and the lead cascade succeed or fail together — a stage name and the
+    // statuses that point at it must never end up out of step.
+    const actor = userActor(await this.currentUser.resolve());
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM stages WHERE id = ${id}::uuid FOR UPDATE`;
+      const before = await tx.stage.findUniqueOrThrow({
+        where: { id },
+        select: STAGE_SELECT,
+      });
+      const updated = await tx.stage.update({
+        where: { id },
+        data,
+        select: STAGE_SELECT,
+      });
+      if (renaming) {
+        await tx.lead.updateMany({
+          where: { status: before.name, pipeline: before.pipeline },
+          data: { status: newName },
+        });
+      }
+      await recordStateChange(
+        tx,
+        {
+          entityType: 'STAGE',
+          entityId: id,
+          leadId: null,
+          actor,
+          source: 'stages.update',
+          metadata: { pipeline: before.pipeline },
+        },
+        stageState(before),
+        stageState(updated),
+        [RENAME],
+      );
+      return updated;
     });
   }
 
-  /** Persists a new stage order for a pipeline (AC3). */
+  /**
+   * Persists a new stage order for a pipeline (AC3). The order belongs to the pipeline, so it
+   * is recorded once, on the pipeline, as its stage names before and after — not as a move per
+   * stage whose position shifted; sending the current order records nothing (AUD-03).
+   */
   async reorder(dto: ReorderStagesDto): Promise<StageResponse[]> {
     const { pipeline, orderedIds } = dto;
     await this.assertMayManage(pipeline);
@@ -231,11 +283,36 @@ export class StagesService {
       );
     }
 
-    await this.prisma.$transaction(
-      orderedIds.map((eachId, position) =>
-        this.prisma.stage.update({ where: { id: eachId }, data: { position } }),
-      ),
-    );
+    const actor = userActor(await this.currentUser.resolve());
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM stages WHERE pipeline = ${pipeline} ORDER BY id FOR UPDATE`;
+      const current = await tx.stage.findMany({
+        where: { pipeline },
+        select: { id: true, name: true },
+        orderBy: { position: 'asc' },
+      });
+      for (const [position, eachId] of orderedIds.entries()) {
+        await tx.stage.update({ where: { id: eachId }, data: { position } });
+      }
+      const owner = await tx.pipeline.findUnique({
+        where: { name: pipeline },
+        select: { id: true },
+      });
+      if (!owner) return;
+      const names = new Map(current.map((each) => [each.id, each.name]));
+      await recordStateChange(
+        tx,
+        {
+          entityType: 'PIPELINE',
+          entityId: owner.id,
+          leadId: null,
+          actor,
+          source: 'stages.reorder',
+        },
+        { stageOrder: current.map((each) => each.name) },
+        { stageOrder: orderedIds.map((eachId) => names.get(eachId) ?? eachId) },
+      );
+    });
 
     return this.list(pipeline);
   }
@@ -271,7 +348,25 @@ export class StagesService {
       );
     }
 
-    await this.prisma.stage.delete({ where: { id } });
+    const actor = userActor(await this.currentUser.resolve());
+    await this.prisma.$transaction(async (tx) => {
+      const removed = await tx.stage.delete({
+        where: { id },
+        select: STAGE_SELECT,
+      });
+      await recordAuditEvents(tx, [
+        {
+          entityType: 'STAGE',
+          entityId: id,
+          leadId: null,
+          action: 'DELETED',
+          actor,
+          source: 'stages.delete',
+          before: stageState(removed),
+          metadata: { pipeline: removed.pipeline },
+        },
+      ]);
+    });
     return { id };
   }
 }

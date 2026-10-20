@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { Prisma, UserRole } from '../generated/prisma/client';
+import { LogisticsStatus, Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { ASSIGNABLE_ROLES } from '../auth/role-groups';
 import { PrismaService } from '../prisma/prisma.service';
@@ -22,14 +22,6 @@ const HAS_ORDER: Prisma.LeadWhereInput = { logisticsOrder: { isNot: null } };
 /** ponytail: the staff directory in one read; page the options if it ever nears this. */
 const MAX_OPTIONS = 1000;
 
-const NO_FIGURES: TeamPerformanceFigures = {
-  leads: 0,
-  won: 0,
-  orders: 0,
-  conversionRate: 0,
-  wonValue: '0',
-};
-
 /**
  * Whose rows the caller may see. `teams` null means every team; an empty list means the filters
  * left nothing. A sales agent — and a Sales Manager with no team, whose lead scope is their own
@@ -37,20 +29,60 @@ const NO_FIGURES: TeamPerformanceFigures = {
  */
 type Scope = { self: true } | { self: false; teams: string[] | null };
 
+/** A row's orders in one status: how many, Σ their Order Value, and how many carry one. */
+interface StatusTally {
+  orders: number;
+  value: Prisma.Decimal;
+  valued: number;
+}
+
+type OrderTally = Map<LogisticsStatus, StatusTally>;
+
+function addOrder(
+  tally: OrderTally,
+  status: LogisticsStatus,
+  value: Prisma.Decimal | null,
+): void {
+  const row = tally.get(status) ?? { orders: 0, value: ZERO, valued: 0 };
+  tally.set(status, {
+    orders: row.orders + 1,
+    value: value ? row.value.add(value) : row.value,
+    valued: row.valued + (value ? 1 : 0),
+  });
+}
+
 function figures(
   leads: number,
   won: number,
   orders: number,
   wonValue: Prisma.Decimal,
+  wonUnvalued: number,
+  tally: OrderTally,
 ): TeamPerformanceFigures {
+  let orderValue = ZERO;
+  const orderStatus = Object.values(LogisticsStatus).map((status) => {
+    const row = tally.get(status) ?? { orders: 0, value: ZERO, valued: 0 };
+    orderValue = orderValue.add(row.value);
+    return {
+      status,
+      orders: row.orders,
+      value: row.value.toString(),
+      unvalued: row.orders - row.valued,
+    };
+  });
   return {
     leads,
     won,
     orders,
     conversionRate: leads > 0 ? Math.round((won / leads) * 10000) / 100 : 0,
     wonValue: wonValue.toString(),
+    wonUnvalued,
+    orderValue: orderValue.toString(),
+    orderStatus,
   };
 }
+
+const NO_FIGURES = figures(0, 0, 0, ZERO, 0, new Map());
 
 function intersect(current: string[] | null, allowed: string[]): string[] {
   return current === null
@@ -65,7 +97,10 @@ const countsBy = (
 
 /**
  * Team Performance (Teams v1, client acceptance criterion 11): teams and BDEs compared on leads,
- * won leads, orders, conversion and target achievement, over the leads created in the window.
+ * won leads, orders, conversion and target achievement, over the leads in the window. The
+ * Financial Dashboard (acceptance criterion 13) reads the same rows: each also carries its orders'
+ * value and their split by Logistics status, so the money figures and the counts come from one
+ * scoped set and can never disagree.
  *
  * Every figure is read over `buildLeadsByOwnershipWhere` — the caller's lead scope, the window,
  * source, BDE and team — so nothing here reaches a lead the caller could not open. The counting
@@ -240,7 +275,7 @@ export class TeamPerformanceService {
     and: (extra: Prisma.LeadWhereInput) => Prisma.LeadWhereInput,
   ): Promise<TeamPerformancePersonRow[]> {
     const teams = scope.self ? null : scope.teams;
-    const [owned, won, orders, wonRows, members] = await Promise.all([
+    const [owned, won, orders, wonRows, ordered, members] = await Promise.all([
       this.prisma.leadAssignment.groupBy({
         by: ['userId'],
         where: { lead: where },
@@ -262,6 +297,18 @@ export class TeamPerformanceService {
         where: { lead: and(WON) },
         select: { userId: true, lead: { select: { actualAmount: true } } },
       }),
+      // ponytail: likewise each owner's orders, tallied in-app by status.
+      this.prisma.leadAssignment.findMany({
+        where: { lead: and(HAS_ORDER) },
+        select: {
+          userId: true,
+          lead: {
+            select: {
+              logisticsOrder: { select: { status: true, orderValue: true } },
+            },
+          },
+        },
+      }),
       scope.self ? [] : this.teamMemberIds(teams),
     ]);
 
@@ -269,11 +316,24 @@ export class TeamPerformanceService {
     const wonCounts = countsBy(won);
     const orderCounts = countsBy(orders);
     const wonValue = new Map<string, Prisma.Decimal>();
+    const wonUnvalued = new Map<string, number>();
     for (const row of wonRows) {
       wonValue.set(
         row.userId,
         (wonValue.get(row.userId) ?? ZERO).add(row.lead.actualAmount ?? ZERO),
       );
+      if (!row.lead.actualAmount) {
+        wonUnvalued.set(row.userId, (wonUnvalued.get(row.userId) ?? 0) + 1);
+      }
+    }
+    const orderTallies = new Map<string, OrderTally>();
+    for (const row of ordered) {
+      const order = row.lead.logisticsOrder;
+      if (!order) continue;
+      const tally: OrderTally =
+        orderTallies.get(row.userId) ?? new Map<LogisticsStatus, StatusTally>();
+      addOrder(tally, order.status, order.orderValue);
+      orderTallies.set(row.userId, tally);
     }
 
     let ids = scope.self
@@ -309,6 +369,9 @@ export class TeamPerformanceService {
             wonCounts.get(account.id) ?? 0,
             orderCounts.get(account.id) ?? 0,
             value,
+            wonUnvalued.get(account.id) ?? 0,
+            orderTallies.get(account.id) ??
+              new Map<LogisticsStatus, StatusTally>(),
           ),
           target: account.monthlyGoalAmount?.toString() ?? null,
           achievement: achievementPercent(value, account.monthlyGoalAmount),
@@ -320,7 +383,7 @@ export class TeamPerformanceService {
   /**
    * One row per team in view: the teams filtered to, or else every team the BDE rows belong to —
    * with a "no team" row when some of them have none.
-   * ponytail: four counts per team; one grouped raw query if teams ever number in dozens.
+   * ponytail: five reads per team; one grouped raw query if teams ever number in dozens.
    */
   private async teams(
     scope: Scope,
@@ -387,19 +450,43 @@ export class TeamPerformanceService {
     );
   }
 
-  /** The figures over one lead set, each lead once. */
+  /** The figures over one lead set, each lead — and so each order — once. */
   private async figuresOver(
     where: Prisma.LeadWhereInput,
   ): Promise<TeamPerformanceFigures> {
-    const [leads, won, orders, value] = await Promise.all([
+    const [leads, won, orders, value, statuses] = await Promise.all([
       this.prisma.lead.count({ where }),
       this.prisma.lead.count({ where: { AND: [where, WON] } }),
       this.prisma.lead.count({ where: { AND: [where, HAS_ORDER] } }),
       this.prisma.lead.aggregate({
         where: { AND: [where, WON] },
         _sum: { actualAmount: true },
+        _count: { actualAmount: true },
+      }),
+      this.prisma.logisticsOrder.groupBy({
+        by: ['status'],
+        where: { lead: where },
+        _count: { _all: true, orderValue: true },
+        _sum: { orderValue: true },
       }),
     ]);
-    return figures(leads, won, orders, value._sum.actualAmount ?? ZERO);
+    const tally: OrderTally = new Map(
+      statuses.map((group) => [
+        group.status,
+        {
+          orders: group._count._all,
+          value: group._sum.orderValue ?? ZERO,
+          valued: group._count.orderValue,
+        },
+      ]),
+    );
+    return figures(
+      leads,
+      won,
+      orders,
+      value._sum.actualAmount ?? ZERO,
+      won - value._count.actualAmount,
+      tally,
+    );
   }
 }

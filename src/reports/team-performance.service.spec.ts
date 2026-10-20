@@ -2,7 +2,7 @@ import { BadRequestException, RequestMethod } from '@nestjs/common';
 import { METHOD_METADATA } from '@nestjs/common/constants';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { Prisma, UserRole } from '../generated/prisma/client';
+import { LogisticsStatus, Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { ROLES_KEY } from '../auth/roles.decorator';
 import { PrismaService } from '../prisma/prisma.service';
@@ -19,12 +19,24 @@ const ADMIN = '00000000-0000-4000-8000-00000000000a';
 
 const dec = (value: string) => new Prisma.Decimal(value);
 
-/** What one lead set holds, as the four reads over it return it. */
+/** One status among a set's orders: how many, Σ their value, and how many carry a value. */
+interface StatusSet {
+  orders: number;
+  value: string;
+  valued?: number;
+}
+
+type Statuses = Partial<Record<LogisticsStatus, StatusSet>>;
+
+/** What one lead set holds, as the reads over it return it. */
 interface LeadSet {
   leads: number;
   won: number;
   orders: number;
   wonValue: string;
+  /** Won leads with no Actual Amount. */
+  wonUnvalued?: number;
+  statuses?: Statuses;
 }
 
 interface Account {
@@ -46,6 +58,12 @@ interface Options {
   ordersBy?: Record<string, number>;
   /** The won assignments the service sums per owner. */
   wonRows?: { userId: string; amount: string | null }[];
+  /** The assignments of leads with an order, as the service tallies them per owner. */
+  orderRows?: {
+    userId: string;
+    status: LogisticsStatus;
+    value: string | null;
+  }[];
   /** Active lead-handling team members (zero rows for those without leads). */
   members?: string[];
   accounts?: Account[];
@@ -54,12 +72,28 @@ interface Options {
   manager?: { team: string | null } | null;
 }
 
-const set = (leads: number, won = 0, orders = 0, wonValue = '0'): LeadSet => ({
+const set = (
+  leads: number,
+  won = 0,
+  orders = 0,
+  wonValue = '0',
+  statuses: Statuses = {},
+): LeadSet => ({
   leads,
   won,
   orders,
   wonValue,
+  statuses,
 });
+
+/** Every status in pipeline order, as a figures row carries them: zero unless given. */
+const byStatus = (
+  given: Partial<Record<LogisticsStatus, [number, string, number?]>> = {},
+) =>
+  Object.values(LogisticsStatus).map((status) => {
+    const [orders, value, unvalued] = given[status] ?? [0, '0'];
+    return { status, orders, value, unvalued: unvalued ?? 0 };
+  });
 
 const json = (value: unknown) => JSON.stringify(value);
 
@@ -88,6 +122,7 @@ function makeService(options: Options = {}) {
     wonBy = {},
     ordersBy = {},
     wonRows = [],
+    orderRows = [],
     members = [],
     accounts = [],
     teamGroups = [],
@@ -103,10 +138,23 @@ function makeService(options: Options = {}) {
     const { won, order } = read(args.where);
     return Promise.resolve(won ? lead.won : order ? lead.orders : lead.leads);
   });
-  const aggregate = jest.fn((args: { where: unknown }) =>
-    Promise.resolve({
-      _sum: { actualAmount: dec(setFor(args.where).wonValue) },
-    }),
+  const aggregate = jest.fn((args: { where: unknown }) => {
+    const lead = setFor(args.where);
+    return Promise.resolve({
+      _sum: { actualAmount: dec(lead.wonValue) },
+      _count: { actualAmount: lead.won - (lead.wonUnvalued ?? 0) },
+    });
+  });
+  const orderGroupBy = jest.fn((args: { where: { lead: unknown } }) =>
+    Promise.resolve(
+      Object.entries(setFor(args.where.lead).statuses ?? {}).map(
+        ([status, row]) => ({
+          status,
+          _count: { _all: row.orders, orderValue: row.valued ?? row.orders },
+          _sum: { orderValue: row.orders ? dec(row.value) : null },
+        }),
+      ),
+    ),
   );
   const groups = (counts: Record<string, number>) =>
     Object.entries(counts).map(([userId, n]) => ({
@@ -138,13 +186,26 @@ function makeService(options: Options = {}) {
     lead: { count, aggregate },
     leadAssignment: {
       groupBy: assignmentGroupBy,
-      findMany: jest.fn().mockResolvedValue(
-        wonRows.map((row) => ({
-          userId: row.userId,
-          lead: { actualAmount: row.amount ? dec(row.amount) : null },
-        })),
+      findMany: jest.fn((args: { where: { lead: unknown } }) =>
+        Promise.resolve(
+          read(args.where.lead).order
+            ? orderRows.map((row) => ({
+                userId: row.userId,
+                lead: {
+                  logisticsOrder: {
+                    status: row.status,
+                    orderValue: row.value ? dec(row.value) : null,
+                  },
+                },
+              }))
+            : wonRows.map((row) => ({
+                userId: row.userId,
+                lead: { actualAmount: row.amount ? dec(row.amount) : null },
+              })),
+        ),
       ),
     },
+    logisticsOrder: { groupBy: orderGroupBy },
     user: {
       findMany: userFindMany,
       findFirst: jest.fn().mockResolvedValue(manager),
@@ -164,6 +225,7 @@ function makeService(options: Options = {}) {
     service: new TeamPerformanceService(prisma, currentUser),
     count,
     aggregate,
+    orderGroupBy,
     userFindMany,
     userGroupBy,
   };
@@ -189,10 +251,24 @@ const account = (
 /*
   The org-wide picture the counting rules are read against: Ana and Cy in Alpha share one lead
   (owner rows 7 + 4, Alpha 10), Ben has no team, Zed is in Alpha with nothing yet.
+  Five orders: Ana and Cy share a delivered one (1500); Ana has another delivered (1000) and an
+  RTO (800); Cy a cancelled one with no value recorded; Ben a dispatched one (2000).
 */
 const ORG: Options = {
-  total: set(14, 4, 5, '6000'),
-  teams: { Alpha: set(10, 3, 4, '4000'), null: set(5, 1, 1, '2000') },
+  total: set(14, 4, 5, '6000', {
+    DISPATCHED: { orders: 1, value: '2000' },
+    DELIVERED: { orders: 2, value: '2500' },
+    CANCELLED: { orders: 1, value: '0', valued: 0 },
+    RTO: { orders: 1, value: '800' },
+  }),
+  teams: {
+    Alpha: set(10, 3, 4, '4000', {
+      DELIVERED: { orders: 2, value: '2500' },
+      CANCELLED: { orders: 1, value: '0', valued: 0 },
+      RTO: { orders: 1, value: '800' },
+    }),
+    null: set(5, 1, 1, '2000', { DISPATCHED: { orders: 1, value: '2000' } }),
+  },
   owned: { [ANA]: 7, [CY]: 4, [BEN]: 5 },
   wonBy: { [ANA]: 2, [CY]: 2, [BEN]: 1 },
   ordersBy: { [ANA]: 3, [CY]: 2, [BEN]: 1 },
@@ -202,6 +278,14 @@ const ORG: Options = {
     { userId: CY, amount: '1000' },
     { userId: CY, amount: '1500' },
     { userId: BEN, amount: '2000' },
+  ],
+  orderRows: [
+    { userId: ANA, status: LogisticsStatus.DELIVERED, value: '1500' },
+    { userId: CY, status: LogisticsStatus.DELIVERED, value: '1500' },
+    { userId: ANA, status: LogisticsStatus.DELIVERED, value: '1000' },
+    { userId: ANA, status: LogisticsStatus.RTO, value: '800' },
+    { userId: CY, status: LogisticsStatus.CANCELLED, value: null },
+    { userId: BEN, status: LogisticsStatus.DISPATCHED, value: '2000' },
   ],
   members: [ANA, CY, ZED],
   accounts: [
@@ -229,6 +313,9 @@ describe('TeamPerformanceService.report — the counting rules', () => {
         orders: 3,
         conversionRate: 28.57,
         wonValue: '2500',
+        wonUnvalued: 0,
+        orderValue: '3300',
+        orderStatus: byStatus({ DELIVERED: [2, '2500'], RTO: [1, '800'] }),
         target: '5000',
         achievement: 50,
       },
@@ -253,6 +340,8 @@ describe('TeamPerformanceService.report — the counting rules', () => {
         orders: 0,
         conversionRate: 0,
         wonValue: '0',
+        orderValue: '0',
+        orderStatus: byStatus(),
         target: '0',
         achievement: null,
       }),
@@ -272,6 +361,13 @@ describe('TeamPerformanceService.report — the counting rules', () => {
         orders: 4,
         conversionRate: 30,
         wonValue: '4000',
+        wonUnvalued: 0,
+        orderValue: '3300',
+        orderStatus: byStatus({
+          DELIVERED: [2, '2500'],
+          CANCELLED: [1, '0', 1],
+          RTO: [1, '800'],
+        }),
         members: 3,
         target: '8000',
         achievement: 50,
@@ -283,6 +379,9 @@ describe('TeamPerformanceService.report — the counting rules', () => {
         orders: 1,
         conversionRate: 20,
         wonValue: '2000',
+        wonUnvalued: 0,
+        orderValue: '2000',
+        orderStatus: byStatus({ DISPATCHED: [1, '2000'] }),
         members: null,
         target: null,
         achievement: null,
@@ -309,6 +408,14 @@ describe('TeamPerformanceService.report — the counting rules', () => {
       orders: 5,
       conversionRate: 28.57,
       wonValue: '6000',
+      wonUnvalued: 0,
+      orderValue: '5300',
+      orderStatus: byStatus({
+        DISPATCHED: [1, '2000'],
+        DELIVERED: [2, '2500'],
+        CANCELLED: [1, '0', 1],
+        RTO: [1, '800'],
+      }),
     });
   });
 
@@ -320,8 +427,142 @@ describe('TeamPerformanceService.report — the counting rules', () => {
     expect(result).toEqual({
       teams: [],
       people: [],
-      total: { leads: 0, won: 0, orders: 0, conversionRate: 0, wonValue: '0' },
+      total: {
+        leads: 0,
+        won: 0,
+        orders: 0,
+        conversionRate: 0,
+        wonValue: '0',
+        wonUnvalued: 0,
+        orderValue: '0',
+        orderStatus: byStatus(),
+      },
     });
+  });
+});
+
+describe('TeamPerformanceService.report — order value and outcomes (Financial Dashboard v1)', () => {
+  it('tallies each BDE’s orders by status, a shared order counting for each owner', async () => {
+    const { service } = makeService(ORG);
+
+    const { people } = await service.report(query());
+    const row = (name: string) => people.find((person) => person.name === name);
+
+    expect(row('Cy')).toMatchObject({
+      orders: 2,
+      orderValue: '1500',
+      orderStatus: byStatus({ DELIVERED: [1, '1500'], CANCELLED: [1, '0', 1] }),
+    });
+    expect(row('Ben')).toMatchObject({
+      orderValue: '2000',
+      orderStatus: byStatus({ DISPATCHED: [1, '2000'] }),
+    });
+  });
+
+  it('keeps the statuses in pipeline order, their counts adding up to the orders and their values to the order value', async () => {
+    const { service } = makeService(ORG);
+
+    const { total, teams, people } = await service.report(query());
+
+    for (const figures of [total, ...teams, ...people]) {
+      expect(figures.orderStatus.map((row) => row.status)).toEqual(
+        Object.values(LogisticsStatus),
+      );
+      expect(
+        figures.orderStatus.reduce((sum, row) => sum + row.orders, 0),
+      ).toBe(figures.orders);
+      expect(
+        figures.orderStatus
+          .reduce((sum, row) => sum.add(row.value), dec('0'))
+          .toString(),
+      ).toBe(figures.orderValue);
+    }
+  });
+
+  it('counts won leads with no Actual Amount apart, adding nothing to the won value', async () => {
+    const { service } = makeService({
+      total: { ...set(3, 3, 0, '1200'), wonUnvalued: 1 },
+      owned: { [ANA]: 3 },
+      wonBy: { [ANA]: 3 },
+      wonRows: [
+        { userId: ANA, amount: '1200' },
+        { userId: ANA, amount: null },
+        { userId: ANA, amount: '0' },
+      ],
+      accounts: [account(ANA, 'Ana', null)],
+    });
+
+    const { total, people } = await service.report(query());
+
+    expect(total).toMatchObject({ won: 3, wonValue: '1200', wonUnvalued: 1 });
+    // A recorded zero is a value; only a missing one is unvalued.
+    expect(people[0]).toMatchObject({
+      won: 3,
+      wonValue: '1200',
+      wonUnvalued: 1,
+    });
+  });
+
+  it('reads the orders under the same scoped where as every other figure — an agent’s own leads only', async () => {
+    const { service, count, orderGroupBy } = makeService({
+      ...ORG,
+      user: { id: ANA, role: UserRole.SALES_AGENT, team: 'Alpha' },
+    });
+
+    await service.report(query({ source: ['Facebook'] }));
+
+    const leadWhere = (count.mock.calls as [{ where: unknown }][])[0][0].where;
+    const orderWhere = (
+      orderGroupBy.mock.calls as [{ where: { lead: unknown } }][]
+    )[0][0].where.lead;
+    expect(orderWhere).toEqual(leadWhere);
+    expect(json(orderWhere)).toContain(
+      `"assignments":{"some":{"userId":"${ANA}"}}`,
+    );
+  });
+
+  it('reads each team’s orders over that team’s leads', async () => {
+    const { service, orderGroupBy } = makeService(ORG);
+
+    await service.report(query());
+
+    const wheres = (
+      orderGroupBy.mock.calls as [{ where: { lead: unknown } }][]
+    ).map(([args]) => json(args.where.lead));
+    expect(wheres).toHaveLength(3);
+    expect(
+      wheres.filter((where) =>
+        where.includes('"assignments":{"some":{"user":{"team":"Alpha"}}}'),
+      ),
+    ).toHaveLength(1);
+    expect(
+      wheres.filter((where) =>
+        where.includes('"assignments":{"some":{"user":{"team":null}}}'),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('reports no payment: no figure is named for money received, outstanding, collected or profit', async () => {
+    const { service } = makeService(ORG);
+
+    const result = await service.report(query());
+
+    const keys = new Set<string>();
+    const walk = (value: unknown) => {
+      if (Array.isArray(value)) value.forEach(walk);
+      else if (value && typeof value === 'object') {
+        for (const [key, inner] of Object.entries(value)) {
+          keys.add(key);
+          walk(inner);
+        }
+      }
+    };
+    walk(result);
+    expect(
+      [...keys].filter((key) =>
+        /pay|paid|receiv|collect|outstand|profit|cost|margin/i.test(key),
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -363,6 +604,33 @@ describe('TeamPerformanceService.report — filters', () => {
       '"statusChangedAt":{"gte":"2026-10-01T00:00:00.000Z"}',
     );
     expect(first).not.toContain('"createdAt"');
+  });
+
+  it('reads the window off the day the lead’s order was created when asked', async () => {
+    const { service, count, orderGroupBy } = makeService(ORG);
+
+    await service.report(
+      query({
+        from: '2026-10-01T00:00:00.000Z',
+        to: '2026-11-01T00:00:00.000Z',
+        dateField: 'orderCreated',
+      }),
+    );
+
+    const first = json(
+      (count.mock.calls as [{ where: unknown }][])[0][0].where,
+    );
+    expect(first).toContain(
+      '"logisticsOrder":{"is":{"convertedAt":{"gte":"2026-10-01T00:00:00.000Z","lt":"2026-11-01T00:00:00.000Z"}}}',
+    );
+    expect(first).not.toContain('"createdAt"');
+    expect(first).not.toContain('"statusChangedAt"');
+    expect(
+      json(
+        (orderGroupBy.mock.calls as [{ where: { lead: unknown } }][])[0][0]
+          .where.lead,
+      ),
+    ).toBe(first);
   });
 
   it('shows only the chosen BDEs, a chosen one with nothing included', async () => {
@@ -583,6 +851,15 @@ describe('TeamPerformanceQueryDto', () => {
     expect(errors).toHaveLength(0);
     expect(dto.agent).toEqual([ANA]);
     expect(dto.source).toEqual(['Facebook']);
+  });
+
+  it('accepts the order-created date basis', async () => {
+    const { dto, errors } = await check({
+      from: '2026-10-01T00:00:00.000Z',
+      dateField: 'orderCreated',
+    });
+    expect(errors).toHaveLength(0);
+    expect(dto.dateField).toBe('orderCreated');
   });
 
   it.each([

@@ -6,6 +6,13 @@ import {
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  AuditActor,
+  RENAME,
+  recordAuditEvents,
+  recordStateChange,
+  userActor,
+} from '../audit/audit-events';
 import { TagAccessService } from '../tag-access/tag-access.service';
 import { CreateTagDto, TagNode, UpdateTagDto } from './dto/tag.dto';
 
@@ -25,6 +32,14 @@ const TAG_SELECT = {
 } satisfies Prisma.TagSelect;
 
 type TagRow = Prisma.TagGetPayload<{ select: typeof TAG_SELECT }>;
+
+const tagEvent = (id: string, actor: AuditActor, source: string) => ({
+  entityType: 'TAG' as const,
+  entityId: id,
+  leadId: null,
+  actor,
+  source,
+});
 
 /**
  * The Tags catalogue behind Settings → Sales & CRM Configuration → Tags.
@@ -62,29 +77,33 @@ export class TagsService {
    * An administrator creates exactly as before. Anyone else needs the Admin to have allowed
    * their team or them personally to create tags (ADR-0091), and gets a plain active
    * tag — the Active switch is a catalogue-management control, not theirs — which they can
-   * select straight away (`grantToCreator`). The tag and that grant commit together.
+   * select straight away (`grantToCreator`). The tag, that grant and the CREATED event commit
+   * together; the event says whether the grant was made, since it changes the creator's tag
+   * access policy (AUD-03).
    */
   async create(dto: CreateTagDto): Promise<TagNode> {
     const user = await this.currentUser.resolve();
     const name = dto.name.trim();
 
-    if (user.role === UserRole.SUPERADMIN) {
-      await this.assertNameFree(name);
-      const created = await this.prisma.tag.create({
-        data: { name, isActive: dto.isActive ?? true },
-        select: TAG_SELECT,
-      });
-      return toNode(created);
-    }
-
-    await this.access.assertMayCreate(user);
+    const admin = user.role === UserRole.SUPERADMIN;
+    if (!admin) await this.access.assertMayCreate(user);
     await this.assertNameFree(name);
     const created = await this.prisma.$transaction(async (tx) => {
       const row = await tx.tag.create({
-        data: { name, isActive: true },
+        data: { name, isActive: admin ? (dto.isActive ?? true) : true },
         select: TAG_SELECT,
       });
-      await this.access.grantToCreator(tx, user, row.id);
+      const granted = admin
+        ? false
+        : await this.access.grantToCreator(tx, user, row.id);
+      await recordAuditEvents(tx, [
+        {
+          ...tagEvent(row.id, userActor(user), 'tags.create'),
+          action: 'CREATED',
+          after: { name: row.name, isActive: row.isActive },
+          ...(granted ? { metadata: { accessGrantedToCreator: true } } : {}),
+        },
+      ]);
       return row;
     });
     return toNode(created);
@@ -94,7 +113,9 @@ export class TagsService {
    * Renames and/or activates a tag.
    *
    * The row is updated in place, never recreated, so every `LeadTag` link survives a
-   * rename untouched — which is exactly what an id-keyed catalogue buys.
+   * rename untouched — which is exactly what an id-keyed catalogue buys. Recorded in the same
+   * transaction under a lock on the row: a new name is a RENAMED, a changed Active switch an
+   * UPDATED, and a save that changes nothing records nothing (AUD-03).
    */
   async update(id: string, dto: UpdateTagDto): Promise<TagNode> {
     const tag = await this.requireRow(id);
@@ -108,10 +129,26 @@ export class TagsService {
       data.name = newName;
     }
 
-    const updated = await this.prisma.tag.update({
-      where: { id },
-      data,
-      select: TAG_SELECT,
+    const actor = userActor(await this.currentUser.resolve());
+    const updated = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM tags WHERE id = ${id}::uuid FOR UPDATE`;
+      const before = await tx.tag.findUniqueOrThrow({
+        where: { id },
+        select: { name: true, isActive: true },
+      });
+      const row = await tx.tag.update({
+        where: { id },
+        data,
+        select: TAG_SELECT,
+      });
+      await recordStateChange(
+        tx,
+        tagEvent(id, actor, 'tags.update'),
+        before,
+        { name: row.name, isActive: row.isActive },
+        [RENAME],
+      );
+      return row;
     });
     return toNode(updated);
   }
@@ -127,10 +164,25 @@ export class TagsService {
    */
   async remove(id: string): Promise<{ id: string }> {
     await this.requireRow(id);
-    await this.prisma.tag.update({
-      where: { id },
-      data: { deletedAt: new Date() },
-      select: { id: true },
+    const actor = userActor(await this.currentUser.resolve());
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM tags WHERE id = ${id}::uuid FOR UPDATE`;
+      const before = await tx.tag.findUniqueOrThrow({
+        where: { id },
+        select: { name: true, isActive: true },
+      });
+      await tx.tag.update({
+        where: { id },
+        data: { deletedAt: new Date() },
+        select: { id: true },
+      });
+      await recordAuditEvents(tx, [
+        {
+          ...tagEvent(id, actor, 'tags.delete'),
+          action: 'DELETED',
+          before,
+        },
+      ]);
     });
     return { id };
   }

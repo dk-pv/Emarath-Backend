@@ -534,7 +534,7 @@ export interface LogisticsOrderListResponse {
   total: number;
 }
 
-/** How many orders hold one country or city value; `null` is an order with none recorded. */
+/** How many orders hold one country, city or area value; `null` is an order with none recorded. */
 export interface RegionCount {
   value: string | null;
   count: number;
@@ -542,13 +542,15 @@ export interface RegionCount {
 
 /**
  * How many of the caller's orders the filters select: per status (every status present, zero
- * included) and per country and city — most orders first, then by name, none recorded last.
+ * included) and per country, city and area — most orders first, then by name, none recorded last.
  */
 export interface LogisticsOrderSummaryResponse {
   counts: Record<LogisticsStatus, number>;
   total: number;
   countries: RegionCount[];
   cities: RegionCount[];
+  /** Per area: the order's State, the field the Area filter matches (ADR-0094, 2026-10-17). */
+  states: RegionCount[];
   /** The business day the delivery buckets were measured against, and its timezone. */
   businessDay: BusinessDay;
 }

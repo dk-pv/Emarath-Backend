@@ -49,6 +49,36 @@ describe('buildLeadsByOwnershipWhere', () => {
     expect(json).toContain('statusChangedAt');
   });
 
+  it('reads the order-created window off the lead’s Logistics order, not its creation', () => {
+    const where = buildLeadsByOwnershipWhere(admin, {
+      from: '2026-10-01T00:00:00.000Z',
+      to: '2026-11-01T00:00:00.000Z',
+      dateField: 'orderCreated',
+    });
+    expect(where.AND).toHaveLength(2);
+    expect(where.AND?.[1]).toEqual({
+      logisticsOrder: {
+        is: {
+          convertedAt: {
+            gte: new Date('2026-10-01T00:00:00.000Z'),
+            lt: new Date('2026-11-01T00:00:00.000Z'),
+          },
+        },
+      },
+    });
+    const json = JSON.stringify(where);
+    expect(json).not.toContain('createdAt');
+    expect(json).not.toContain('statusChangedAt');
+  });
+
+  it('adds no order condition for the order-created basis without a window', () => {
+    const where = buildLeadsByOwnershipWhere(admin, {
+      dateField: 'orderCreated',
+    });
+    expect(where.AND).toBeUndefined();
+    expect(JSON.stringify(where)).not.toContain('logisticsOrder');
+  });
+
   it("passes the unassigned flag through (the legend's Unassigned drill-down)", () => {
     const json = JSON.stringify(
       buildLeadsByOwnershipWhere(admin, { unassigned: true }),

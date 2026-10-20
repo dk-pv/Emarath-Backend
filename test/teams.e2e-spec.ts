@@ -145,6 +145,8 @@ describe('Teams (e2e)', () => {
       'to=2026-02-30',
       'agent=not-an-id',
       'manager=not-an-id',
+      'dateField=updated',
+      'dateField=orderCreated&from=yesterday',
       `team=${'x'.repeat(121)}`,
       'unknown=1',
     ])('refuses %s with a 400', async (params) => {

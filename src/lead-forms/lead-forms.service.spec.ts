@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
+import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { LeadFormsService } from './lead-forms.service';
 import {
@@ -40,8 +41,12 @@ function makeService() {
     sections: [],
   });
   const customFindMany = jest.fn().mockResolvedValue([]);
+  const auditCreateMany = jest.fn().mockResolvedValue({ count: 1 });
+  const $queryRaw = jest.fn().mockResolvedValue([]);
 
   const tx = {
+    $queryRaw,
+    auditEvent: { createMany: auditCreateMany },
     leadForm: {
       create: formCreate,
       update: formUpdate,
@@ -85,8 +90,14 @@ function makeService() {
     $transaction,
   } as unknown as PrismaService;
 
+  const currentUser = {
+    resolve: jest.fn().mockResolvedValue({ id: 'admin-1', role: 'SUPERADMIN' }),
+  } as unknown as CurrentUserService;
+
   return {
-    service: new LeadFormsService(prisma),
+    service: new LeadFormsService(prisma, currentUser),
+    auditCreateMany,
+    $queryRaw,
     formFindMany,
     formFindFirst,
     formCount,
@@ -673,6 +684,170 @@ describe('LeadFormsService', () => {
         NotFoundException,
       );
     });
+  });
+});
+
+describe('LeadFormsService — configuration audit (AUD-03)', () => {
+  const auditRows = (auditCreateMany: jest.Mock) =>
+    (
+      auditCreateMany.mock.calls as [{ data: Record<string, unknown>[] }][]
+    ).flatMap(([args]) => args.data);
+  const existing = {
+    id: 'form-1',
+    name: 'Custom Lead Form',
+    isDefault: false,
+    module: 'LEAD',
+  };
+
+  it('records a new form as CREATED with its arrangement, inside the create’s transaction', async () => {
+    const { service, formCreate, formFindUniqueOrThrow, auditCreateMany } =
+      makeService();
+    formCreate.mockResolvedValue({ id: 'form-9' });
+    formFindUniqueOrThrow.mockResolvedValue(
+      row({ id: 'form-9', name: 'CS Complaint', isDefault: false }),
+    );
+
+    await service.create(dto(), 'Emarath Admin');
+
+    expect(auditRows(auditCreateMany)).toEqual([
+      {
+        entityType: 'LEAD_FORM',
+        entityId: 'form-9',
+        leadId: null,
+        action: 'CREATED',
+        actorType: 'USER',
+        actorId: 'admin-1',
+        source: 'lead-forms.create',
+        before: undefined,
+        after: {
+          name: 'CS Complaint',
+          module: 'LEAD',
+          isActive: true,
+          isDefault: false,
+          sections: [],
+          fields: [
+            { key: 'name', section: null, visible: true },
+            { key: 'primaryPhone', section: null, visible: true },
+            { key: 'status', section: null, visible: true },
+            { key: 'pipeline', section: null, visible: true },
+          ],
+        },
+        metadata: undefined,
+      },
+    ]);
+  });
+
+  it('records only what changed: a renamed form with one field hidden', async () => {
+    const { service, formFindFirst, formFindUniqueOrThrow, auditCreateMany } =
+      makeService();
+    formFindFirst.mockResolvedValueOnce(existing).mockResolvedValueOnce(null);
+    const before = row({ isDefault: false });
+    const after = row({
+      name: 'Custom Lead Form v2',
+      isDefault: false,
+      fields: before.fields.map((field) =>
+        field.fieldKey === 'status' ? { ...field, isVisible: false } : field,
+      ),
+    });
+    formFindUniqueOrThrow
+      .mockResolvedValueOnce(before)
+      .mockResolvedValueOnce(after);
+
+    await service.update('form-1', dto({ name: 'Custom Lead Form v2' }));
+
+    const [event] = auditRows(auditCreateMany);
+    expect(auditRows(auditCreateMany)).toHaveLength(1);
+    expect(event).toMatchObject({
+      entityType: 'LEAD_FORM',
+      action: 'UPDATED',
+      source: 'lead-forms.update',
+      before: { name: 'Custom Lead Form' },
+      after: { name: 'Custom Lead Form v2' },
+    });
+    expect(Object.keys(event.after as object)).toEqual(['name', 'fields']);
+  });
+
+  it('records nothing when the form is saved unchanged, although it is rewritten', async () => {
+    const {
+      service,
+      formFindFirst,
+      formFindUniqueOrThrow,
+      fieldDeleteMany,
+      auditCreateMany,
+    } = makeService();
+    formFindFirst.mockResolvedValueOnce(existing).mockResolvedValueOnce(null);
+    formFindUniqueOrThrow.mockResolvedValue(row({ isDefault: false }));
+
+    await service.update('form-1', dto({ name: 'Custom Lead Form' }));
+
+    expect(fieldDeleteMany).toHaveBeenCalled();
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('locks the form before reading the state it compares against', async () => {
+    const { service, formFindFirst, formFindUniqueOrThrow, $queryRaw } =
+      makeService();
+    formFindFirst.mockResolvedValueOnce(existing).mockResolvedValueOnce(null);
+
+    await service.update('form-1', dto());
+
+    expect($queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      formFindUniqueOrThrow.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('records a delete as DELETED with what the form was; refused deletes record nothing', async () => {
+    const deleted = makeService();
+    deleted.formFindFirst.mockResolvedValue({
+      id: 'form-2',
+      name: 'test',
+      isDefault: false,
+      _count: { users: 0 },
+    });
+    deleted.formFindUniqueOrThrow.mockResolvedValue(
+      row({ id: 'form-2', name: 'test', isDefault: false }),
+    );
+    deleted.formUpdate.mockResolvedValue({});
+
+    await deleted.service.remove('form-2');
+
+    expect(auditRows(deleted.auditCreateMany)).toMatchObject([
+      {
+        entityType: 'LEAD_FORM',
+        entityId: 'form-2',
+        action: 'DELETED',
+        source: 'lead-forms.delete',
+        before: { name: 'test', module: 'LEAD' },
+      },
+    ]);
+
+    for (const blocked of [
+      { isDefault: true, _count: { users: 0 } },
+      { isDefault: false, _count: { users: 4 } },
+    ]) {
+      const refused = makeService();
+      refused.formFindFirst.mockResolvedValue({
+        id: 'form-3',
+        name: 'X',
+        ...blocked,
+      });
+      await expect(refused.service.remove('form-3')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(refused.auditCreateMany).not.toHaveBeenCalled();
+    }
+  });
+
+  it('records nothing when the write fails inside the transaction', async () => {
+    const { service, formFindFirst, formUpdate, auditCreateMany } =
+      makeService();
+    formFindFirst.mockResolvedValueOnce(existing).mockResolvedValueOnce(null);
+    formUpdate.mockRejectedValue(new Error('write failed'));
+
+    await expect(service.update('form-1', dto())).rejects.toThrow(
+      'write failed',
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 });
 

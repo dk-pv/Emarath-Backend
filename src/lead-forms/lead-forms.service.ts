@@ -6,6 +6,14 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { CurrentUserService } from '../auth/current-user';
+import {
+  AuditActor,
+  AuditState,
+  recordAuditEvents,
+  recordStateChange,
+  userActor,
+} from '../audit/audit-events';
 import {
   LEAD_SYSTEM_FIELDS,
   REQUIRED_LEAD_FIELD_KEYS,
@@ -54,6 +62,34 @@ const FORM_SELECT = {
 type FormRow = Prisma.LeadFormGetPayload<{ select: typeof FORM_SELECT }>;
 
 /**
+ * A form as its audit events describe it (AUD-03): the arrangement, field by field in order. The
+ * field keys stay values, never object keys, so a field called `email` is not mistaken for an
+ * address by the log's redaction.
+ */
+function formState(row: FormRow): AuditState {
+  return {
+    name: row.name,
+    module: row.module,
+    isActive: row.isActive,
+    isDefault: row.isDefault,
+    sections: row.sections.map((section) => section.name),
+    fields: row.fields.map((field) => ({
+      key: field.fieldKey,
+      section: field.section?.name ?? null,
+      visible: field.isVisible,
+    })),
+  };
+}
+
+const formEvent = (id: string, actor: AuditActor, source: string) => ({
+  entityType: 'LEAD_FORM' as const,
+  entityId: id,
+  leadId: null,
+  actor,
+  source,
+});
+
+/**
  * Configured lead forms (Settings > Data & Schema Management > Form Customization,
  * ADR-0072).
  *
@@ -64,7 +100,10 @@ type FormRow = Prisma.LeadFormGetPayload<{ select: typeof FORM_SELECT }>;
  */
 @Injectable()
 export class LeadFormsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly currentUser: CurrentUserService,
+  ) {}
 
   /** One page of the Settings list, newest first, with each form's field configuration. */
   async page(query: ListLeadFormsQueryDto): Promise<LeadFormPage> {
@@ -204,6 +243,9 @@ export class LeadFormsService {
     const sections = normaliseSections(dto.sections);
     const fields = await this.normaliseFields(dto.fields, sections);
 
+    // Recorded on this form only, as a pipeline's default is: the previous default losing the
+    // flag follows from this one taking it.
+    const actor = userActor(await this.currentUser.resolve());
     const created = await this.prisma.$transaction(async (tx) => {
       if (dto.isDefault) await clearDefault(tx, dto.module, null);
       const form = await tx.leadForm.create({
@@ -218,10 +260,18 @@ export class LeadFormsService {
         select: { id: true },
       });
       await writeFields(tx, form.id, fields);
-      return tx.leadForm.findUniqueOrThrow({
+      const row = await tx.leadForm.findUniqueOrThrow({
         where: { id: form.id },
         select: FORM_SELECT,
       });
+      await recordAuditEvents(tx, [
+        {
+          ...formEvent(form.id, actor, 'lead-forms.create'),
+          action: 'CREATED',
+          after: formState(row),
+        },
+      ]);
+      return row;
     });
 
     return toItem(created, await this.customLabels());
@@ -255,7 +305,15 @@ export class LeadFormsService {
     const sections = normaliseSections(dto.sections);
     const fields = await this.normaliseFields(dto.fields, sections);
 
+    // The form is rewritten whole, so it is compared whole: rewriting an identical arrangement
+    // records nothing (AUD-03).
+    const actor = userActor(await this.currentUser.resolve());
     const updated = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM lead_forms WHERE id = ${id}::uuid FOR UPDATE`;
+      const before = await tx.leadForm.findUniqueOrThrow({
+        where: { id },
+        select: FORM_SELECT,
+      });
       if (dto.isDefault) await clearDefault(tx, dto.module, id);
       // Fields go first: a section cannot be dropped while a field still points at it.
       await tx.leadFormField.deleteMany({ where: { formId: id } });
@@ -272,10 +330,17 @@ export class LeadFormsService {
         select: { id: true },
       });
       await writeFields(tx, id, fields);
-      return tx.leadForm.findUniqueOrThrow({
+      const after = await tx.leadForm.findUniqueOrThrow({
         where: { id },
         select: FORM_SELECT,
       });
+      await recordStateChange(
+        tx,
+        formEvent(id, actor, 'lead-forms.update'),
+        formState(before),
+        formState(after),
+      );
+      return after;
     });
 
     return toItem(updated, await this.customLabels());
@@ -316,12 +381,27 @@ export class LeadFormsService {
       is released by suffixing the row's own id — a deleted form is never listed, so the
       suffixed name is never read by anyone.
     */
-    await this.prisma.leadForm.update({
-      where: { id },
-      data: {
-        deletedAt: new Date(),
-        name: `${existing.name.slice(0, MAX_FORM_NAME - 40)} (deleted ${id.slice(0, 8)})`,
-      },
+    const actor = userActor(await this.currentUser.resolve());
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM lead_forms WHERE id = ${id}::uuid FOR UPDATE`;
+      const before = await tx.leadForm.findUniqueOrThrow({
+        where: { id },
+        select: FORM_SELECT,
+      });
+      await tx.leadForm.update({
+        where: { id },
+        data: {
+          deletedAt: new Date(),
+          name: `${existing.name.slice(0, MAX_FORM_NAME - 40)} (deleted ${id.slice(0, 8)})`,
+        },
+      });
+      await recordAuditEvents(tx, [
+        {
+          ...formEvent(id, actor, 'lead-forms.delete'),
+          action: 'DELETED',
+          before: formState(before),
+        },
+      ]);
     });
   }
 

@@ -139,15 +139,16 @@ export class TagAccessService {
     tx: Prisma.TransactionClient,
     user: CurrentUser,
     tagId: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const { team, own } = await this.load(tx, user);
     const governing =
       own?.tagAccess != null ? own : team?.tagAccess != null ? team : undefined;
-    if (governing?.tagAccess !== TagAccessMode.LISTED) return;
+    if (governing?.tagAccess !== TagAccessMode.LISTED) return false;
 
     await tx.tagAccessGrant.create({
       data: { policyId: governing.id, tagId },
     });
+    return true;
   }
 
   /** What the tag pickers render for the caller. */

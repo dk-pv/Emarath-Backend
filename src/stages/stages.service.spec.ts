@@ -16,6 +16,11 @@ function stageRow(overrides: Record<string, unknown> = {}) {
     name: 'HOT',
     color: 'amber',
     position: 3,
+    isClosed: false,
+    outcome: null,
+    inclusion: 'INCLUDE_IN_SALES_PIPELINE',
+    probability: 0,
+    requireFollowUp: false,
     ...overrides,
   };
 }
@@ -33,14 +38,33 @@ function makeService(
   const leadUpdateMany = jest.fn();
   const leadCount = jest.fn();
   const auditCreateMany = jest.fn().mockResolvedValue({ count: 1 });
-  const $transaction = jest.fn((ops: Promise<unknown>[]) => Promise.all(ops));
+  // The stage as the locked read inside a change's transaction finds it (AUD-03).
+  const findUniqueOrThrow = jest.fn().mockResolvedValue(stageRow());
+  const $queryRaw = jest.fn().mockResolvedValue([]);
+  const pipelineFindUnique = jest.fn().mockResolvedValue({ id: 'pipe-1' });
 
   const prisma = {
-    stage: { findMany, findUnique, findFirst, create, update, delete: del },
+    stage: {
+      findMany,
+      findUnique,
+      findFirst,
+      findUniqueOrThrow,
+      create,
+      update,
+      delete: del,
+    },
     lead: { updateMany: leadUpdateMany, count: leadCount },
+    pipeline: { findUnique: pipelineFindUnique },
     auditEvent: { createMany: auditCreateMany },
-    $transaction,
+    $queryRaw,
   } as unknown as PrismaService;
+  // An array runs as a batch; a callback gets the client as its transaction.
+  const $transaction = jest.fn((arg: unknown) =>
+    typeof arg === 'function'
+      ? (arg as (tx: PrismaService) => Promise<unknown>)(prisma)
+      : Promise.all(arg as Promise<unknown>[]),
+  );
+  Object.assign(prisma, { $transaction });
 
   const currentUser = {
     resolve: jest.fn().mockResolvedValue(user),
@@ -58,9 +82,17 @@ function makeService(
     leadUpdateMany,
     leadCount,
     auditCreateMany,
+    findUniqueOrThrow,
+    $queryRaw,
     $transaction,
   };
 }
+
+/** The rows the audit write was asked for, in call order. */
+const auditRows = (auditCreateMany: jest.Mock) =>
+  (
+    auditCreateMany.mock.calls as [{ data: Record<string, unknown>[] }][]
+  ).flatMap(([args]) => args.data);
 
 describe('StagesService.create', () => {
   it('appends a new stage after the last position (AC1)', async () => {
@@ -135,7 +167,8 @@ describe('StagesService.update', () => {
     };
     expect(args.data).toEqual({ color: 'red' });
     expect(leadUpdateMany).not.toHaveBeenCalled();
-    expect($transaction).not.toHaveBeenCalled();
+    // One transaction: the recolour and its event (AUD-03).
+    expect($transaction).toHaveBeenCalledTimes(1);
   });
 
   it('renames a stage and cascades to its leads in one transaction (AC2/AC4)', async () => {
@@ -173,8 +206,7 @@ describe('StagesService.update', () => {
 
     await service.update('id', { name: 'Very Hot' });
 
-    const [batch] = $transaction.mock.calls[0] as [unknown[]];
-    expect(batch).toHaveLength(3);
+    expect($transaction).toHaveBeenCalledTimes(1);
     expect(auditCreateMany).toHaveBeenCalledWith({
       data: [
         {
@@ -239,14 +271,25 @@ describe('StagesService.update', () => {
     );
   });
 
-  it('records nothing for a recolour, which moves no lead', async () => {
+  // AUD-03 reverses the earlier rule: a recolour moves no lead, but it is a configuration change.
+  it('records a recolour as one UPDATED with the old and new colour, and no lead event', async () => {
     const { service, findUnique, update, auditCreateMany } = makeService();
     findUnique.mockResolvedValue({ id: 'id', pipeline: PIPELINE, name: 'HOT' });
     update.mockResolvedValue(stageRow({ color: 'red' }));
 
     await service.update('id', { color: 'red' });
 
-    expect(auditCreateMany).not.toHaveBeenCalled();
+    expect(auditRows(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityType: 'STAGE',
+        entityId: 'id',
+        action: 'UPDATED',
+        source: 'stages.update',
+        before: { color: 'amber' },
+        after: { color: 'red' },
+        metadata: { pipeline: PIPELINE },
+      }),
+    ]);
   });
 
   it('rejects a rename onto an existing name (AC5)', async () => {
@@ -276,6 +319,11 @@ describe('StagesService.reorder', () => {
     const { service, findMany, update } = makeService();
     findMany
       .mockResolvedValueOnce([{ id: 'a' }, { id: 'b' }, { id: 'c' }]) // known ids
+      .mockResolvedValueOnce([
+        { id: 'a', name: 'A' },
+        { id: 'b', name: 'B' },
+        { id: 'c', name: 'C' },
+      ]) // the current order, read under the lock
       .mockResolvedValueOnce([
         stageRow({ id: 'c', position: 0 }),
         stageRow({ id: 'a', position: 1 }),
@@ -325,7 +373,9 @@ describe('StagesService.remove', () => {
     const result = await service.remove('id');
 
     expect(result).toEqual({ id: 'id' });
-    expect(del).toHaveBeenCalledWith({ where: { id: 'id' } });
+    expect(del).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'id' } }),
+    );
   });
 
   it('refuses to delete a stage that still holds leads (AC5)', async () => {
@@ -455,5 +505,211 @@ describe('StagesService — pipeline access (ADR-0093)', () => {
     await service.create({ pipeline: 'VIP', name: 'Intake', color: 'cyan' });
 
     expect(create).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('StagesService — configuration audit (AUD-03)', () => {
+  it('records a new stage as CREATED with its settings, in the create’s own transaction', async () => {
+    const {
+      service,
+      findUnique,
+      findFirst,
+      create,
+      auditCreateMany,
+      $transaction,
+    } = makeService();
+    findUnique.mockResolvedValue(null);
+    findFirst.mockResolvedValue({ position: 5 });
+    create.mockResolvedValue(
+      stageRow({ id: 'new', name: 'Reorder', position: 6 }),
+    );
+
+    await service.create({
+      pipeline: PIPELINE,
+      name: 'Reorder',
+      color: 'amber',
+    });
+
+    expect($transaction).toHaveBeenCalledTimes(1);
+    expect(auditRows(auditCreateMany)).toEqual([
+      {
+        entityType: 'STAGE',
+        entityId: 'new',
+        leadId: null,
+        action: 'CREATED',
+        actorType: 'USER',
+        actorId: 'admin-1',
+        source: 'stages.create',
+        before: undefined,
+        after: {
+          name: 'Reorder',
+          color: 'amber',
+          position: 6,
+          isClosed: false,
+          outcome: null,
+          inclusion: 'INCLUDE_IN_SALES_PIPELINE',
+          probability: 0,
+          requireFollowUp: false,
+        },
+        metadata: { pipeline: PIPELINE },
+      },
+    ]);
+  });
+
+  it('records nothing when the save changes nothing', async () => {
+    const { service, findUnique, update, auditCreateMany } = makeService();
+    findUnique.mockResolvedValue({ id: 'id', pipeline: PIPELINE, name: 'HOT' });
+    update.mockResolvedValue(stageRow());
+
+    await service.update('id', { color: 'amber', probability: 0 });
+
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records a rename with a reconfiguration as RENAMED plus one UPDATED', async () => {
+    const { service, findUnique, update, auditCreateMany } = makeService();
+    findUnique
+      .mockResolvedValueOnce({ id: 'id', pipeline: PIPELINE, name: 'HOT' })
+      .mockResolvedValueOnce(null);
+    update.mockResolvedValue(
+      stageRow({ name: 'Very Hot', probability: 60, isClosed: true }),
+    );
+
+    await service.update('id', {
+      name: 'Very Hot',
+      probability: 60,
+      isClosed: true,
+    });
+
+    expect(
+      auditRows(auditCreateMany).map((row) => [
+        row.action,
+        row.before,
+        row.after,
+      ]),
+    ).toEqual([
+      ['RENAMED', { name: 'HOT' }, { name: 'Very Hot' }],
+      [
+        'UPDATED',
+        { isClosed: false, probability: 0 },
+        { isClosed: true, probability: 60 },
+      ],
+    ]);
+  });
+
+  it('locks the stage before reading the state it compares against', async () => {
+    const { service, findUnique, update, $queryRaw, findUniqueOrThrow } =
+      makeService();
+    findUnique.mockResolvedValue({ id: 'id', pipeline: PIPELINE, name: 'HOT' });
+    update.mockResolvedValue(stageRow({ color: 'red' }));
+
+    await service.update('id', { color: 'red' });
+
+    expect($queryRaw).toHaveBeenCalledTimes(1);
+    expect($queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      findUniqueOrThrow.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('records nothing when the write itself fails — the transaction carries no event', async () => {
+    const { service, findUnique, update, auditCreateMany } = makeService();
+    findUnique.mockResolvedValue({ id: 'id', pipeline: PIPELINE, name: 'HOT' });
+    update.mockRejectedValue(new Error('write failed'));
+
+    await expect(service.update('id', { color: 'red' })).rejects.toThrow(
+      'write failed',
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records a reorder once, on the pipeline, as its stage order before and after', async () => {
+    const { service, findMany, update, auditCreateMany } = makeService();
+    findMany
+      .mockResolvedValueOnce([{ id: 'a' }, { id: 'b' }, { id: 'c' }])
+      .mockResolvedValueOnce([
+        { id: 'a', name: 'New' },
+        { id: 'b', name: 'HOT' },
+        { id: 'c', name: 'WON' },
+      ])
+      .mockResolvedValueOnce([]);
+    update.mockResolvedValue(stageRow());
+
+    await service.reorder({ pipeline: PIPELINE, orderedIds: ['b', 'a', 'c'] });
+
+    expect(auditRows(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityType: 'PIPELINE',
+        entityId: 'pipe-1',
+        action: 'UPDATED',
+        source: 'stages.reorder',
+        before: { stageOrder: ['New', 'HOT', 'WON'] },
+        after: { stageOrder: ['HOT', 'New', 'WON'] },
+      }),
+    ]);
+  });
+
+  it('records nothing for a reorder that keeps the current order', async () => {
+    const { service, findMany, update, auditCreateMany } = makeService();
+    findMany
+      .mockResolvedValueOnce([{ id: 'a' }, { id: 'b' }])
+      .mockResolvedValueOnce([
+        { id: 'a', name: 'New' },
+        { id: 'b', name: 'HOT' },
+      ])
+      .mockResolvedValueOnce([]);
+    update.mockResolvedValue(stageRow());
+
+    await service.reorder({ pipeline: PIPELINE, orderedIds: ['a', 'b'] });
+
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records a delete as DELETED with what the stage was; a refused delete records nothing', async () => {
+    const deleted = makeService();
+    deleted.findUnique.mockResolvedValue({
+      id: 'id',
+      pipeline: PIPELINE,
+      name: 'Cold',
+    });
+    deleted.leadCount.mockResolvedValue(0);
+    deleted.del.mockResolvedValue(stageRow({ name: 'Cold', color: 'sky' }));
+
+    await deleted.service.remove('id');
+
+    expect(auditRows(deleted.auditCreateMany)).toMatchObject([
+      {
+        entityType: 'STAGE',
+        entityId: 'id',
+        action: 'DELETED',
+        source: 'stages.delete',
+        before: { name: 'Cold', color: 'sky' },
+        metadata: { pipeline: PIPELINE },
+      },
+    ]);
+
+    const refused = makeService();
+    refused.findUnique.mockResolvedValue({
+      id: 'id',
+      pipeline: PIPELINE,
+      name: 'HOT',
+    });
+    refused.leadCount.mockResolvedValue(3);
+    await expect(refused.service.remove('id')).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(refused.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records nothing when a manager is refused a closed pipeline', async () => {
+    const { service, findUnique, auditCreateMany } = makeService({
+      id: 'mgr-1',
+      role: 'SALES_MANAGER',
+      deniedPipelines: ['VIP'],
+    });
+    findUnique.mockResolvedValue({ id: 's1', pipeline: 'VIP', name: 'Intake' });
+
+    await expect(service.update('s1', { color: 'red' })).rejects.toThrow();
+    await expect(service.remove('s1')).rejects.toThrow();
+    expect(auditCreateMany).not.toHaveBeenCalled();
   });
 });

@@ -14,7 +14,8 @@ import { Prisma } from '../generated/prisma/client';
  *
  * Only LEAD, LOGISTICS_ORDER, ACCOUNTS_RECORD, ACTIVITY and LEAD_NOTE events carry a `leadId`
  * and so appear on a customer journey. The administrative ones (users, roles, permissions,
- * settings, documents, exports) have `leadId` null and no read route yet (AUD-01).
+ * settings, documents, exports, and the configuration catalogues of AUD-03) have `leadId` null
+ * and are read in the Super Admin's Audit Log (AUD-02).
  */
 export const AUDIT_ENTITY_TYPES = [
   'LEAD',
@@ -31,6 +32,11 @@ export const AUDIT_ENTITY_TYPES = [
   'ACTIVITY',
   'LEAD_NOTE',
   'EXPORT',
+  'LEAD_FORM',
+  'CUSTOM_FIELD',
+  'LEAD_SOURCE',
+  'ASSIGNMENT_RULE',
+  'TAG',
 ] as const;
 
 export type AuditEntityType = (typeof AUDIT_ENTITY_TYPES)[number];
@@ -173,6 +179,24 @@ export function stateChangeEvents(
       after: pickState(after, keys),
     }));
 }
+
+/**
+ * Records how one record changed, through `tx` — the transaction the change itself ran in, after
+ * the row was locked and read — and nothing at all when nothing changed (AUD-03).
+ */
+export async function recordStateChange(
+  tx: Prisma.TransactionClient,
+  base: Omit<AuditEventInput, 'action' | 'before' | 'after'>,
+  before: AuditState,
+  after: AuditState,
+  own: [AuditAction, readonly string[]][] = [],
+): Promise<void> {
+  const events = stateChangeEvents(base, before, after, own);
+  if (events.length > 0) await recordAuditEvents(tx, events);
+}
+
+/** A catalogue's display name changing is a rename; the rest of the change stays UPDATED. */
+export const RENAME: [AuditAction, readonly string[]] = ['RENAMED', ['name']];
 
 function pickState(state: AuditState, keys: string[]): Prisma.InputJsonObject {
   return Object.fromEntries(keys.map((key) => [key, state[key]]));

@@ -15,8 +15,12 @@ export interface LeadsByOwnershipFilters {
   from?: string;
   /** Optional upper bound of the creation window; rarely set (the UI sends only `from`). */
   to?: string;
-  /** Which date the window applies to; `statusChanged` reads `Lead.statusChangedAt`. */
-  dateField?: 'created' | 'statusChanged';
+  /**
+   * Which date the window applies to; `statusChanged` reads `Lead.statusChangedAt`, and
+   * `orderCreated` the lead's Logistics order's `convertedAt` — when it was won and its order
+   * created — so a lead with no order is outside any such window.
+   */
+  dateField?: 'created' | 'statusChanged' | 'orderCreated';
   /** Assigned-agent user ids — matched through the assignment join. */
   agent?: string[];
   /** Lead source values to narrow to (exact match). */
@@ -42,11 +46,11 @@ export function buildLeadsByOwnershipWhere(
   user: CurrentUser,
   filters: LeadsByOwnershipFilters,
 ): Prisma.LeadWhereInput {
-  const byStatusChange = filters.dateField === 'statusChanged';
+  const byCreation = !filters.dateField || filters.dateField === 'created';
   const conditions: Prisma.LeadWhereInput[] = [
     buildLeadWhere(user, {
-      createdFrom: byStatusChange ? undefined : filters.from,
-      createdTo: byStatusChange ? undefined : filters.to,
+      createdFrom: byCreation ? filters.from : undefined,
+      createdTo: byCreation ? filters.to : undefined,
       source: filters.source,
       assignedAgent: filters.agent,
       pipeline: filters.pipeline,
@@ -55,13 +59,16 @@ export function buildLeadsByOwnershipWhere(
     }),
   ];
   if (filters.team?.length) conditions.push(teamWhere(filters.team));
-  if (byStatusChange && (filters.from || filters.to)) {
-    conditions.push({
-      statusChangedAt: {
-        gte: filters.from ? new Date(filters.from) : undefined,
-        lt: filters.to ? new Date(filters.to) : undefined,
-      },
-    });
+  if (!byCreation && (filters.from || filters.to)) {
+    const window = {
+      gte: filters.from ? new Date(filters.from) : undefined,
+      lt: filters.to ? new Date(filters.to) : undefined,
+    };
+    conditions.push(
+      filters.dateField === 'statusChanged'
+        ? { statusChangedAt: window }
+        : { logisticsOrder: { is: { convertedAt: window } } },
+    );
   }
   return conditions.length === 1 ? conditions[0] : { AND: conditions };
 }

@@ -86,6 +86,12 @@ function makeService(
         .fn()
         .mockResolvedValue([{ id: 'order-1', orderNumber: 1042 }]),
     },
+    stage: { findMany: named([['stage-1', 'HOT']]) },
+    leadForm: { findMany: named([['form-1', 'CS Complaint']]) },
+    leadCustomField: { findMany: named([['field-1', 'National Code']]) },
+    leadSource: { findMany: named([['source-1', 'Website']]) },
+    assignmentRule: { findMany: named([['rule-1', 'Round robin']]) },
+    tag: { findMany: named([['tag-1', 'BDE RISK']]) },
   };
   const prisma = {
     $transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
@@ -223,6 +229,49 @@ describe('AuditLogService.list (AUD-02)', () => {
     expect(rows[0].actorName).toBe('ZZ Admin');
     expect(rows[7].actorName).toBeNull();
     expect(rows[0].createdAt).toBe('2026-10-20T08:00:00.000Z');
+  });
+
+  it('names the configuration records by their own names (AUD-03); a deleted one reads as null', async () => {
+    const { service } = makeService([
+      event({ id: 'c1', entityType: 'STAGE', entityId: 'stage-1' }),
+      event({ id: 'c2', entityType: 'LEAD_FORM', entityId: 'form-1' }),
+      event({ id: 'c3', entityType: 'CUSTOM_FIELD', entityId: 'field-1' }),
+      event({ id: 'c4', entityType: 'LEAD_SOURCE', entityId: 'source-1' }),
+      event({ id: 'c5', entityType: 'ASSIGNMENT_RULE', entityId: 'rule-1' }),
+      event({ id: 'c6', entityType: 'TAG', entityId: 'tag-1' }),
+      event({ id: 'c7', entityType: 'LEAD_SOURCE', entityId: 'source-gone' }),
+    ]);
+
+    const { rows } = await service.list(query());
+
+    expect(rows.map((row) => row.entityLabel)).toEqual([
+      'HOT',
+      'CS Complaint',
+      'National Code',
+      'Website',
+      'Round robin',
+      'BDE RISK',
+      null,
+    ]);
+  });
+
+  it('shows a form whose arrangement lists the email field: a field key is a value, not hidden', async () => {
+    const fields = [
+      { key: 'name', section: null, visible: true },
+      { key: 'email', section: 'Contact', visible: false },
+    ];
+    const { service } = makeService([
+      event({
+        entityType: 'LEAD_FORM',
+        entityId: 'form-1',
+        before: { fields: [] },
+        after: { fields },
+      }),
+    ]);
+
+    const { rows } = await service.list(query());
+
+    expect(rows[0].after).toEqual({ fields });
   });
 
   it('hides sensitive values at every depth before they leave the API', async () => {

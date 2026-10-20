@@ -6,6 +6,15 @@ import {
 } from '@nestjs/common';
 import { LeadCustomFieldType, Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { CurrentUserService } from '../auth/current-user';
+import {
+  AuditActor,
+  AuditState,
+  RENAME,
+  recordAuditEvents,
+  recordStateChange,
+  userActor,
+} from '../audit/audit-events';
 import {
   CreateLeadCustomFieldDto,
   LeadCustomFieldDto,
@@ -39,6 +48,29 @@ const FIELD_SELECT = {
   },
 } satisfies Prisma.LeadCustomFieldSelect;
 
+type FieldRow = Prisma.LeadCustomFieldGetPayload<{
+  select: typeof FIELD_SELECT;
+}>;
+
+/** A custom field as its audit events describe it (AUD-03): its options as their labels, in order. */
+function fieldState(row: FieldRow): AuditState {
+  return {
+    key: row.key,
+    name: row.name,
+    type: row.type,
+    isActive: row.isActive,
+    options: row.options.map((option) => option.label),
+  };
+}
+
+const fieldEvent = (id: string, actor: AuditActor, source: string) => ({
+  entityType: 'CUSTOM_FIELD' as const,
+  entityId: id,
+  leadId: null,
+  actor,
+  source,
+});
+
 /**
  * Custom-field definitions, their dropdown options, and per-lead value validation
  * (LEAD-05.1 / ADR-0051, extended by Settings > Data & Schema Management / ADR-0072).
@@ -49,7 +81,10 @@ const FIELD_SELECT = {
  */
 @Injectable()
 export class LeadCustomFieldsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly currentUser: CurrentUserService,
+  ) {}
 
   /**
    * Active custom fields in display order — the Leads list's custom columns and the
@@ -133,16 +168,27 @@ export class LeadCustomFieldsService {
     });
     const position = (max._max.position ?? -1) + 1;
 
-    return this.prisma.leadCustomField.create({
-      data: {
-        key,
-        name,
-        type: dto.type,
-        position,
-        isActive: dto.isActive ?? true,
-        options: options.length ? { create: options } : undefined,
-      },
-      select: FIELD_SELECT,
+    const actor = userActor(await this.currentUser.resolve());
+    return this.prisma.$transaction(async (tx) => {
+      const row = await tx.leadCustomField.create({
+        data: {
+          key,
+          name,
+          type: dto.type,
+          position,
+          isActive: dto.isActive ?? true,
+          options: options.length ? { create: options } : undefined,
+        },
+        select: FIELD_SELECT,
+      });
+      await recordAuditEvents(tx, [
+        {
+          ...fieldEvent(row.id, actor, 'lead-custom-fields.create'),
+          action: 'CREATED',
+          after: { ...fieldState(row), position: row.position },
+        },
+      ]);
+      return row;
     });
   }
 
@@ -196,12 +242,19 @@ export class LeadCustomFieldsService {
     }
 
     // Options are replaced wholesale in the same transaction as the definition, so a
-    // half-applied option list is never observable.
-    await this.prisma.$transaction([
-      this.prisma.leadCustomFieldOption.deleteMany({
+    // half-applied option list is never observable — and compared whole with what was there,
+    // so resending the same field records nothing (AUD-03). A new label is a RENAMED.
+    const actor = userActor(await this.currentUser.resolve());
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM lead_custom_fields WHERE id = ${id}::uuid FOR UPDATE`;
+      const before = await tx.leadCustomField.findUniqueOrThrow({
+        where: { id },
+        select: FIELD_SELECT,
+      });
+      await tx.leadCustomFieldOption.deleteMany({
         where: { customFieldId: id },
-      }),
-      this.prisma.leadCustomField.update({
+      });
+      const after = await tx.leadCustomField.update({
         where: { id },
         data: {
           name,
@@ -209,14 +262,17 @@ export class LeadCustomFieldsService {
           isActive: dto.isActive,
           options: options.length ? { create: options } : undefined,
         },
-      }),
-    ]);
-
-    const updated = await this.prisma.leadCustomField.findUniqueOrThrow({
-      where: { id },
-      select: FIELD_SELECT,
+        select: FIELD_SELECT,
+      });
+      await recordStateChange(
+        tx,
+        fieldEvent(id, actor, 'lead-custom-fields.update'),
+        fieldState(before),
+        fieldState(after),
+        [RENAME],
+      );
+      return after;
     });
-    return updated;
   }
 
   /**
@@ -250,15 +306,29 @@ export class LeadCustomFieldsService {
       would leave a form referencing a key that no longer exists, and the form builder
       would then refuse to save it — locking a form because of an unrelated delete.
     */
-    await this.prisma.$transaction([
-      this.prisma.leadFormField.deleteMany({
+    const actor = userActor(await this.currentUser.resolve());
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM lead_custom_fields WHERE id = ${id}::uuid FOR UPDATE`;
+      const before = await tx.leadCustomField.findUniqueOrThrow({
+        where: { id },
+        select: FIELD_SELECT,
+      });
+      const { count } = await tx.leadFormField.deleteMany({
         where: { fieldKey: existing.key },
-      }),
-      this.prisma.leadCustomField.update({
+      });
+      await tx.leadCustomField.update({
         where: { id },
         data: { deletedAt: new Date() },
-      }),
-    ]);
+      });
+      await recordAuditEvents(tx, [
+        {
+          ...fieldEvent(id, actor, 'lead-custom-fields.delete'),
+          action: 'DELETED',
+          before: fieldState(before),
+          metadata: { removedFromForms: count },
+        },
+      ]);
+    });
   }
 
   /**

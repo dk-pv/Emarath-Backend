@@ -7,6 +7,13 @@ import { Prisma } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  AuditActor,
+  RENAME,
+  recordAuditEvents,
+  recordStateChange,
+  userActor,
+} from '../audit/audit-events';
+import {
   CreateLeadSourceDto,
   LeadSourceNode,
   UpdateLeadSourceDto,
@@ -23,6 +30,14 @@ const LEAD_SOURCE_SELECT = {
 type LeadSourceRow = Prisma.LeadSourceGetPayload<{
   select: typeof LEAD_SOURCE_SELECT;
 }>;
+
+const sourceEvent = (id: string, actor: AuditActor, source: string) => ({
+  entityType: 'LEAD_SOURCE' as const,
+  entityId: id,
+  leadId: null,
+  actor,
+  source,
+});
 
 /**
  * The lead source catalogue behind Settings → Sales & CRM Configuration → Lead Source.
@@ -63,13 +78,23 @@ export class LeadSourcesService {
     const name = dto.name.trim();
     await this.assertNameFree(name);
 
-    const created = await this.prisma.leadSource.create({
-      data: {
-        name,
-        isActive: dto.isActive ?? true,
-        createdById: actor.id,
-      },
-      select: { id: true },
+    const created = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.leadSource.create({
+        data: {
+          name,
+          isActive: dto.isActive ?? true,
+          createdById: actor.id,
+        },
+        select: { id: true, name: true, isActive: true },
+      });
+      await recordAuditEvents(tx, [
+        {
+          ...sourceEvent(row.id, userActor(actor), 'lead-sources.create'),
+          action: 'CREATED',
+          after: { name: row.name, isActive: row.isActive },
+        },
+      ]);
+      return row;
     });
     return this.requireNode(created.id);
   }
@@ -80,6 +105,10 @@ export class LeadSourcesService {
    * A rename and its lead cascade succeed or fail together: a source's name and the leads
    * pointing at it must never end up out of step. `createdById` and `createdAt` are not
    * writable here, so editing never rewrites who added the source or when.
+   *
+   * Recorded in the same transaction, compared under a lock on the row (AUD-03): a new name is
+   * one RENAMED, carrying how many leads it relabelled; a changed Active switch is an UPDATED;
+   * a save that changes nothing records nothing.
    */
   async update(id: string, dto: UpdateLeadSourceDto): Promise<LeadSourceNode> {
     const source = await this.requireRow(id);
@@ -88,29 +117,41 @@ export class LeadSourcesService {
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
 
     const newName = dto.name?.trim();
-    if (newName !== undefined && newName !== source.name) {
+    const renaming = newName !== undefined && newName !== source.name;
+    if (renaming) {
       await this.assertNameFree(newName, id);
-      await this.prisma.$transaction([
-        this.prisma.leadSource.update({
-          where: { id },
-          data: { ...data, name: newName },
-          select: { id: true },
-        }),
-        this.prisma.lead.updateMany({
-          where: { source: source.name },
-          data: { source: newName },
-        }),
-      ]);
-      return this.requireNode(id);
+      data.name = newName;
     }
+    if (Object.keys(data).length === 0) return this.requireNode(id);
 
-    if (Object.keys(data).length > 0) {
-      await this.prisma.leadSource.update({
+    const actor = userActor(await this.currentUser.resolve());
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM lead_sources WHERE id = ${id}::uuid FOR UPDATE`;
+      const select = { name: true, isActive: true } as const;
+      const before = await tx.leadSource.findUniqueOrThrow({
         where: { id },
-        data,
-        select: { id: true },
+        select,
       });
-    }
+      const after = await tx.leadSource.update({ where: { id }, data, select });
+      const relabelled = renaming
+        ? await tx.lead.updateMany({
+            where: { source: before.name },
+            data: { source: after.name },
+          })
+        : null;
+      await recordStateChange(
+        tx,
+        {
+          ...sourceEvent(id, actor, 'lead-sources.update'),
+          ...(relabelled
+            ? { metadata: { leadsRelabelled: relabelled.count } }
+            : {}),
+        },
+        before,
+        after,
+        [RENAME],
+      );
+    });
     return this.requireNode(id);
   }
 
@@ -134,7 +175,20 @@ export class LeadSourcesService {
       );
     }
 
-    await this.prisma.leadSource.delete({ where: { id } });
+    const actor = userActor(await this.currentUser.resolve());
+    await this.prisma.$transaction(async (tx) => {
+      const removed = await tx.leadSource.delete({
+        where: { id },
+        select: { name: true, isActive: true },
+      });
+      await recordAuditEvents(tx, [
+        {
+          ...sourceEvent(id, actor, 'lead-sources.delete'),
+          action: 'DELETED',
+          before: removed,
+        },
+      ]);
+    });
     return { id };
   }
 

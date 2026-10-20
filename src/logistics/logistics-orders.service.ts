@@ -344,10 +344,11 @@ export class LogisticsOrdersService {
 
   /**
    * How many orders the caller can see under the list's own filters and scope, its status filter
-   * included: per status, per country and per city. One grouped query feeds all three, so each
-   * breakdown adds up to the same total as the list. Every status is present, so a zero is a
-   * count rather than a missing key. The business day the delivery buckets used comes back with
-   * the counts, so a screen can say which day "today" is without reading its own clock.
+   * included: per status, and per country, city and area (the order's State — the Area filter's
+   * field). One grouped query feeds all four, so each breakdown adds up to the same total as the
+   * list. Every status is present, so a zero is a count rather than a missing key. The business
+   * day the delivery buckets used comes back with the counts, so a screen can say which day
+   * "today" is without reading its own clock.
    */
   async summary(
     filters: LogisticsOrderFiltersDto,
@@ -355,7 +356,7 @@ export class LogisticsOrdersService {
     const user = await this.currentUser.resolve();
     const day = this.businessDay();
     const groups = await this.prisma.logisticsOrder.groupBy({
-      by: ['status', 'country', 'city'],
+      by: ['status', 'country', 'city', 'state'],
       where: orderWhere(user, filters, day),
       _count: { _all: true },
     });
@@ -363,19 +364,26 @@ export class LogisticsOrdersService {
     const counts = statusCounts();
     const countries = new Map<string | null, number>();
     const cities = new Map<string | null, number>();
+    const states = new Map<string | null, number>();
+    const add = (
+      totals: Map<string | null, number>,
+      value: string | null,
+      count: number,
+    ) =>
+      totals.set(recorded(value), (totals.get(recorded(value)) ?? 0) + count);
     for (const group of groups) {
       const count = group._count._all;
       counts[group.status] += count;
-      const country = recorded(group.country);
-      const city = recorded(group.city);
-      countries.set(country, (countries.get(country) ?? 0) + count);
-      cities.set(city, (cities.get(city) ?? 0) + count);
+      add(countries, group.country, count);
+      add(cities, group.city, count);
+      add(states, group.state, count);
     }
     return {
       counts,
       total: groups.reduce((sum, group) => sum + group._count._all, 0),
       countries: regionCounts(countries),
       cities: regionCounts(cities),
+      states: regionCounts(states),
       businessDay: day,
     };
   }

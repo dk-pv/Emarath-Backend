@@ -337,6 +337,49 @@ describe('the delivery buckets', () => {
   dropped — and it leaves alone activities.completion_note (in the schema's history, not in
   schema.prisma, its fate undecided) and the pending GPS-removal migration.
 */
+/*
+  Logistics Dashboard v1 reads these buckets at the instant it is opened, so an order's place on it
+  must turn over at the UAE's midnight (20:00 UTC; Asia/Dubai has no daylight saving) — never the
+  server's or UTC's.
+*/
+describe('the buckets across the UAE midnight', () => {
+  const at = (instant: string) => businessDay('Asia/Dubai', new Date(instant));
+
+  it.each([
+    ['2026-10-20T19:59:59.999Z', 'tomorrow'],
+    ['2026-10-20T20:00:00.000Z', 'today'],
+    ['2026-10-19T19:59:59.999Z', 'future'],
+    ['2026-10-21T20:00:00.000Z', 'overdue'],
+  ] as const)('at %s an open order due 2026-10-21 is %s', (instant, bucket) => {
+    expect(
+      deliveryBucketOf('2026-10-21', LogisticsStatus.DISPATCHED, at(instant)),
+    ).toBe(bucket);
+  });
+
+  it('moves a past order with an outcome into no bucket at the same midnight, and an undated one never moves', () => {
+    const after = at('2026-10-21T20:00:00.000Z');
+    expect(
+      deliveryBucketOf('2026-10-21', LogisticsStatus.DELIVERED, after),
+    ).toBeNull();
+    for (const instant of [
+      '2026-10-20T19:59:59.999Z',
+      '2026-10-20T20:00:00.000Z',
+    ]) {
+      expect(deliveryBucketOf(null, LogisticsStatus.INITIAL, at(instant))).toBe(
+        'none',
+      );
+    }
+  });
+
+  it('builds the query from the Dubai day too: Today’s term is the 21st from 20:00 UTC on the 20th', () => {
+    const where = deliveryBucketWhere(
+      ['today'],
+      at('2026-10-20T20:00:00.000Z'),
+    );
+    expect(where).toEqual({ OR: [{ deliveryDate: toDbDate('2026-10-21') }] });
+  });
+});
+
 describe('the delivery-date migration', () => {
   const dir = join(__dirname, '..', '..', 'prisma', 'migrations');
   const folders = readdirSync(dir).filter((entry) => !entry.includes('.'));

@@ -1601,14 +1601,15 @@ describe('LogisticsOrdersService — the counts', () => {
     country: string | null,
     city: string | null,
     count: number,
-  ) => ({ status, country, city, _count: { _all: count } });
+    state: string | null = null,
+  ) => ({ status, country, city, state, _count: { _all: count } });
 
-  it('counts every status, country and city from one grouped query, zero included', async () => {
+  it('counts every status, country, city and area from one grouped query, zero included', async () => {
     const { service, groupBy } = makeService();
     groupBy.mockResolvedValue([
-      group('INITIAL', 'United Arab Emirates', 'Dubai', 2),
-      group('INITIAL', 'Oman', 'Muscat', 1),
-      group('DISPATCHED', 'United Arab Emirates', 'Abu Dhabi', 2),
+      group('INITIAL', 'United Arab Emirates', 'Dubai', 2, 'Dubai'),
+      group('INITIAL', 'Oman', 'Muscat', 1, 'Muscat'),
+      group('DISPATCHED', 'United Arab Emirates', 'Abu Dhabi', 2, 'Abu Dhabi'),
     ]);
 
     const summary = await service.summary({});
@@ -1633,6 +1634,11 @@ describe('LogisticsOrdersService — the counts', () => {
         { value: 'Dubai', count: 2 },
         { value: 'Muscat', count: 1 },
       ],
+      states: [
+        { value: 'Abu Dhabi', count: 2 },
+        { value: 'Dubai', count: 2 },
+        { value: 'Muscat', count: 1 },
+      ],
       businessDay: {
         timeZone: 'Asia/Dubai',
         today: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) as string,
@@ -1642,10 +1648,53 @@ describe('LogisticsOrdersService — the counts', () => {
     expect(groupBy).toHaveBeenCalledTimes(1);
     expect(groupBy).toHaveBeenCalledWith(
       expect.objectContaining({
-        by: ['status', 'country', 'city'],
+        by: ['status', 'country', 'city', 'state'],
         _count: { _all: true },
       }),
     );
+  });
+
+  /*
+    Logistics Dashboard v1's area-wise counts: the order's State, the Area filter's own field, so
+    an area row's number is the List's total once that area is chosen.
+  */
+  it('counts orders per area — the same order over several statuses summed, none recorded (blank included) last — adding up to the total', async () => {
+    const { service, groupBy } = makeService();
+    groupBy.mockResolvedValue([
+      group('INITIAL', 'United Arab Emirates', 'Dubai', 2, 'Dubai'),
+      group('DELIVERED', 'United Arab Emirates', 'Deira', 3, 'Dubai'),
+      group('DISPATCHED', 'United Arab Emirates', 'Al Ain', 1, 'Abu Dhabi'),
+      group('RTO', 'United Arab Emirates', 'Sharjah', 1, '  '),
+      group('CANCELLED', 'Oman', null, 2, null),
+    ]);
+
+    const { total, states } = await service.summary({});
+
+    expect(states).toEqual([
+      { value: 'Dubai', count: 5 },
+      { value: 'Abu Dhabi', count: 1 },
+      { value: null, count: 3 },
+    ]);
+    expect(states.reduce((sum, row) => sum + row.count, 0)).toBe(total);
+  });
+
+  it('counts areas under the same scope and filters as the list, the Area filter included', async () => {
+    const { service, groupBy, listFindMany } = makeService({
+      role: UserRole.SALES_MANAGER,
+    });
+    const filters = {
+      state: ['Dubai'],
+      courier: ['Aramex'],
+      delivery: ['today' as const, 'overdue' as const],
+      status: [LogisticsStatus.DISPATCHED],
+    };
+
+    await service.list(query(filters));
+    await service.summary(filters);
+
+    const [listArgs] = listFindMany.mock.calls[0] as [{ where: unknown }];
+    const [countArgs] = groupBy.mock.calls[0] as [{ where: unknown }];
+    expect(countArgs.where).toEqual(listArgs.where);
   });
 
   it('counts orders with no country or city, a blank one included, last — so each breakdown adds up to the total', async () => {
