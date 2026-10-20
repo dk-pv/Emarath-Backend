@@ -5,6 +5,7 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { requestedDeliveryDate } from '../../logistics/logistics-conversion';
@@ -12,7 +13,10 @@ import { CONVERTED_STATUS } from '../../reports/converted-leads-where';
 import { Prisma } from '../../generated/prisma/client';
 import { CurrentUser, CurrentUserService } from '../../auth/current-user';
 import { ASSIGNABLE_USER_WHERE, REASSIGN_ROLES } from '../../auth/role-groups';
-import { MailerService } from '../../auth/mailer.service';
+import {
+  EMAIL_DISABLED_MESSAGE,
+  MailerService,
+} from '../../auth/mailer.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
   recordAfterEffect,
@@ -302,7 +306,8 @@ export class LeadRowActionsService {
    * cannot see is a 404 and never a channel to send through. Recipients, subject
    * and body are the caller's; the From is the transport's verified sender, never
    * client-supplied. A provider failure surfaces as a 500 so the composer keeps the
-   * drawer open for a retry rather than silently dropping the send.
+   * drawer open for a retry rather than silently dropping the send. With no email provider
+   * configured the send is refused with a 503 instead, since a retry cannot succeed.
    */
   async sendEmail(
     id: string,
@@ -316,6 +321,10 @@ export class LeadRowActionsService {
     });
     if (!lead) throw new NotFoundException(OUT_OF_SCOPE_REASON);
     assertMayChangeLead(user, lead);
+
+    if (!this.mailer.enabled) {
+      throw new ServiceUnavailableException(EMAIL_DISABLED_MESSAGE);
+    }
 
     try {
       await this.mailer.sendMail({

@@ -177,15 +177,48 @@ describe('mail config', () => {
     },
   );
 
-  it('defaults to Resend outside development, which still needs its key and sender', () => {
-    setEnv({ NODE_ENV: 'staging' });
+  it('starts outside development with no provider, so email stays disabled', () => {
+    for (const nodeEnv of ['staging', 'production']) {
+      setEnv({ NODE_ENV: nodeEnv });
+      const config = mailConfig();
+      expect(config.provider).toBe('disabled');
+      expect(config.resendApiKey).toBeNull();
+    }
+  });
+
+  it('treats a blank MAIL_PROVIDER as unset', () => {
+    setEnv({ NODE_ENV: 'production', MAIL_PROVIDER: '  ' });
+    expect(mailConfig().provider).toBe('disabled');
+  });
+
+  it('accepts disabled explicitly, in development as well', () => {
+    setEnv({ NODE_ENV: 'production', MAIL_PROVIDER: 'disabled' });
+    expect(mailConfig().provider).toBe('disabled');
+    setEnv({ NODE_ENV: 'development', MAIL_PROVIDER: 'disabled' });
+    expect(mailConfig().provider).toBe('disabled');
+  });
+
+  it('keeps Resend strict: selecting it outside development still needs its key and sender', () => {
+    setEnv({ NODE_ENV: 'staging', MAIL_PROVIDER: 'resend' });
     expect(() => mailConfig()).toThrow(/RESEND_API_KEY and MAIL_FROM/);
     setEnv({
       NODE_ENV: 'staging',
+      MAIL_PROVIDER: 'resend',
+      RESEND_API_KEY: 'test-key-not-real',
+    });
+    expect(() => mailConfig()).toThrow(/RESEND_API_KEY and MAIL_FROM/);
+    setEnv({
+      NODE_ENV: 'staging',
+      MAIL_PROVIDER: 'resend',
       RESEND_API_KEY: 'test-key-not-real',
       MAIL_FROM: 'Emarath <no-reply@example.test>',
     });
     expect(mailConfig().provider).toBe('resend');
+  });
+
+  it('refuses an unknown provider', () => {
+    setEnv({ NODE_ENV: 'production', MAIL_PROVIDER: 'smtp' });
+    expect(() => mailConfig()).toThrow(/Invalid MAIL_PROVIDER "smtp"/);
   });
 });
 

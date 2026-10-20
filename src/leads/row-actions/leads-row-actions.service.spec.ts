@@ -4,6 +4,7 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
@@ -83,6 +84,8 @@ function makeService(
   role: UserRole = UserRole.SUPERADMIN,
   // The pipelines closed to the caller (ADR-0093); none unless a test says so.
   deniedPipelines?: string[],
+  // Email is on unless a test says no provider is configured.
+  mailEnabled = true,
 ) {
   const leadFindFirst = jest.fn();
   const leadFindUnique = jest.fn();
@@ -168,7 +171,7 @@ function makeService(
   } as unknown as LeadsBulkService;
 
   const sendMail = jest.fn().mockResolvedValue(undefined);
-  const mailer = { sendMail } as unknown as MailerService;
+  const mailer = { sendMail, enabled: mailEnabled } as unknown as MailerService;
 
   // Tag Permissions (ADR-0091) have their own suite; by default the caller may use every tag.
   const handleable = jest
@@ -1055,6 +1058,31 @@ describe('LeadRowActionsService.sendEmail', () => {
       subject: 'Hi',
       text: 'Body',
     });
+  });
+
+  it('refuses with a clear 503 and sends nothing when email is not set up', async () => {
+    const { service, leadFindFirst, sendMail, emailAuditCreateMany } =
+      makeService(UserRole.SUPERADMIN, undefined, false);
+    leadFindFirst.mockResolvedValue({ id: LEAD_ID });
+
+    await expect(service.sendEmail(LEAD_ID, payload)).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+    expect(sendMail).not.toHaveBeenCalled();
+    expect(emailAuditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('still 404s an out-of-scope lead before reporting that email is off', async () => {
+    const { service, leadFindFirst } = makeService(
+      UserRole.SUPERADMIN,
+      undefined,
+      false,
+    );
+    leadFindFirst.mockResolvedValue(null);
+
+    await expect(service.sendEmail(LEAD_ID, payload)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
   });
 
   it('404s (and never sends) for an out-of-scope lead', async () => {

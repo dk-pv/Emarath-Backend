@@ -1,4 +1,9 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import bcrypt from 'bcryptjs';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -7,7 +12,10 @@ import { UserRole } from '../generated/prisma/client';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenService } from './refresh-token.service';
 import { PasswordResetService } from './password-reset.service';
-import { MailerService } from './mailer.service';
+import {
+  MailerService,
+  PASSWORD_RESET_DISABLED_MESSAGE,
+} from './mailer.service';
 import type { MailConfig } from '../config/mail.config';
 import { recordAuditEvents, userActor } from '../audit/audit-events';
 import { userEvent } from '../users/user-audit';
@@ -146,9 +154,14 @@ export class AuthService {
    * it does nothing. Either way it returns normally with no signal of which happened (AC2 —
    * no enumeration). The email is sent without blocking the response, so a slow transport
    * cannot make the "account exists" path measurably slower, and a send failure never
-   * surfaces to the caller.
+   * surfaces to the caller. With no email provider configured every request is refused with a
+   * 503 before any lookup: that is a property of the server, not of the account, so it reveals
+   * nothing about an address, and no token is issued that could never be delivered.
    */
   async requestPasswordReset(email: string): Promise<void> {
+    if (!this.mailer.enabled) {
+      throw new ServiceUnavailableException(PASSWORD_RESET_DISABLED_MESSAGE);
+    }
     const user = await this.prisma.user.findFirst({
       where: { email, deletedAt: null, isActive: true },
       select: { id: true, email: true },

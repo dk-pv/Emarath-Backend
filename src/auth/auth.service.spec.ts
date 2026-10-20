@@ -1,4 +1,7 @@
-import { UnauthorizedException } from '@nestjs/common';
+import {
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import bcrypt from 'bcryptjs';
 import type { JwtService } from '@nestjs/jwt';
 import type { ConfigService } from '@nestjs/config';
@@ -21,7 +24,7 @@ const USER_ROW = {
   passwordHash: HASH,
 };
 
-function makeService(row: typeof USER_ROW | null) {
+function makeService(row: typeof USER_ROW | null, mailEnabled = true) {
   const findFirst = jest.fn().mockResolvedValue(row);
   const update = jest.fn().mockResolvedValue(row);
   const signAsync = jest.fn().mockResolvedValue('signed.jwt.token');
@@ -54,7 +57,10 @@ function makeService(row: typeof USER_ROW | null) {
     issueFor,
     consume,
   } as unknown as PasswordResetService;
-  const mailer = { sendPasswordReset } as unknown as MailerService;
+  const mailer = {
+    sendPasswordReset,
+    enabled: mailEnabled,
+  } as unknown as MailerService;
   const config = {
     getOrThrow: jest.fn().mockReturnValue({
       provider: 'log',
@@ -253,6 +259,19 @@ describe('AuthService.requestPasswordReset (AUTH-03.1)', () => {
     await expect(
       service.requestPasswordReset('nobody@emarath.local'),
     ).resolves.toBeUndefined();
+    expect(issueFor).not.toHaveBeenCalled();
+    expect(sendPasswordReset).not.toHaveBeenCalled();
+  });
+
+  it('refuses with a clear 503 before any lookup when email is not set up, issuing no token', async () => {
+    const { service, findFirst, issueFor, sendPasswordReset } = makeService(
+      USER_ROW,
+      false,
+    );
+    const refused = service.requestPasswordReset('admin@emarath.local');
+    await expect(refused).rejects.toBeInstanceOf(ServiceUnavailableException);
+    await expect(refused).rejects.toThrow(/Ask an administrator/);
+    expect(findFirst).not.toHaveBeenCalled();
     expect(issueFor).not.toHaveBeenCalled();
     expect(sendPasswordReset).not.toHaveBeenCalled();
   });
