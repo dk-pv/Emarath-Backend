@@ -7,6 +7,7 @@ import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { UserRole } from '../generated/prisma/client';
 import { LeadsExportController } from '../leads/export/leads-export.controller';
+import { LogisticsOrdersController } from '../logistics/logistics-orders.controller';
 import { ConvertedLeadsController } from '../reports/converted-leads.controller';
 import { LeadAgingController } from '../reports/lead-aging.controller';
 import { LeadFirstResponseController } from '../reports/lead-first-response.controller';
@@ -149,6 +150,7 @@ describe('every export route is audited (AUD-01)', () => {
       'reports.upcoming-follow-ups.export',
       UpcomingFollowUpsController.prototype,
     ],
+    ['logistics.orders.export', LogisticsOrdersController.prototype],
   ];
 
   it.each(routes)(

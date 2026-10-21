@@ -165,11 +165,15 @@ const LOGISTICS_QC_LABELS = new Set([
   'POST /api/logistics/orders/:id/qc-verify',
   'POST /api/logistics/orders/:id/qc-reject',
 ]);
-/* Both Logistics roles (client clarification 2026-10-01, Q1). */
+/*
+  Both Logistics roles (client clarification 2026-10-01, Q1), and the delivery-partner export of
+  the QC-verified orders that precedes dispatch (3PL-01).
+*/
 const LOGISTICS_SHIPMENT_LABELS = new Set([
   'POST /api/logistics/orders/:id/dispatch',
   'POST /api/logistics/orders/:id/deliver',
   'POST /api/logistics/orders/:id/cancel',
+  'GET /api/logistics/orders/export',
 ]);
 /* The Logistics Manager alone: RTO, the QC-verified edit (Q5), the AWB correction (Q9). */
 const LOGISTICS_MANAGER_LABELS = new Set([

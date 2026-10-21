@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { Response } from 'express';
 import { LogisticsStatus, Prisma, UserRole } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AppConfig } from '../config/configuration';
@@ -11,6 +12,7 @@ import { CurrentUser, CurrentUserService } from '../auth/current-user';
 import { recordAuditEvents, userActor } from '../audit/audit-events';
 import { openAccountsRecord } from '../accounts/accounts-record';
 import { applyLeadChanges } from '../leads/lead-audit';
+import { csvCell } from '../leads/export/leads-export.columns';
 import { escapeLike } from '../leads/lead-search';
 import { assertMayChangeLead } from '../pipelines/pipeline-access';
 import { CONVERTED_STATUS } from '../reports/converted-leads-where';
@@ -31,6 +33,11 @@ import {
   fromDbDate,
   toDbDate,
 } from './delivery-date';
+import {
+  EXPORT_COLUMNS,
+  EXPORT_SELECT,
+  exportFilename,
+} from './logistics-export.columns';
 import {
   LOGISTICS_TRANSITIONS,
   LogisticsAction,
@@ -60,6 +67,10 @@ import {
   toLogisticsOrderResponse,
   UpdateLogisticsOrderDto,
 } from './dto/logistics-order.dto';
+
+/** The delivery-partner export reads its rows in pages, and never more than the leads export's cap. */
+const EXPORT_BATCH_SIZE = 1000;
+const MAX_EXPORT_ROWS = 100_000;
 
 /** The editable fields stored as decimals, compared by value rather than by spelling. */
 const DECIMAL_FIELDS: ReadonlySet<string> = new Set([
@@ -340,6 +351,80 @@ export class LogisticsOrdersService {
       ),
       total,
     };
+  }
+
+  /**
+   * Streams the QC-verified orders the caller can see, under the queue's own filters, as a CSV for
+   * the delivery partner (3PL-01). QC Verified is one more AND term, so a status filter can narrow
+   * the file, to nothing, but never widen it. Soonest delivery first; the order number is unique, so
+   * the pages never repeat or skip a row. The first page is read before anything is sent, so a query
+   * that fails up front is an ordinary error response, never a 200 with a header and no rows.
+   * Resolves to the rows written, which the export's audit event records.
+   */
+  async exportCsv(
+    filters: LogisticsOrderFiltersDto,
+    res: Response,
+  ): Promise<number> {
+    const user = await this.currentUser.resolve();
+    const where: Prisma.LogisticsOrderWhereInput = {
+      AND: [
+        orderWhere(user, filters, this.businessDay()),
+        { status: LogisticsStatus.QC_VERIFIED },
+      ],
+    };
+    const page = (skip: number) =>
+      this.prisma.logisticsOrder.findMany({
+        where,
+        select: EXPORT_SELECT,
+        orderBy: [
+          { deliveryDate: { sort: 'asc', nulls: 'last' } },
+          { orderNumber: 'asc' },
+        ],
+        skip,
+        take: EXPORT_BATCH_SIZE,
+      });
+    let rows = await page(0);
+
+    res
+      .status(200)
+      .setHeader('Content-Type', 'text/csv; charset=utf-8')
+      .setHeader(
+        'Content-Disposition',
+        `attachment; filename="${exportFilename()}"`,
+      );
+    let exported = 0;
+    try {
+      // A BOM so Excel opens the UTF-8 content (Arabic names) without mojibake.
+      res.write(
+        '﻿' +
+          EXPORT_COLUMNS.map((column) => csvCell(column.header)).join(',') +
+          '\r\n',
+      );
+      while (rows.length > 0) {
+        res.write(
+          rows
+            .map(
+              (row) =>
+                EXPORT_COLUMNS.map((column) => csvCell(column.value(row))).join(
+                  ',',
+                ) + '\r\n',
+            )
+            .join(''),
+        );
+        exported += rows.length;
+        if (rows.length < EXPORT_BATCH_SIZE || exported >= MAX_EXPORT_ROWS) {
+          break;
+        }
+        rows = await page(exported);
+      }
+    } catch (error) {
+      // The headers are out, so the status can't change: abort the connection so the browser
+      // fails the download instead of saving a truncated file.
+      res.destroy(error instanceof Error ? error : undefined);
+      throw error;
+    }
+    res.end();
+    return exported;
   }
 
   /**

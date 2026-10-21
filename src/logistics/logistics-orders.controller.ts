@@ -7,10 +7,17 @@ import {
   Patch,
   Post,
   Query,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
+import { AuditedExport } from '../audit/audited-export';
 import { Roles } from '../auth/roles.decorator';
 import { LogisticsOrdersService } from './logistics-orders.service';
-import { ACTION_ROLES, LOGISTICS_READ_ROLES } from './logistics-roles';
+import {
+  ACTION_ROLES,
+  EXPORT_ROLES,
+  LOGISTICS_READ_ROLES,
+} from './logistics-roles';
 import {
   CorrectAwbDto,
   CorrectDeliveryDateDto,
@@ -32,7 +39,8 @@ import {
 /**
  * The Logistics order API (ADR-0085), with the permissions of the client clarification of
  * 2026-10-01 (`logistics-roles.ts`). They are enforced here rather than in the UI: QC verifies
- * and rejects; both Logistics roles dispatch, deliver and cancel; the Logistics Manager also
+ * and rejects; both Logistics roles dispatch, deliver and cancel, and export the QC-verified
+ * orders for the delivery partner; the Logistics Manager also
  * records RTO, edits a QC-verified order and corrects an AWB after dispatch; the Sales Manager
  * resubmits a rejected order; the sales agent and the Sales Manager set the delivery date until
  * QC verifies the order (Phase 2D); Customer Service and Marketing only read. `@Roles()` is what
@@ -85,6 +93,21 @@ export class LogisticsOrdersController {
   @Roles(...LOGISTICS_READ_ROLES)
   filterOptions(): Promise<LogisticsOrderFilterOptions> {
     return this.orders.filterOptions();
+  }
+
+  /**
+   * The QC-verified orders under the queue's filters, as a CSV for the delivery partner (3PL-01):
+   * the roles that dispatch only (`EXPORT_ROLES`). The service forces QC Verified; the export is
+   * recorded once the file has streamed. Before `:id`.
+   */
+  @Get('export')
+  @Roles(...EXPORT_ROLES)
+  @AuditedExport('logistics.orders.export')
+  export(
+    @Query() query: LogisticsOrderFiltersDto,
+    @Res() res: Response,
+  ): Promise<number> {
+    return this.orders.exportCsv(query, res);
   }
 
   @Get(':id')

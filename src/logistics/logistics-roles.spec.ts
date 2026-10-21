@@ -10,6 +10,7 @@ import {
   DATE_REQUIRED_ACTIONS,
   DELIVERY_DATE_CORRECTION_ROLES,
   DELIVERY_DATE_ROLES,
+  EXPORT_ROLES,
   LOGISTICS_READ_ROLES,
   MANAGER_ROLES,
   OrderAction,
@@ -74,6 +75,24 @@ describe('the Logistics permission split', () => {
       UserRole.ACCOUNTS_EXECUTIVE,
     ]) {
       expect(DELIVERY_DATE_ROLES).not.toContain(role);
+    }
+  });
+
+  it('lets the roles that dispatch export the QC-verified orders for the delivery partner, and nobody else (3PL-01)', () => {
+    expect([...EXPORT_ROLES]).toEqual([
+      UserRole.LOGISTICS_MANAGER,
+      UserRole.LOGISTICS_EXECUTIVE,
+      UserRole.SUPERADMIN,
+    ]);
+    for (const role of [
+      UserRole.SALES_MANAGER,
+      UserRole.SALES_AGENT,
+      UserRole.CUSTOMER_SERVICE_AGENT,
+      UserRole.MARKETING_ANALYST,
+      UserRole.QC,
+      UserRole.ACCOUNTS_EXECUTIVE,
+    ]) {
+      expect(EXPORT_ROLES).not.toContain(role);
     }
   });
 

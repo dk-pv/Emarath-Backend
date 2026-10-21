@@ -79,6 +79,14 @@ export const DELIVERY_DATE_CORRECTION_ROLES: readonly UserRole[] = [
 ];
 
 /**
+ * Exporting the QC-verified orders for the delivery partner (3PL-01): the specification's step 08,
+ * "3PL Processing", sits between QC verification and dispatch, so it belongs to the roles that
+ * dispatch. QC verifies only (Q11); Sales and Accounts take no shipment step. Provisional until the
+ * client names who exports.
+ */
+export const EXPORT_ROLES: readonly UserRole[] = SHIPMENT_ROLES;
+
+/**
  * Reading an order: the sales roles (their own leads only), both Logistics roles, QC, and
  * Accounts — Delivered orders only (`logisticsOrderScopeWhere`), read-only: no action names it.
  */
