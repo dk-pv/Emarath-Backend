@@ -8,6 +8,15 @@ import { Prisma } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  AuditActor,
+  AuditState,
+  RENAME,
+  recordAuditEvents,
+  recordStateChange,
+  stateChangeEvents,
+  userActor,
+} from '../audit/audit-events';
+import {
   CategoryNode,
   CreateCategoryDto,
   MoveCategoryDto,
@@ -27,6 +36,33 @@ const CATEGORY_SELECT = {
 type CategoryRow = Prisma.CategoryGetPayload<{
   select: typeof CATEGORY_SELECT;
 }>;
+
+/** What a category's audit events compare and record (AUD-04). */
+const STATE_SELECT = {
+  name: true,
+  parentId: true,
+  isActive: true,
+  position: true,
+} satisfies Prisma.CategorySelect;
+
+function categoryState(
+  row: Prisma.CategoryGetPayload<{ select: typeof STATE_SELECT }>,
+): AuditState {
+  return {
+    name: row.name,
+    parentId: row.parentId,
+    isActive: row.isActive,
+    position: row.position,
+  };
+}
+
+const categoryEvent = (id: string, actor: AuditActor, source: string) => ({
+  entityType: 'CATEGORY' as const,
+  entityId: id,
+  leadId: null,
+  actor,
+  source,
+});
 
 /**
  * The enquiry Category catalogue behind Settings → Sales & CRM Configuration → Category.
@@ -71,15 +107,25 @@ export class CategoriesService {
     if (dto.parentId !== undefined) this.requireCategory(rows, dto.parentId);
 
     const parentId = dto.parentId ?? null;
-    const created = await this.prisma.category.create({
-      data: {
-        name: dto.name.trim(),
-        parentId,
-        isActive: dto.isActive ?? true,
-        position: this.nextPosition(rows, parentId),
-        createdById: actor.id,
-      },
-      select: { id: true },
+    const created = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.category.create({
+        data: {
+          name: dto.name.trim(),
+          parentId,
+          isActive: dto.isActive ?? true,
+          position: this.nextPosition(rows, parentId),
+          createdById: actor.id,
+        },
+        select: { id: true, ...STATE_SELECT },
+      });
+      await recordAuditEvents(tx, [
+        {
+          ...categoryEvent(row.id, userActor(actor), 'categories.create'),
+          action: 'CREATED',
+          after: categoryState(row),
+        },
+      ]);
+      return row;
     });
 
     return this.requireNode(created.id);
@@ -90,6 +136,10 @@ export class CategoriesService {
    *
    * A rename and its lead cascade succeed or fail together: a category's name and the
    * leads pointing at it must never end up out of step.
+   *
+   * Recorded in the same transaction, compared under a lock on the row (AUD-04): a new name is
+   * one RENAMED, carrying how many leads it relabelled; a changed Active switch or parent is an
+   * UPDATED; a save that changes nothing records nothing.
    */
   async update(id: string, dto: UpdateCategoryDto): Promise<CategoryNode> {
     const rows = await this.loadGraph();
@@ -111,26 +161,42 @@ export class CategoriesService {
     }
 
     const newName = dto.name?.trim();
-    if (newName !== undefined && newName !== category.name) {
+    const renaming = newName !== undefined && newName !== category.name;
+    if (renaming) {
       await this.assertNameFree(newName, id);
-      await this.prisma.$transaction([
-        this.prisma.category.update({
-          where: { id },
-          data: { ...data, name: newName },
-          select: { id: true },
-        }),
-        this.prisma.lead.updateMany({
-          where: { category: category.name },
-          data: { category: newName },
-        }),
-      ]);
-      return this.requireNode(id);
+      data.name = newName;
     }
 
-    await this.prisma.category.update({
-      where: { id },
-      data,
-      select: { id: true },
+    const actor = userActor(await this.currentUser.resolve());
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM categories WHERE id = ${id}::uuid FOR UPDATE`;
+      const before = await tx.category.findUniqueOrThrow({
+        where: { id },
+        select: STATE_SELECT,
+      });
+      const after = await tx.category.update({
+        where: { id },
+        data,
+        select: STATE_SELECT,
+      });
+      const relabelled = renaming
+        ? await tx.lead.updateMany({
+            where: { category: before.name },
+            data: { category: after.name },
+          })
+        : null;
+      await recordStateChange(
+        tx,
+        {
+          ...categoryEvent(id, actor, 'categories.update'),
+          ...(relabelled
+            ? { metadata: { leadsRelabelled: relabelled.count } }
+            : {}),
+        },
+        categoryState(before),
+        categoryState(after),
+        [RENAME],
+      );
     });
     return this.requireNode(id);
   }
@@ -153,16 +219,31 @@ export class CategoriesService {
     const index = Math.min(Math.max(dto.position, 0), siblings.length);
     siblings.splice(index, 0, { ...category, parentId: nextParent });
 
+    // Only the dragged category is recorded, as a dragged role is (AUD-01): its siblings'
+    // renumbering follows from it. Its place is its parent and its index among its siblings, so
+    // dropping it back where it was records nothing (AUD-04).
+    const actor = userActor(await this.currentUser.resolve());
+    const fromIndex = rows
+      .filter((r) => r.parentId === category.parentId)
+      .sort((a, b) => a.position - b.position)
+      .findIndex((r) => r.id === id);
+    const moved = stateChangeEvents(
+      categoryEvent(id, actor, 'categories.move'),
+      { parentId: category.parentId, position: fromIndex },
+      { parentId: nextParent, position: index },
+    ).map((event) => ({ ...event, action: 'MOVED' as const }));
+
     // One transaction: a half-applied reorder would leave duplicate positions behind.
-    await this.prisma.$transaction(
-      siblings.map((sibling, order) =>
+    await this.prisma.$transaction([
+      ...siblings.map((sibling, order) =>
         this.prisma.category.update({
           where: { id: sibling.id },
           data: { parentId: nextParent, position: order },
           select: { id: true },
         }),
       ),
-    );
+      ...(moved.length > 0 ? [recordAuditEvents(this.prisma, moved)] : []),
+    ]);
 
     return this.list();
   }
@@ -194,7 +275,20 @@ export class CategoriesService {
       );
     }
 
-    await this.prisma.category.delete({ where: { id } });
+    const actor = userActor(await this.currentUser.resolve());
+    await this.prisma.$transaction(async (tx) => {
+      const removed = await tx.category.delete({
+        where: { id },
+        select: STATE_SELECT,
+      });
+      await recordAuditEvents(tx, [
+        {
+          ...categoryEvent(id, actor, 'categories.delete'),
+          action: 'DELETED',
+          before: categoryState(removed),
+        },
+      ]);
+    });
     return { id };
   }
 

@@ -154,6 +154,8 @@ export class AuditLogService {
       sources,
       rules,
       tags,
+      categories,
+      templates,
     ] = await Promise.all([
       read(idsOf('USER'), (ids) =>
         this.prisma.user.findMany({
@@ -233,6 +235,18 @@ export class AuditLogService {
           select: named,
         }),
       ),
+      read(idsOf('CATEGORY'), (ids) =>
+        this.prisma.category.findMany({
+          where: { id: { in: ids } },
+          select: named,
+        }),
+      ),
+      read(idsOf('MESSAGE_TEMPLATE'), (ids) =>
+        this.prisma.messageTemplate.findMany({
+          where: { id: { in: ids } },
+          select: named,
+        }),
+      ),
     ]);
 
     const labels = new Map<string, string>();
@@ -248,6 +262,8 @@ export class AuditLogService {
       ['LEAD_SOURCE', sources],
       ['ASSIGNMENT_RULE', rules],
       ['TAG', tags],
+      ['CATEGORY', categories],
+      ['MESSAGE_TEMPLATE', templates],
     ] as const) {
       for (const item of list) labels.set(`${type}:${item.id}`, item.name);
     }

@@ -23,22 +23,66 @@ interface NameWhereCall {
 }
 
 /** Mocks held as locals so assertions never reference an unbound class method. */
+/** A category as the audit's selects read it back. */
+const stored = { name: 'Default', parentId: null, isActive: true, position: 0 };
+
+/** What a write's data makes of the stored row: the relation write becomes the parent id. */
+function written(data: Record<string, unknown>) {
+  const parent = data.parent as
+    { connect?: { id: string }; disconnect?: true } | undefined;
+  return {
+    ...stored,
+    ...(data.name === undefined ? {} : { name: data.name }),
+    ...(data.isActive === undefined ? {} : { isActive: data.isActive }),
+    ...(data.position === undefined ? {} : { position: data.position }),
+    ...(parent?.connect ? { parentId: parent.connect.id } : {}),
+    ...(parent?.disconnect ? { parentId: null } : {}),
+    ...(data.parentId === undefined ? {} : { parentId: data.parentId }),
+  };
+}
+
 function makeService() {
   const findMany = jest.fn();
   const findFirst = jest.fn().mockResolvedValue(null);
-  const create = jest.fn();
-  const update = jest.fn();
-  const remove = jest.fn();
+  const create = jest
+    .fn()
+    .mockImplementation((args: { data: Record<string, unknown> }) =>
+      Promise.resolve({ id: 'new', ...written(args.data) }),
+    );
+  const update = jest
+    .fn()
+    .mockImplementation((args: { data: Record<string, unknown> }) =>
+      Promise.resolve(written(args.data)),
+    );
+  const remove = jest.fn().mockResolvedValue(stored);
+  // The category as the locked read inside an update's transaction finds it (AUD-04).
+  const findUniqueOrThrow = jest.fn().mockResolvedValue(stored);
   const groupBy = jest.fn().mockResolvedValue([]);
   const leadCount = jest.fn().mockResolvedValue(0);
-  const leadUpdateMany = jest.fn();
-  const $transaction = jest.fn().mockResolvedValue([]);
+  const leadUpdateMany = jest.fn().mockResolvedValue({ count: 3 });
+  const auditCreateMany = jest.fn().mockResolvedValue({ count: 1 });
+  const $queryRaw = jest.fn().mockResolvedValue([]);
 
   const prisma = {
-    category: { findMany, findFirst, create, update, delete: remove },
+    category: {
+      findMany,
+      findFirst,
+      findUniqueOrThrow,
+      create,
+      update,
+      delete: remove,
+    },
     lead: { groupBy, count: leadCount, updateMany: leadUpdateMany },
-    $transaction,
+    auditEvent: { createMany: auditCreateMany },
+    $queryRaw,
   } as unknown as PrismaService;
+  // An array runs as a batch; a callback gets the client as its transaction.
+  const $transaction = jest.fn((arg: unknown) =>
+    typeof arg === 'function'
+      ? (arg as (tx: PrismaService) => Promise<unknown>)(prisma)
+      : Promise.all(arg as Promise<unknown>[]),
+  );
+  Object.assign(prisma, { $transaction });
 
   const currentUser = {
     resolve: jest
@@ -57,9 +101,18 @@ function makeService() {
     groupBy,
     leadCount,
     leadUpdateMany,
+    findUniqueOrThrow,
+    auditCreateMany,
+    $queryRaw,
     $transaction,
   };
 }
+
+/** The rows the audit write was asked for, in call order. */
+const auditRows = (auditCreateMany: jest.Mock) =>
+  (
+    auditCreateMany.mock.calls as [{ data: Record<string, unknown>[] }][]
+  ).flatMap(([args]) => args.data);
 
 const row = (over: Partial<Record<string, unknown>> = {}) => ({
   id: 'c1',
@@ -235,7 +288,7 @@ describe('CategoriesService.update', () => {
 
 describe('CategoriesService.move', () => {
   it('renumbers the whole sibling list in one transaction', async () => {
-    const { service, findMany, $transaction } = makeService();
+    const { service, findMany, update, $transaction } = makeService();
     findMany
       .mockResolvedValueOnce([
         { id: 'a', name: 'A', parentId: null, position: 0 },
@@ -246,9 +299,11 @@ describe('CategoriesService.move', () => {
 
     await service.move('c', { parentId: null, position: 0 });
 
+    // One batch: the three renumbering writes, plus the move's event (AUD-04).
     expect($transaction).toHaveBeenCalledTimes(1);
     const [batch] = $transaction.mock.calls[0] as [unknown[]];
-    expect(batch).toHaveLength(3);
+    expect(batch).toHaveLength(4);
+    expect(update).toHaveBeenCalledTimes(3);
   });
 
   it('refuses a move into its own subtree', async () => {
@@ -309,7 +364,9 @@ describe('CategoriesService.remove', () => {
     ]);
 
     await expect(service.remove('c1')).resolves.toEqual({ id: 'c1' });
-    expect(remove).toHaveBeenCalledWith({ where: { id: 'c1' } });
+    expect(remove).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'c1' } }),
+    );
   });
 
   it('refuses an unknown id', async () => {
@@ -319,5 +376,179 @@ describe('CategoriesService.remove', () => {
     await expect(service.remove('nope')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+});
+
+describe('CategoriesService — configuration audit (AUD-04)', () => {
+  const graph = [{ id: 'c1', name: 'Default', parentId: null, position: 0 }];
+
+  it('records a new category as CREATED, by the signed-in user, in the create’s transaction', async () => {
+    const { service, findMany, auditCreateMany, $transaction } = makeService();
+    findMany
+      .mockResolvedValueOnce(graph)
+      .mockResolvedValue([row({ id: 'new', name: 'Retail', position: 1 })]);
+
+    await service.create({ name: 'Retail' });
+
+    expect($transaction).toHaveBeenCalledTimes(1);
+    expect(auditRows(auditCreateMany)).toEqual([
+      {
+        entityType: 'CATEGORY',
+        entityId: 'new',
+        leadId: null,
+        action: 'CREATED',
+        actorType: 'USER',
+        actorId: 'admin-1',
+        source: 'categories.create',
+        before: undefined,
+        after: { name: 'Retail', parentId: null, isActive: true, position: 1 },
+        metadata: undefined,
+      },
+    ]);
+  });
+
+  it('records a rename as RENAMED with how many leads it relabelled', async () => {
+    const { service, findMany, auditCreateMany } = makeService();
+    findMany
+      .mockResolvedValueOnce(graph)
+      .mockResolvedValue([row({ name: 'Standard' })]);
+
+    await service.update('c1', { name: 'Standard' });
+
+    expect(auditRows(auditCreateMany)).toMatchObject([
+      {
+        entityType: 'CATEGORY',
+        entityId: 'c1',
+        action: 'RENAMED',
+        source: 'categories.update',
+        before: { name: 'Default' },
+        after: { name: 'Standard' },
+        metadata: { leadsRelabelled: 3 },
+      },
+    ]);
+  });
+
+  it('records a deactivation and a re-parent as one UPDATED with only what changed', async () => {
+    const { service, findMany, auditCreateMany } = makeService();
+    findMany
+      .mockResolvedValueOnce([
+        ...graph,
+        { id: 'p1', name: 'Parent', parentId: null, position: 1 },
+      ])
+      .mockResolvedValue([row()]);
+
+    await service.update('c1', { isActive: false, parentId: 'p1' });
+
+    expect(auditRows(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        action: 'UPDATED',
+        before: { parentId: null, isActive: true },
+        after: { parentId: 'p1', isActive: false },
+      }),
+    ]);
+  });
+
+  it('records nothing for a save that changes nothing', async () => {
+    const { service, findMany, auditCreateMany } = makeService();
+    findMany.mockResolvedValueOnce(graph).mockResolvedValue([row()]);
+
+    await service.update('c1', { name: 'Default', isActive: true });
+
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('locks the category before reading the state it compares against', async () => {
+    const { service, findMany, findUniqueOrThrow, $queryRaw } = makeService();
+    findMany
+      .mockResolvedValueOnce(graph)
+      .mockResolvedValue([row({ isActive: false })]);
+
+    await service.update('c1', { isActive: false });
+
+    expect($queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      findUniqueOrThrow.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('records nothing when the rename cascade fails — the change and its event roll back together', async () => {
+    const { service, findMany, leadUpdateMany, auditCreateMany } =
+      makeService();
+    findMany.mockResolvedValueOnce(graph);
+    leadUpdateMany.mockRejectedValue(new Error('cascade failed'));
+
+    await expect(service.update('c1', { name: 'Standard' })).rejects.toThrow(
+      'cascade failed',
+    );
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records a drag as one MOVED for the dragged category, by its index among its siblings', async () => {
+    const { service, findMany, auditCreateMany } = makeService();
+    findMany
+      .mockResolvedValueOnce([
+        { id: 'a', name: 'A', parentId: null, position: 0 },
+        { id: 'b', name: 'B', parentId: null, position: 5 },
+        { id: 'c', name: 'C', parentId: null, position: 9 },
+      ])
+      .mockResolvedValue([]);
+
+    await service.move('c', { parentId: null, position: 0 });
+
+    expect(auditRows(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityType: 'CATEGORY',
+        entityId: 'c',
+        action: 'MOVED',
+        source: 'categories.move',
+        before: { position: 2 },
+        after: { position: 0 },
+      }),
+    ]);
+  });
+
+  it('records nothing for a drop back where the category already was', async () => {
+    const { service, findMany, auditCreateMany } = makeService();
+    findMany
+      .mockResolvedValueOnce([
+        { id: 'a', name: 'A', parentId: null, position: 0 },
+        { id: 'b', name: 'B', parentId: null, position: 1 },
+      ])
+      .mockResolvedValue([]);
+
+    await service.move('b', { parentId: null, position: 1 });
+
+    expect(auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records a delete as DELETED with what the category was; refused deletes record nothing', async () => {
+    const deleted = makeService();
+    deleted.findMany.mockResolvedValue(graph);
+    await deleted.service.remove('c1');
+    expect(auditRows(deleted.auditCreateMany)).toMatchObject([
+      {
+        entityType: 'CATEGORY',
+        entityId: 'c1',
+        action: 'DELETED',
+        source: 'categories.delete',
+        before: stored,
+      },
+    ]);
+
+    const withChildren = makeService();
+    withChildren.findMany.mockResolvedValue([
+      ...graph,
+      { id: 'c2', name: 'Child', parentId: 'c1', position: 0 },
+    ]);
+    await expect(withChildren.service.remove('c1')).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    const inUse = makeService();
+    inUse.findMany.mockResolvedValue(graph);
+    inUse.leadCount.mockResolvedValue(4);
+    await expect(inUse.service.remove('c1')).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(withChildren.auditCreateMany).not.toHaveBeenCalled();
+    expect(inUse.auditCreateMany).not.toHaveBeenCalled();
   });
 });

@@ -14,8 +14,8 @@ import { Prisma } from '../generated/prisma/client';
  *
  * Only LEAD, LOGISTICS_ORDER, ACCOUNTS_RECORD, ACTIVITY and LEAD_NOTE events carry a `leadId`
  * and so appear on a customer journey. The administrative ones (users, roles, permissions,
- * settings, documents, exports, and the configuration catalogues of AUD-03) have `leadId` null
- * and are read in the Super Admin's Audit Log (AUD-02).
+ * settings, documents, exports, and the configuration catalogues of AUD-03 and AUD-04) have
+ * `leadId` null and are read in the Super Admin's Audit Log (AUD-02).
  */
 export const AUDIT_ENTITY_TYPES = [
   'LEAD',
@@ -37,6 +37,8 @@ export const AUDIT_ENTITY_TYPES = [
   'LEAD_SOURCE',
   'ASSIGNMENT_RULE',
   'TAG',
+  'CATEGORY',
+  'MESSAGE_TEMPLATE',
 ] as const;
 
 export type AuditEntityType = (typeof AUDIT_ENTITY_TYPES)[number];

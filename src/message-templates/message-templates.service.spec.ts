@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { NotFoundException } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
@@ -5,6 +6,7 @@ import {
   MessageTemplateStatus,
   MessageTemplateType,
 } from '../generated/prisma/client';
+import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { MessageTemplatesService } from './message-templates.service';
 import {
@@ -38,13 +40,38 @@ function makeService() {
   const create = jest.fn().mockResolvedValue(stored());
   const update = jest.fn().mockResolvedValue(stored());
   const findFirst = jest.fn().mockResolvedValue({ id: ID });
+  // The template as the locked read inside a change's transaction finds it (AUD-04).
+  const findUniqueOrThrow = jest.fn().mockResolvedValue(stored());
+  const auditCreateMany = jest.fn().mockResolvedValue({ count: 1 });
+  const $queryRaw = jest.fn().mockResolvedValue([]);
 
   const prisma = {
-    messageTemplate: { findMany, count, create, update, findFirst },
+    messageTemplate: {
+      findMany,
+      count,
+      create,
+      update,
+      findFirst,
+      findUniqueOrThrow,
+    },
+    auditEvent: { createMany: auditCreateMany },
+    $queryRaw,
   } as unknown as PrismaService;
+  // A callback gets the client as its transaction.
+  const $transaction = jest.fn((run: (tx: PrismaService) => Promise<unknown>) =>
+    run(prisma),
+  );
+  Object.assign(prisma, { $transaction });
+  const currentUser = {
+    resolve: jest.fn().mockResolvedValue({ id: ACTOR, role: 'SUPERADMIN' }),
+  } as unknown as CurrentUserService;
 
   return {
-    service: new MessageTemplatesService(prisma),
+    service: new MessageTemplatesService(prisma, currentUser),
+    findUniqueOrThrow,
+    auditCreateMany,
+    $queryRaw,
+    $transaction,
     findMany,
     count,
     create,
@@ -264,6 +291,159 @@ describe('MessageTemplatesService — create, update, delete', () => {
 
     await expect(service.remove(ID)).rejects.toThrow(NotFoundException);
     expect(update).not.toHaveBeenCalled();
+  });
+});
+
+describe('MessageTemplatesService — configuration audit (AUD-04)', () => {
+  const auditRows = (auditCreateMany: jest.Mock) =>
+    (
+      auditCreateMany.mock.calls as [{ data: Record<string, unknown>[] }][]
+    ).flatMap(([args]) => args.data);
+  const fingerprint = (content: string) =>
+    createHash('sha256').update(content).digest('hex').slice(0, 16);
+
+  it('records a new template as CREATED by its author, with a fingerprint of the body and never the body', async () => {
+    const { service, create, auditCreateMany, $transaction } = makeService();
+    create.mockResolvedValue(
+      stored({ content: '<p>Dear customer, your order ships today</p>' }),
+    );
+
+    await service.create(
+      {
+        name: 'testing',
+        type: MessageTemplateType.WHATSAPP,
+        content: '<p>Dear customer, your order ships today</p>',
+        isActive: true,
+      },
+      ACTOR,
+    );
+
+    expect($transaction).toHaveBeenCalledTimes(1);
+    expect(auditRows(auditCreateMany)).toEqual([
+      {
+        entityType: 'MESSAGE_TEMPLATE',
+        entityId: ID,
+        leadId: null,
+        action: 'CREATED',
+        actorType: 'USER',
+        actorId: ACTOR,
+        source: 'message-templates.create',
+        before: undefined,
+        after: {
+          name: 'testing',
+          type: MessageTemplateType.WHATSAPP,
+          status: MessageTemplateStatus.ACTIVE,
+          contentFingerprint: fingerprint(
+            '<p>Dear customer, your order ships today</p>',
+          ),
+        },
+        metadata: undefined,
+      },
+    ]);
+    expect(JSON.stringify(auditRows(auditCreateMany))).not.toContain(
+      'Dear customer',
+    );
+  });
+
+  it('records a new body as an UPDATED fingerprint change, a new name as RENAMED', async () => {
+    const { service, update, auditCreateMany } = makeService();
+    update.mockResolvedValue(
+      stored({ name: 'Order shipped', content: '<p>bye</p>' }),
+    );
+
+    await service.update(ID, { name: 'Order shipped', content: '<p>bye</p>' });
+
+    expect(
+      auditRows(auditCreateMany).map((row) => [
+        row.action,
+        row.before,
+        row.after,
+      ]),
+    ).toEqual([
+      ['RENAMED', { name: 'testing' }, { name: 'Order shipped' }],
+      [
+        'UPDATED',
+        { contentFingerprint: fingerprint('<p>hello</p>') },
+        { contentFingerprint: fingerprint('<p>bye</p>') },
+      ],
+    ]);
+    const text = JSON.stringify(auditRows(auditCreateMany));
+    expect(text).not.toContain('hello');
+    expect(text).not.toContain('bye');
+  });
+
+  it('records a deactivation as UPDATED status, and nothing for a save that changes nothing', async () => {
+    const changed = makeService();
+    changed.update.mockResolvedValue(
+      stored({ status: MessageTemplateStatus.VERIFICATION_PENDING }),
+    );
+    await changed.service.update(ID, { isActive: false });
+    expect(auditRows(changed.auditCreateMany)).toEqual([
+      expect.objectContaining({
+        action: 'UPDATED',
+        before: { status: MessageTemplateStatus.ACTIVE },
+        after: { status: MessageTemplateStatus.VERIFICATION_PENDING },
+      }),
+    ]);
+
+    const same = makeService();
+    await same.service.update(ID, {
+      name: 'testing',
+      content: '<p>hello</p>',
+      isActive: true,
+    });
+    expect(same.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('locks the template before reading the state it compares against', async () => {
+    const { service, findUniqueOrThrow, $queryRaw } = makeService();
+
+    await service.update(ID, { name: 'Renamed' });
+
+    expect($queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      findUniqueOrThrow.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('records nothing when the write fails, or the template is gone', async () => {
+    const failing = makeService();
+    failing.update.mockRejectedValue(new Error('write failed'));
+    await expect(failing.service.update(ID, { name: 'X' })).rejects.toThrow(
+      'write failed',
+    );
+    expect(failing.auditCreateMany).not.toHaveBeenCalled();
+
+    const gone = makeService();
+    gone.findFirst.mockResolvedValue(null);
+    await expect(gone.service.update(ID, { name: 'X' })).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    await expect(gone.service.remove(ID)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(gone.auditCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('records a soft delete as DELETED with what the template was, by the signed-in user', async () => {
+    const { service, auditCreateMany } = makeService();
+
+    await service.remove(ID);
+
+    expect(auditRows(auditCreateMany)).toEqual([
+      expect.objectContaining({
+        entityType: 'MESSAGE_TEMPLATE',
+        entityId: ID,
+        action: 'DELETED',
+        actorId: ACTOR,
+        source: 'message-templates.delete',
+        before: {
+          name: 'testing',
+          type: MessageTemplateType.WHATSAPP,
+          status: MessageTemplateStatus.ACTIVE,
+          contentFingerprint: fingerprint('<p>hello</p>'),
+        },
+      }),
+    ]);
   });
 });
 

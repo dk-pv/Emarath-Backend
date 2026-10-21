@@ -92,6 +92,8 @@ function makeService(
     leadSource: { findMany: named([['source-1', 'Website']]) },
     assignmentRule: { findMany: named([['rule-1', 'Round robin']]) },
     tag: { findMany: named([['tag-1', 'BDE RISK']]) },
+    category: { findMany: named([['category-1', 'Retail']]) },
+    messageTemplate: { findMany: named([['template-1', 'Order shipped']]) },
   };
   const prisma = {
     $transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
@@ -253,6 +255,42 @@ describe('AuditLogService.list (AUD-02)', () => {
       'BDE RISK',
       null,
     ]);
+  });
+
+  it('names categories and message templates by their own names (AUD-04)', async () => {
+    const { service } = makeService([
+      event({ id: 'm1', entityType: 'CATEGORY', entityId: 'category-1' }),
+      event({
+        id: 'm2',
+        entityType: 'MESSAGE_TEMPLATE',
+        entityId: 'template-1',
+      }),
+      event({ id: 'm3', entityType: 'CATEGORY', entityId: 'category-gone' }),
+    ]);
+
+    const { rows } = await service.list(query());
+
+    expect(rows.map((row) => row.entityLabel)).toEqual([
+      'Retail',
+      'Order shipped',
+      null,
+    ]);
+  });
+
+  it('shows a template’s content fingerprint: the key is not one the redaction hides', async () => {
+    const { service } = makeService([
+      event({
+        entityType: 'MESSAGE_TEMPLATE',
+        entityId: 'template-1',
+        before: { contentFingerprint: '0123456789abcdef' },
+        after: { contentFingerprint: 'fedcba9876543210' },
+      }),
+    ]);
+
+    const { rows } = await service.list(query());
+
+    expect(rows[0].before).toEqual({ contentFingerprint: '0123456789abcdef' });
+    expect(rows[0].after).toEqual({ contentFingerprint: 'fedcba9876543210' });
   });
 
   it('shows a form whose arrangement lists the email field: a field key is a value, not hidden', async () => {
