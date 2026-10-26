@@ -47,7 +47,7 @@ import {
   toLeadEditData,
   toLeadListItem,
 } from './dto/lead-response.dto';
-import { LeadFilterOptions } from './dto/lead-filter-options.dto';
+import { AgentOption, LeadFilterOptions } from './dto/lead-filter-options.dto';
 import { CreateLeadDto } from './dto/create-lead.dto';
 import {
   DuplicateCheckQueryDto,
@@ -213,10 +213,10 @@ export class LeadsService {
   private async agentOptions(
     user: CurrentUser,
     scope: Prisma.LeadWhereInput,
-  ): Promise<{ id: string; name: string }[]> {
+  ): Promise<AgentOption[]> {
     if (user.role === UserRole.SALES_AGENT) {
       const self = await this.repository.findUserSummary(user.id);
-      return self ? [self] : [];
+      return self ? [{ ...self, reportingToId: null }] : [];
     }
     return this.repository.assigneesOf(scope);
   }

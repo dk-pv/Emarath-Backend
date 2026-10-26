@@ -15,11 +15,14 @@ const ZERO = new Prisma.Decimal(0);
  * must survive the wire. `pctRevenueTargetAchieved` is null when the team has no
  * revenue target set at all, which the UI renders as `NA`; it is deliberately
  * uncapped, because beating a target is the normal case in the reference (AC5).
+ * `revenueTarget` is the target it divides by — what Sales Pipeline Analysis' gauge
+ * prints beside the achieved amount — null under the same rule.
  */
 export interface TeamRevenue {
   totalLeads: number;
   totalCalls: number;
   totalConversion: string;
+  revenueTarget: string | null;
   pctRevenueTargetAchieved: number | null;
 }
 
@@ -121,6 +124,7 @@ export class TeamRevenueService {
       totalLeads,
       totalCalls,
       totalConversion: converted.toString(),
+      revenueTarget: target.isZero() ? null : target.toString(),
       // Never clamped: the reference's own board reads 567 % (AC5). Null — not
       // zero — when no target exists, so the UI can say NA instead of implying
       // the team achieved nothing.

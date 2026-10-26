@@ -3,6 +3,7 @@ import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ASSIGNABLE_USER_WHERE } from '../auth/role-groups';
 import { LEAD_EDIT_SELECT, LEAD_LIST_SELECT } from './dto/lead-response.dto';
+import { AgentOption } from './dto/lead-filter-options.dto';
 import { LeadSortColumn } from './dto/list-leads-query.dto';
 import { pinnedPageSlice } from './pinned-page';
 import { duplicatePhones } from './lead-where';
@@ -290,18 +291,28 @@ export class LeadsRepository {
    * The distinct agents assigned to a scoped set of leads (LEAD-03.3).
    *
    * `lead` filters the assignments by the same scope as the list, so the option
-   * list only ever contains agents who appear on leads the caller may open.
+   * list only ever contains agents who appear on leads the caller may open. Each names
+   * who they report to only when that manager is in the same list — the Analytics Sales
+   * Agent menu nests a member under their manager — so the line never reveals a colleague
+   * the list would not.
    */
-  async assigneesOf(
-    where: Prisma.LeadWhereInput,
-  ): Promise<{ id: string; name: string }[]> {
+  async assigneesOf(where: Prisma.LeadWhereInput): Promise<AgentOption[]> {
     const rows = await this.prisma.leadAssignment.findMany({
       where: { lead: where },
-      select: { user: { select: { id: true, name: true } } },
+      select: {
+        user: { select: { id: true, name: true, reportingToId: true } },
+      },
       distinct: ['userId'],
     });
+    const listed = new Set(rows.map((row) => row.user.id));
     return rows
-      .map((row) => row.user)
+      .map(({ user }) => ({
+        ...user,
+        reportingToId:
+          user.reportingToId !== null && listed.has(user.reportingToId)
+            ? user.reportingToId
+            : null,
+      }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 

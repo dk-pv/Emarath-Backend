@@ -7,10 +7,17 @@
  * role scope as the list itself — an agent never sees a source, status or
  * colleague that does not appear on a lead they may open.
  */
+/** A Sales Agent option. `reportingToId` names a manager in the same list, else null. */
+export interface AgentOption {
+  id: string;
+  name: string;
+  reportingToId: string | null;
+}
+
 export interface LeadFilterOptions {
   sources: string[];
   statuses: string[];
-  agents: { id: string; name: string }[];
+  agents: AgentOption[];
   /** LEAD-12.1 AC4: the tags present on the caller's scoped leads. */
   tags: { id: string; name: string }[];
 }

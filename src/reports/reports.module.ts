@@ -27,16 +27,23 @@ import { TodaysFollowUpsReportService } from './todays-follow-ups.service';
 import { OverdueFollowUpsReportService } from './overdue-follow-ups.service';
 import { TeamPerformanceController } from './team-performance.controller';
 import { TeamPerformanceService } from './team-performance.service';
+import { SalesFunnelController } from './sales-funnel.controller';
+import { SalesFunnelReportService } from './sales-funnel.service';
+import { SalesPipelineController } from './sales-pipeline.controller';
+import { SalesPipelineReportService } from './sales-pipeline.service';
+import { StagesModule } from '../stages/stages.module';
 
 /**
  * The Reports feature (RPT-02.1: No Activity Leads; RPT-02.2: Today Leads; RPT-02.3: Leads By
  * Status; RPT-02.4: Leads By Source; RPT-02.5: Leads By Ownership; RPT-02.6: Converted Leads;
- * RPT-02.7: Lost Leads; RPT-03.2: Overdue Follow Ups; RPT-03.1: Today's Follow Ups; RPT-03.3: Upcoming Follow Ups; Teams v1: Team Performance). PrismaService and CurrentUserService are
- * global; the leads reports reuse the leads module's `buildLeadWhere` and the follow-up reports
- * reuse the activities module's scope/bucket helpers directly (pure functions), so no module
- * imports are needed. Later report tasks add their services here.
+ * RPT-02.7: Lost Leads; RPT-03.2: Overdue Follow Ups; RPT-03.1: Today's Follow Ups; RPT-03.3: Upcoming Follow Ups; Teams v1: Team Performance; Analytics: Sales Funnel, Sales Pipeline Analysis). PrismaService and
+ * CurrentUserService are global; the leads reports reuse the leads module's `buildLeadWhere` and
+ * the follow-up reports reuse the activities module's scope/bucket helpers directly (pure
+ * functions). The Analytics reports read the stage catalogue through StagesModule. Later report
+ * tasks add their services here.
  */
 @Module({
+  imports: [StagesModule],
   controllers: [
     ReportsController,
     TodayLeadsController,
@@ -52,6 +59,8 @@ import { TeamPerformanceService } from './team-performance.service';
     TodaysFollowUpsController,
     UpcomingFollowUpsController,
     TeamPerformanceController,
+    SalesFunnelController,
+    SalesPipelineController,
   ],
   providers: [
     NoActivityReportService,
@@ -68,6 +77,8 @@ import { TeamPerformanceService } from './team-performance.service';
     TodaysFollowUpsReportService,
     UpcomingFollowUpsReportService,
     TeamPerformanceService,
+    SalesFunnelReportService,
+    SalesPipelineReportService,
   ],
 })
 export class ReportsModule {}

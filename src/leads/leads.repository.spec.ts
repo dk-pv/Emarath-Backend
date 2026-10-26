@@ -146,6 +146,36 @@ describe('LeadsRepository.assignableUsers', () => {
   });
 });
 
+describe('LeadsRepository.assigneesOf', () => {
+  // The Analytics Sales Agent menu nests a member under the manager they report to.
+  it('names a reporting line only when the manager is in the same list', async () => {
+    const findMany = jest.fn().mockResolvedValue([
+      { user: { id: 'u2', name: 'Neha', reportingToId: 'u1' } },
+      { user: { id: 'u1', name: 'Ahamed', reportingToId: null } },
+      // Reports to someone on none of the caller's leads: listed, but at the top level.
+      { user: { id: 'u3', name: 'Bilal', reportingToId: 'u9' } },
+    ]);
+    const repository = new LeadsRepository({
+      leadAssignment: { findMany },
+    } as unknown as PrismaService);
+
+    const agents = await repository.assigneesOf({ deletedAt: null });
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: { lead: { deletedAt: null } },
+      select: {
+        user: { select: { id: true, name: true, reportingToId: true } },
+      },
+      distinct: ['userId'],
+    });
+    expect(agents).toEqual([
+      { id: 'u1', name: 'Ahamed', reportingToId: null },
+      { id: 'u3', name: 'Bilal', reportingToId: null },
+      { id: 'u2', name: 'Neha', reportingToId: 'u1' },
+    ]);
+  });
+});
+
 describe('LeadsRepository.statusChangesForTimeline', () => {
   it('reads only this lead’s own status moves from the audit log, newest first', async () => {
     const findMany = jest.fn().mockResolvedValue([]);

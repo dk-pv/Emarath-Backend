@@ -175,16 +175,20 @@ describe('TeamRevenueService.getTeamRevenue — the figures', () => {
 
     // 3120.50 against a 260 target = 1200.19 %, never clamped (AC5).
     expect(result.pctRevenueTargetAchieved).toBe(1200.19);
+    // The target it divides by travels too, as a decimal string.
+    expect(result.revenueTarget).toBe('260');
   });
 
   it('reports NA (null) rather than 0 % when the team has no target', async () => {
     const zero = makeService({ target: dec('0') });
     await expect(zero.service.getTeamRevenue(PERIOD)).resolves.toMatchObject({
+      revenueTarget: null,
       pctRevenueTargetAchieved: null,
     });
 
     const none = makeService({ target: null });
     await expect(none.service.getTeamRevenue(PERIOD)).resolves.toMatchObject({
+      revenueTarget: null,
       pctRevenueTargetAchieved: null,
     });
   });
@@ -246,6 +250,7 @@ describe('TeamRevenueService.getTeamRevenue — the figures', () => {
       totalLeads: 0,
       totalCalls: 0,
       totalConversion: '0',
+      revenueTarget: null,
       pctRevenueTargetAchieved: null,
     });
   });
