@@ -275,6 +275,7 @@ export class QcRejectDto {
  * number exists before an order ships, so the transition is refused without one.
  */
 export class DispatchOrderDto {
+  @Transform(trim)
   @IsString()
   @IsNotEmpty({ message: 'awbNumber is required before dispatch' })
   @MaxLength(64)

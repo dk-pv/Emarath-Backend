@@ -35,13 +35,12 @@ function makeService(
   return new OverdueFollowUpsReportService(prisma, currentUser);
 }
 
-const query = (over: Partial<OverdueFollowUpsQueryDto> = {}) =>
-  ({
-    page: 1,
-    size: 100,
-    todayStart: '2026-09-02T00:00:00.000Z',
-    ...over,
-  }) as OverdueFollowUpsQueryDto;
+const query = (over: Partial<OverdueFollowUpsQueryDto> = {}) => ({
+  page: 1,
+  size: 100,
+  todayStart: '2026-09-02T00:00:00.000Z',
+  ...over,
+});
 
 const GROUPS = [group('u-carol', 5), group('u-alice', 12), group('u-bob', 3)];
 const NAMES = [

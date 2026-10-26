@@ -61,9 +61,25 @@ export const EXPORT_COLUMNS: readonly {
   { header: 'QC Remarks', value: (row) => row.qcRemarks ?? '' },
 ];
 
-/** A timestamped, download-safe name: `qc-verified-orders-YYYYMMDD-HHmmss.csv`. */
-export function exportFilename(now = new Date()): string {
-  const pad = (value: number): string => String(value).padStart(2, '0');
-  const stamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}-${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
-  return `qc-verified-orders-${stamp}.csv`;
+/**
+ * A timestamped, download-safe name, `qc-verified-orders-YYYYMMDD-HHmmss.csv`, on the business
+ * clock (`BUSINESS_TIME_ZONE`) the delivery days use — an export at 02:00 in Dubai is not named
+ * after the day before.
+ */
+export function exportFilename(timeZone: string, now = new Date()): string {
+  const part = Object.fromEntries(
+    new Intl.DateTimeFormat('en-GB', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(now)
+      .map(({ type, value }) => [type, value]),
+  );
+  return `qc-verified-orders-${part.year}${part.month}${part.day}-${part.hour}${part.minute}${part.second}.csv`;
 }

@@ -248,7 +248,7 @@ export function parseLeadConditions(raw: string | undefined): LeadCondition[] {
       !OPERATORS_FOR[spec.kind].includes(operator as LeadConditionOperator)
     ) {
       throw new BadRequestException(
-        `operator ${String(operator)} is not valid for ${field}`,
+        `operator ${String(operator)} is not valid for ${String(field)}`,
       );
     }
     const op = operator as LeadConditionOperator;
@@ -317,7 +317,7 @@ const insensitive = { mode: 'insensitive' as const };
 
 /** A whitelisted scalar column matched by a Prisma filter — cast is safe post-whitelist. */
 function col(field: string, where: unknown): Prisma.LeadWhereInput {
-  return { [field]: where } as Prisma.LeadWhereInput;
+  return { [field]: where };
 }
 
 /** A scalar column and whether it is NOT NULL (see `FieldSpec.required`). */
@@ -552,10 +552,8 @@ function relationDateWhere(
 ): Prisma.LeadWhereInput {
   // Activities exclude soft-deleted; assignments have no soft delete.
   const base = relation === 'activities' ? { deletedAt: null } : {};
-  if (op === 'isEmpty')
-    return { [relation]: { none: base } } as Prisma.LeadWhereInput;
-  if (op === 'isNotEmpty')
-    return { [relation]: { some: base } } as Prisma.LeadWhereInput;
+  if (op === 'isEmpty') return { [relation]: { none: base } };
+  if (op === 'isNotEmpty') return { [relation]: { some: base } };
   // "Not between" means no row falls inside the range: a lead with one follow-up in it
   // must not match through another outside it, and a lead with none at all does match,
   // like every other negative operator here.
@@ -570,7 +568,7 @@ function relationDateWhere(
   }
   return {
     [relation]: { some: { ...base, [relColumn]: dateComparison(op, v) } },
-  } as Prisma.LeadWhereInput;
+  };
 }
 
 /** A text read through the complaints table. Positive ops match `some`; negatives match `none`. */

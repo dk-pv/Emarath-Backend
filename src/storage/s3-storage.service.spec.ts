@@ -126,6 +126,31 @@ describe('S3StorageService (FND-05.2)', () => {
     );
   });
 
+  const disposition = (): string =>
+    (
+      (getSignedUrl as jest.Mock).mock.calls.at(-1) as [
+        unknown,
+        { input: { ResponseContentDisposition: string } },
+      ]
+    )[1].input.ResponseContentDisposition;
+
+  it('names an ASCII download exactly as before', async () => {
+    await makeService().getSignedDownloadUrl('documents/abc/Photo.png', {
+      downloadName: 'Photo "v2".png',
+    });
+    expect(disposition()).toBe('attachment; filename="Photo _v2_.png"');
+  });
+
+  // Regression: a raw Arabic name in the header was read differently by each browser.
+  it('adds the exact UTF-8 name for a non-ASCII download, with an ASCII fallback', async () => {
+    await makeService().getSignedDownloadUrl('documents/abc/x.pdf', {
+      downloadName: "عقد (1)'s.pdf",
+    });
+    expect(disposition()).toBe(
+      "attachment; filename=\"___ (1)'s.pdf\"; filename*=UTF-8''%D8%B9%D9%82%D8%AF%20%281%29%27s.pdf",
+    );
+  });
+
   it('deletes an object by key (AC5)', async () => {
     mockSend.mockResolvedValue({});
     const service = makeService();

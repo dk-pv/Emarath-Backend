@@ -125,7 +125,7 @@ export class LeadFirstResponseQueryDto {
     normalizeFilterValues(value),
   )
   @IsArray({ message: 'activityType must be one or more values' })
-  @IsIn(ACTIVITY_TYPES as unknown as string[], {
+  @IsIn(ACTIVITY_TYPES, {
     each: true,
     message: `each activityType must be one of ${ACTIVITY_TYPES.join(', ')}`,
   })
@@ -137,7 +137,7 @@ export class LeadFirstResponseQueryDto {
 
   /** Which records tab is active: every lead, only contacted, or only untouched. */
   @Transform(trim)
-  @IsIn(CONTACT_FILTERS as unknown as string[], {
+  @IsIn(CONTACT_FILTERS, {
     message: `contact must be one of ${CONTACT_FILTERS.join(', ')}`,
   })
   @IsOptional()

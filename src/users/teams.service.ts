@@ -7,6 +7,7 @@ import {
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { TEAM_MEMBER_ROLES } from '../auth/role-groups';
+import { escapeLike } from '../leads/lead-search';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   AuditActor,
@@ -175,7 +176,7 @@ export class TeamsService {
       const clash = await tx.user.findFirst({
         where: {
           deletedAt: null,
-          team: { equals: dto.newName, mode: 'insensitive' },
+          team: { equals: escapeLike(dto.newName), mode: 'insensitive' },
           NOT: { team: current },
         },
         select: { team: true },

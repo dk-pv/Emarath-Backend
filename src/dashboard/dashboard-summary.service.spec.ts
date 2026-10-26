@@ -97,7 +97,7 @@ describe('DashboardSummaryService', () => {
       { fieldKey: 'Direct', label: 'Direct', count: 7, amount: '10' },
     ]);
 
-    const call = groupBy.mock.calls[0][0] as {
+    const call = (groupBy.mock.calls as unknown[][])[0][0] as {
       by: string[];
       where: { AND: unknown[] };
     };
@@ -130,7 +130,9 @@ describe('DashboardSummaryService', () => {
     );
 
     await service.getSummary();
-    const call = groupBy.mock.calls[0][0] as { where: { AND: unknown[] } };
+    const call = (groupBy.mock.calls as unknown[][])[0][0] as {
+      where: { AND: unknown[] };
+    };
     // `leadScopeWhere` always contributes the soft-delete predicate; an agent's own
     // scope fragment rides in the same clause.
     expect(call.where.AND[0]).toEqual(

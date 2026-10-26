@@ -18,6 +18,18 @@ describe('duplicateWhere', () => {
     ]);
   });
 
+  // Regression: the email is an ILIKE pattern to PostgreSQL, so "%" matched every address — an
+  // unrelated lead recorded as the original, and a duplicate check that answered for any pattern.
+  it('matches the email literally: % _ and \\ are escaped, case still ignored', () => {
+    const where = duplicateWhere(
+      { primaryPhone: '+971500000001', email: 'A_b%c\\d@X.com' },
+      false,
+    );
+    expect(where?.OR).toContainEqual({
+      email: { equals: 'A\\_b\\%c\\\\d@X.com', mode: 'insensitive' },
+    });
+  });
+
   it('excludes archived leads by default', () => {
     const where = duplicateWhere({ primaryPhone: '+971500000001' }, false);
     expect(where?.deletedAt).toBeNull();

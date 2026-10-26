@@ -40,8 +40,11 @@ function makeService(rows: ReturnType<typeof lead>[]) {
   return new DuplicateEnquiriesService(prisma, currentUser);
 }
 
-const query = (over: Partial<DuplicateEnquiriesQueryDto> = {}) =>
-  ({ page: 1, size: 100, ...over }) as DuplicateEnquiriesQueryDto;
+const query = (over: Partial<DuplicateEnquiriesQueryDto> = {}) => ({
+  page: 1,
+  size: 100,
+  ...over,
+});
 
 describe('DuplicateEnquiriesService', () => {
   it('groups leads that share a primary phone and ignores the singletons', async () => {

@@ -79,6 +79,51 @@ describe('LeadsRepository.update — custom values (LEAD-05.1)', () => {
   });
 });
 
+describe('LeadsRepository.update — assignees and tags', () => {
+  async function relationData(assigneeIds: string[], tagIds: string[]) {
+    const update = jest.fn().mockResolvedValue({ id: 'lead-1' });
+    const tx = { lead: { update } } as unknown as Prisma.TransactionClient;
+    await new LeadsRepository({} as PrismaService).update(
+      'lead-1',
+      { data: {}, assigneeIds, tagIds, complaintReason: null },
+      tx,
+    );
+    return (update.mock.calls[0] as [{ data: Record<string, unknown> }])[0]
+      .data;
+  }
+
+  // Regression: `deleteMany: {}` + `create` rewrote every assignment on every save, so the
+  // Assigned Date of an unchanged assignee became the time of the last edit.
+  it('removes only the assignees and tags that were dropped, and adds only new ones', async () => {
+    expect(await relationData(['u1', 'u2'], ['t1'])).toMatchObject({
+      assignments: {
+        deleteMany: { userId: { notIn: ['u1', 'u2'] } },
+        createMany: {
+          data: [{ userId: 'u1' }, { userId: 'u2' }],
+          skipDuplicates: true,
+        },
+      },
+      tags: {
+        deleteMany: { tagId: { notIn: ['t1'] } },
+        createMany: { data: [{ tagId: 't1' }], skipDuplicates: true },
+      },
+    });
+  });
+
+  it('still clears them all when the edit sends none', async () => {
+    expect(await relationData([], [])).toMatchObject({
+      assignments: {
+        deleteMany: { userId: { notIn: [] } },
+        createMany: { data: [], skipDuplicates: true },
+      },
+      tags: {
+        deleteMany: { tagId: { notIn: [] } },
+        createMany: { data: [], skipDuplicates: true },
+      },
+    });
+  });
+});
+
 describe('LeadsRepository.assignableUsers', () => {
   // Phase 2A: the Assigned options listed inactive users, whom every save now refuses.
   it('offers only the users a lead may newly be assigned to', async () => {

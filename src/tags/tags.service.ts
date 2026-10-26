@@ -88,24 +88,28 @@ export class TagsService {
     const admin = user.role === UserRole.SUPERADMIN;
     if (!admin) await this.access.assertMayCreate(user);
     await this.assertNameFree(name);
-    const created = await this.prisma.$transaction(async (tx) => {
-      const row = await tx.tag.create({
-        data: { name, isActive: admin ? (dto.isActive ?? true) : true },
-        select: TAG_SELECT,
+    const created = await this.prisma
+      .$transaction(async (tx) => {
+        const row = await tx.tag.create({
+          data: { name, isActive: admin ? (dto.isActive ?? true) : true },
+          select: TAG_SELECT,
+        });
+        const granted = admin
+          ? false
+          : await this.access.grantToCreator(tx, user, row.id);
+        await recordAuditEvents(tx, [
+          {
+            ...tagEvent(row.id, userActor(user), 'tags.create'),
+            action: 'CREATED',
+            after: { name: row.name, isActive: row.isActive },
+            ...(granted ? { metadata: { accessGrantedToCreator: true } } : {}),
+          },
+        ]);
+        return row;
+      })
+      .catch((error: unknown) => {
+        throw retiredNameClash(error, name);
       });
-      const granted = admin
-        ? false
-        : await this.access.grantToCreator(tx, user, row.id);
-      await recordAuditEvents(tx, [
-        {
-          ...tagEvent(row.id, userActor(user), 'tags.create'),
-          action: 'CREATED',
-          after: { name: row.name, isActive: row.isActive },
-          ...(granted ? { metadata: { accessGrantedToCreator: true } } : {}),
-        },
-      ]);
-      return row;
-    });
     return toNode(created);
   }
 
@@ -130,26 +134,30 @@ export class TagsService {
     }
 
     const actor = userActor(await this.currentUser.resolve());
-    const updated = await this.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM tags WHERE id = ${id}::uuid FOR UPDATE`;
-      const before = await tx.tag.findUniqueOrThrow({
-        where: { id },
-        select: { name: true, isActive: true },
+    const updated = await this.prisma
+      .$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM tags WHERE id = ${id}::uuid FOR UPDATE`;
+        const before = await tx.tag.findUniqueOrThrow({
+          where: { id },
+          select: { name: true, isActive: true },
+        });
+        const row = await tx.tag.update({
+          where: { id },
+          data,
+          select: TAG_SELECT,
+        });
+        await recordStateChange(
+          tx,
+          tagEvent(id, actor, 'tags.update'),
+          before,
+          { name: row.name, isActive: row.isActive },
+          [RENAME],
+        );
+        return row;
+      })
+      .catch((error: unknown) => {
+        throw retiredNameClash(error, newName ?? tag.name);
       });
-      const row = await tx.tag.update({
-        where: { id },
-        data,
-        select: TAG_SELECT,
-      });
-      await recordStateChange(
-        tx,
-        tagEvent(id, actor, 'tags.update'),
-        before,
-        { name: row.name, isActive: row.isActive },
-        [RENAME],
-      );
-      return row;
-    });
     return toNode(updated);
   }
 
@@ -200,8 +208,9 @@ export class TagsService {
 
   /**
    * Case-insensitive, as the rest of the catalogues are: "BDE RISK" and "bde risk" would
-   * read as the same tag to a person looking at the list. Soft-deleted rows are ignored,
-   * so retiring a tag frees its name again.
+   * read as the same tag to a person looking at the list. Soft-deleted rows are ignored here,
+   * but a retired tag keeps its row and so its exact name, which the column's unique index
+   * still holds: create and rename report that clash as a conflict (`retiredNameClash`).
    */
   private async assertNameFree(name: string, exceptId?: string): Promise<void> {
     const clash = await this.prisma.tag.findFirst({
@@ -218,6 +227,16 @@ export class TagsService {
       );
     }
   }
+}
+
+/** The unique name index refusing a retired tag's name is a 409 that says so, never a 500. */
+function retiredNameClash(error: unknown, name: string): unknown {
+  return error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === 'P2002'
+    ? new ConflictException(
+        `“${name}” is the name of a deleted tag, so it can’t be reused. Choose another name.`,
+      )
+    : error;
 }
 
 function toNode(row: TagRow): TagNode {

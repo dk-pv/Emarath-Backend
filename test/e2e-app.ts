@@ -4,8 +4,11 @@ import { Test } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
 import { App } from 'supertest/types';
+import { ConfigService } from '@nestjs/config';
 import { AppModule } from '../src/app.module';
 import { authContextMiddleware } from '../src/auth/auth-context.middleware';
+import { rejectForeignOrigins } from '../src/auth/origin-check.middleware';
+import type { AppConfig } from '../src/config/configuration';
 import { UserRole } from '../src/generated/prisma/client';
 
 /** A supertest agent that carries the session cookie on every request it makes. */
@@ -39,6 +42,11 @@ export async function createE2EApp(
 
   const app: INestApplication<App> = moduleRef.createNestApplication();
   app.setGlobalPrefix('api');
+  app.use(
+    rejectForeignOrigins(
+      moduleRef.get(ConfigService).getOrThrow<AppConfig>('app').corsOrigin,
+    ),
+  );
   app.use(cookieParser());
   app.use(authContextMiddleware);
   app.useGlobalPipes(

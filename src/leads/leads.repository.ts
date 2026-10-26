@@ -109,17 +109,21 @@ export class LeadsRepository {
       where: { id },
       data: {
         ...data,
+        // Only what changed: a kept assignee keeps its row, and with it the Assigned Date that
+        // the list, the KPIs, Lead Aging and round-robin read — an edit is not a reassignment.
         assignments: {
-          deleteMany: {},
-          create: assigneeIds.map((userId) => ({
-            user: { connect: { id: userId } },
-          })),
+          deleteMany: { userId: { notIn: assigneeIds } },
+          createMany: {
+            data: assigneeIds.map((userId) => ({ userId })),
+            skipDuplicates: true,
+          },
         },
         tags: {
-          deleteMany: {},
-          create: tagIds.map((tagId) => ({
-            tag: { connect: { id: tagId } },
-          })),
+          deleteMany: { tagId: { notIn: tagIds } },
+          createMany: {
+            data: tagIds.map((tagId) => ({ tagId })),
+            skipDuplicates: true,
+          },
         },
         // Full-replace (like assignments/tags): a value the form emptied is dropped,
         // a changed one rewritten, all atomic (LEAD-05.1, ADR-0051). Only when the

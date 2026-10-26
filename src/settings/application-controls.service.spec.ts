@@ -107,7 +107,7 @@ describe('SettingsService — Application Controls', () => {
       };
 
       await expect(service.saveApplicationGeneral(dto)).resolves.toEqual(dto);
-      const call = upsert.mock.calls[0][0] as UpsertCall;
+      const call = (upsert.mock.calls as unknown[][])[0][0] as UpsertCall;
       expect(call.where.key).toBe(APPLICATION_GENERAL_KEY);
       expect(call.create.value).toEqual(dto);
     });
@@ -217,7 +217,7 @@ describe('SettingsService — Application Controls', () => {
         { fieldKey: 'Converted', position: 2 },
       ]);
       expect(stored.leadSource).toEqual([{ fieldKey: 'Direct', position: 1 }]);
-      const call = upsert.mock.calls[0][0] as UpsertCall;
+      const call = (upsert.mock.calls as unknown[][])[0][0] as UpsertCall;
       expect(call.where.key).toBe(APPLICATION_DASHBOARD_KEY);
       expect(call.create.value).toEqual(stored);
     });

@@ -79,11 +79,13 @@ export class LeadsBulkService {
         { actor: userActor(user), source },
         async (tx) => {
           await handOverOpenFollowUps(tx, leadIds, dto.agentId);
+          // A lead already with this agent keeps its row and its Assigned Date.
           await tx.leadAssignment.deleteMany({
-            where: { leadId: { in: leadIds } },
+            where: { leadId: { in: leadIds }, userId: { not: dto.agentId } },
           });
           await tx.leadAssignment.createMany({
             data: leadIds.map((leadId) => ({ leadId, userId: dto.agentId })),
+            skipDuplicates: true,
           });
         },
       );

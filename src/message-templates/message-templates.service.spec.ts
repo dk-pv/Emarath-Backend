@@ -471,6 +471,25 @@ describe('template content safety', () => {
     expect(findUnsafeHtml('<b ONMOUSEOVER = "x">hi</b>')).not.toBeNull();
   });
 
+  // Regression: only a handler after whitespace was caught, but a browser also starts an
+  // attribute after a slash or a closing quote — this ran script in the editor.
+  it('rejects a handler the browser separates with a slash or a quote', () => {
+    for (const bad of [
+      '<span style="position:fixed;inset:0"/onmouseover=alert(1)>x</span>',
+      '<b title="x"onclick=alert(1)>x</b>',
+      "<i title='x'onfocus=alert(1)>x</i>",
+      '<b title=">" onclick="alert(1)">x</b>',
+    ]) {
+      expect(findUnsafeHtml(bad)).toContain('event handler');
+    }
+  });
+
+  it('still accepts ordinary text that happens to contain "on"', () => {
+    expect(
+      findUnsafeHtml('<p>Delivery on time, once confirmed = done</p>'),
+    ).toBeNull();
+  });
+
   it('rejects script, data and vbscript URLs', () => {
     expect(findUnsafeHtml('<p>javascript:alert(1)</p>')).toContain(
       'script URLs',

@@ -4,7 +4,7 @@ import { Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { LogisticsOrderFiltersDto } from './dto/logistics-order.dto';
-import { ExportOrderRow } from './logistics-export.columns';
+import { ExportOrderRow, exportFilename } from './logistics-export.columns';
 import { LogisticsOrdersService } from './logistics-orders.service';
 
 const HEADER =
@@ -138,6 +138,19 @@ describe('LogisticsOrdersService.exportCsv — which orders (3PL-01)', () => {
       ],
     });
     expect(second[0]).toMatchObject({ skip: 1000, take: 1000 });
+  });
+});
+
+describe('exportFilename', () => {
+  // Regression: the stamp was UTC, so an export early in the Dubai morning carried yesterday.
+  it('stamps the name on the business clock, not UTC', () => {
+    const at = new Date('2026-10-20T22:30:05Z');
+    expect(exportFilename('Asia/Dubai', at)).toBe(
+      'qc-verified-orders-20261021-023005.csv',
+    );
+    expect(exportFilename('UTC', at)).toBe(
+      'qc-verified-orders-20261020-223005.csv',
+    );
   });
 });
 

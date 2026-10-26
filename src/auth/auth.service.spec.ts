@@ -26,6 +26,8 @@ const USER_ROW = {
 
 function makeService(row: typeof USER_ROW | null, mailEnabled = true) {
   const findFirst = jest.fn().mockResolvedValue(row);
+  // Login and the reset request look the address up case-insensitively, as rows to choose from.
+  const findMany = jest.fn().mockResolvedValue(row ? [row] : []);
   const update = jest.fn().mockResolvedValue(row);
   const signAsync = jest.fn().mockResolvedValue('signed.jwt.token');
   const issue = jest.fn().mockResolvedValue('raw-refresh-token');
@@ -40,7 +42,7 @@ function makeService(row: typeof USER_ROW | null, mailEnabled = true) {
   // A reset's new hash and its history are one array transaction (AUD-01).
   const auditCreateMany = jest.fn();
   const prisma = {
-    user: { findFirst, update },
+    user: { findFirst, findMany, update },
     auditEvent: { createMany: auditCreateMany },
     $transaction: jest.fn((ops: unknown[]) => Promise.all(ops)),
   } as unknown as PrismaService;
@@ -79,6 +81,7 @@ function makeService(row: typeof USER_ROW | null, mailEnabled = true) {
       config,
     ),
     findFirst,
+    findMany,
     update,
     signAsync,
     issue,
@@ -159,6 +162,74 @@ describe('AuthService.login (AUTH-01.2/01.3)', () => {
     await expect(service.login(dto())).rejects.toThrow(
       new UnauthorizedException('Invalid email or password.'),
     );
+  });
+
+  // Regression: a phone keyboard's "Admin@…" was a 401 for the account stored as "admin@…".
+  it('signs in an email typed with different capitals', async () => {
+    const { service, findMany, issue } = makeService(USER_ROW);
+
+    await service.login(dto({ email: 'Admin@Emarath.local' }));
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: {
+        email: { equals: 'Admin@Emarath.local', mode: 'insensitive' },
+        deletedAt: null,
+      },
+      select: expect.any(Object) as unknown,
+    });
+    expect(issue).toHaveBeenCalledWith(USER_ROW.id, undefined, undefined);
+  });
+
+  it('prefers the exact address over a case-only twin', async () => {
+    const { service, findMany, issue } = makeService(USER_ROW);
+    const twin = {
+      ...USER_ROW,
+      id: '22222222-2222-2222-2222-222222222222',
+      email: 'Admin@emarath.local',
+    };
+    findMany.mockResolvedValue([twin, USER_ROW]);
+
+    await service.login(dto());
+
+    expect(issue).toHaveBeenCalledWith(USER_ROW.id, undefined, undefined);
+  });
+
+  // Regression: the case-insensitive lookup is ILIKE, so "%@domain" matched an arbitrary account
+  // and signed in as it with that account's password, no address needed.
+  it.each(['%@emarath.local', '_____@emarath.local'])(
+    'never signs in an account the lookup matched only as a pattern (%s)',
+    async (pattern) => {
+      const { service, findMany, signAsync, issue } = makeService(USER_ROW);
+      findMany.mockResolvedValue([USER_ROW]);
+      const compare = jest.spyOn(bcrypt, 'compare');
+
+      await expect(
+        service.login(dto({ email: pattern, password: PASSWORD })),
+      ).rejects.toThrow(
+        new UnauthorizedException('Invalid email or password.'),
+      );
+
+      // The password is still checked, against the equaliser rather than the matched account.
+      expect(compare).toHaveBeenCalledTimes(1);
+      expect(compare.mock.calls[0][1]).not.toBe(HASH);
+      expect(signAsync).not.toHaveBeenCalled();
+      expect(issue).not.toHaveBeenCalled();
+      compare.mockRestore();
+    },
+  );
+
+  it('makes one lookup whatever the outcome, so an unknown address costs what a known one does', async () => {
+    const known = makeService(USER_ROW);
+    await known.service.login(dto());
+    const unknown = makeService(null);
+    await expect(
+      unknown.service.login(dto({ email: 'nobody@emarath.local' })),
+    ).rejects.toThrow(UnauthorizedException);
+
+    for (const { findMany, findFirst } of [known, unknown]) {
+      expect(findMany).toHaveBeenCalledTimes(1);
+      expect(findFirst).not.toHaveBeenCalled();
+    }
   });
 });
 
@@ -264,29 +335,51 @@ describe('AuthService.requestPasswordReset (AUTH-03.1)', () => {
   });
 
   it('refuses with a clear 503 before any lookup when email is not set up, issuing no token', async () => {
-    const { service, findFirst, issueFor, sendPasswordReset } = makeService(
-      USER_ROW,
-      false,
-    );
+    const { service, findFirst, findMany, issueFor, sendPasswordReset } =
+      makeService(USER_ROW, false);
     const refused = service.requestPasswordReset('admin@emarath.local');
     await expect(refused).rejects.toBeInstanceOf(ServiceUnavailableException);
     await expect(refused).rejects.toThrow(/Ask an administrator/);
     expect(findFirst).not.toHaveBeenCalled();
+    expect(findMany).not.toHaveBeenCalled();
     expect(issueFor).not.toHaveBeenCalled();
     expect(sendPasswordReset).not.toHaveBeenCalled();
   });
 
   it('only targets active, non-deleted accounts', async () => {
-    const { service, findFirst } = makeService(USER_ROW);
+    const { service, findMany } = makeService(USER_ROW);
     await service.requestPasswordReset('admin@emarath.local');
-    const where = (findFirst.mock.calls as unknown[][])[0][0] as {
+    const where = (findMany.mock.calls as unknown[][])[0][0] as {
       where: Record<string, unknown>;
     };
     expect(where.where).toMatchObject({
-      email: 'admin@emarath.local',
+      email: { equals: 'admin@emarath.local', mode: 'insensitive' },
       deletedAt: null,
       isActive: true,
     });
+  });
+
+  it('finds the account for an email typed with different capitals', async () => {
+    const { service, findMany, issueFor } = makeService(USER_ROW);
+
+    await service.requestPasswordReset('Admin@Emarath.local');
+
+    expect(findMany).toHaveBeenCalledTimes(1);
+    expect(issueFor).toHaveBeenCalledWith(USER_ROW.id);
+  });
+
+  // Regression: "%@domain" (ILIKE wildcards) sent a reset email to an arbitrary account.
+  it('never emails an account the lookup matched only as a pattern', async () => {
+    const { service, findMany, issueFor, sendPasswordReset } =
+      makeService(USER_ROW);
+    findMany.mockResolvedValue([USER_ROW]);
+
+    await expect(
+      service.requestPasswordReset('%@emarath.local'),
+    ).resolves.toBeUndefined();
+
+    expect(issueFor).not.toHaveBeenCalled();
+    expect(sendPasswordReset).not.toHaveBeenCalled();
   });
 });
 

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { Response } from 'express';
-import { Prisma, UserRole } from '../generated/prisma/client';
+import { Prisma } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { toLeadListItem } from '../leads/dto/lead-response.dto';
@@ -17,8 +17,6 @@ import {
 const BATCH_SIZE = 1000;
 /** A hard ceiling so a runaway filter cannot stream unbounded rows. */
 const MAX_ROWS = 100_000;
-
-const ZERO = new Prisma.Decimal(0);
 
 /**
  * Newest first, stable across pages/batches (`id` breaks ties so a row never repeats or

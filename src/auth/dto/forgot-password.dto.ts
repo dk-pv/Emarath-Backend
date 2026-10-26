@@ -1,3 +1,4 @@
+import { Transform } from 'class-transformer';
 import { IsEmail, MaxLength } from 'class-validator';
 
 /**
@@ -6,6 +7,9 @@ import { IsEmail, MaxLength } from 'class-validator';
  * returns the same generic success as a registered one (AC2 — no account enumeration).
  */
 export class ForgotPasswordDto {
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsEmail({}, { message: 'A valid email is required.' })
   @MaxLength(180)
   email!: string;

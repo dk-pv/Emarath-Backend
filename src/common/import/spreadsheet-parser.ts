@@ -26,6 +26,20 @@ export interface ParsedSheet {
 /** The 10 MB business cap (matches the upload UI); files are read fully in memory. */
 export const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
 
+/**
+ * Bytes alone do not bound the work: 10 MB of commas is a million columns, and 10 MB of "x\n"
+ * five million rows, each padded to the widest row — enough to stall or exhaust the one process
+ * every user shares. Far beyond any real lead file (a few dozen columns, tens of thousands of
+ * rows), so only a pathological file is refused.
+ */
+export const MAX_IMPORT_COLUMNS = 500;
+export const MAX_IMPORT_ROWS = 100_000;
+
+const tooLarge = (): BadRequestException =>
+  new BadRequestException(
+    `The file is too large to import: at most ${MAX_IMPORT_ROWS.toLocaleString('en')} rows and ${MAX_IMPORT_COLUMNS} columns.`,
+  );
+
 const XLSX = /\.xlsx$/i;
 const CSV = /\.csv$/i;
 
@@ -58,8 +72,11 @@ export async function parseSpreadsheet(file: {
   // The rightmost non-empty cell, not `actualColumnCount` — that counts used columns,
   // so one empty column in the middle would silently cut off the last one.
   worksheet?.eachRow((row, rowNumber) => {
+    // An XLSX is only measured once ExcelJS has read it; a CSV was already checked.
+    if (lines.length > MAX_IMPORT_ROWS) throw tooLarge();
     const cells: string[] = [];
     row.eachCell({ includeEmpty: true }, (cell, column) => {
+      if (column > MAX_IMPORT_COLUMNS) throw tooLarge();
       cells[column - 1] = cellToString(cell.value);
       if (cells[column - 1] !== '') columnCount = Math.max(columnCount, column);
     });
@@ -85,9 +102,12 @@ export async function parseSpreadsheet(file: {
       'This CSV is separated by semicolons. Save it as "CSV UTF-8 (Comma delimited)" or as XLSX and upload it again.',
     );
   }
-  const repeated = headers.find((header, index) =>
-    headers.slice(0, index).includes(header),
-  );
+  const seen = new Set<string>();
+  const repeated = headers.find((header) => {
+    if (seen.has(header)) return true;
+    seen.add(header);
+    return false;
+  });
   if (repeated) {
     // The row is named: a title row above the real header is the usual cause.
     throw new BadRequestException(
@@ -123,6 +143,7 @@ async function readWorksheet(file: {
       'The CSV could not be read as text. Save it as "CSV UTF-8 (Comma delimited)" or as XLSX and upload it again.',
     );
   }
+  if (isCsv) assertCsvBounds(file.buffer);
 
   const workbook = new ExcelJS.Workbook();
   try {
@@ -149,6 +170,64 @@ async function readWorksheet(file: {
       'The file could not be read. Check that it is a valid CSV or XLSX file.',
     );
   }
+}
+
+function assertCsvBounds(buffer: Buffer): void {
+  const { lineBreaks, widest } = csvShape(buffer);
+  // One break ends each line, the header's included; the exact row count is checked again as
+  // the rows are read, for a last line with no break after it.
+  if (lineBreaks > MAX_IMPORT_ROWS + 1 || widest > MAX_IMPORT_COLUMNS) {
+    throw tooLarge();
+  }
+}
+
+/** The spaces fast-csv skips before deciding whether a field is quoted (CR and LF end lines). */
+const CSV_SPACE = new Set([0x20, 0x09, 0x0b, 0x0c]);
+
+/**
+ * A CSV's line breaks and its widest row, counted in one pass over the bytes before ExcelJS
+ * builds them, by the rules of the parser it uses (fast-csv): a quote opens a quoted field only
+ * as the field's first non-space character — inside, separators and line breaks are text and ""
+ * is one quote — and anywhere else a quote is plain text. A line ends at LF, CRLF (one break) or
+ * a CR alone, as classic Mac Excel saves a CSV. Counting quotes any other way undercounted, and
+ * the rows it missed were all built in memory.
+ */
+export function csvShape(buffer: Buffer): {
+  lineBreaks: number;
+  widest: number;
+} {
+  let lineBreaks = 0;
+  let columns = 1;
+  let widest = 1;
+  let field: 'start' | 'text' | 'quoted' | 'quote' = 'start';
+  let previous = 0;
+  for (const byte of buffer) {
+    const afterCarriageReturn = previous === 0x0d;
+    previous = byte;
+    if (field === 'quoted') {
+      if (byte === 0x22) field = 'quote';
+      continue;
+    }
+    if (field === 'quote') {
+      // A second quote is an escaped one, still inside the field; anything else follows its end.
+      if (byte === 0x22) {
+        field = 'quoted';
+        continue;
+      }
+      field = 'text';
+    }
+    if (byte === 0x2c) {
+      widest = Math.max(widest, ++columns);
+      field = 'start';
+    } else if (byte === 0x0d || byte === 0x0a) {
+      if (byte === 0x0d || !afterCarriageReturn) lineBreaks++;
+      columns = 1;
+      field = 'start';
+    } else if (field === 'start' && !CSV_SPACE.has(byte)) {
+      field = byte === 0x22 ? 'quoted' : 'text';
+    }
+  }
+  return { lineBreaks, widest };
 }
 
 function pad(cells: string[], length: number): string[] {

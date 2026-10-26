@@ -223,6 +223,30 @@ describe('LeadsBulkService.reassign', () => {
     ]);
   });
 
+  // Regression: every row was deleted and recreated, so a lead already with this agent got a
+  // new Assigned Date.
+  it('keeps the row of a lead already assigned to the agent, so its Assigned Date stays', async () => {
+    const {
+      service,
+      userFindFirst,
+      leadFindMany,
+      assignmentDeleteMany,
+      assignmentCreateMany,
+    } = makeService();
+    userFindFirst.mockResolvedValue({ id: 'agent' });
+    leadFindMany.mockResolvedValue([{ id: 'a' }]);
+
+    await service.reassign({ ids: ['a'], agentId: 'agent' });
+
+    expect(assignmentDeleteMany).toHaveBeenCalledWith({
+      where: { leadId: { in: ['a'] }, userId: { not: 'agent' } },
+    });
+    expect(assignmentCreateMany).toHaveBeenCalledWith({
+      data: [{ leadId: 'a', userId: 'agent' }],
+      skipDuplicates: true,
+    });
+  });
+
   it("moves the departing owners' OPEN follow-ups to the new owner (ADR-0086)", async () => {
     const {
       service,

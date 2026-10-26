@@ -210,7 +210,11 @@ export class CallSummaryService {
     const leadIds = contacted.map((row) => row.leadId);
     const seenBefore = await this.prisma.call.groupBy({
       by: ['leadId'],
-      where: { deletedAt: null, leadId: { in: leadIds }, startedAt: { lt: start } },
+      where: {
+        deletedAt: null,
+        leadId: { in: leadIds },
+        startedAt: { lt: start },
+      },
     });
     return leadIds.length - seenBefore.length;
   }

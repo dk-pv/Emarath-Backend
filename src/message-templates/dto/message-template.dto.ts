@@ -60,8 +60,13 @@ const ALLOWED_TAGS = new Set([
 ]);
 
 const TAG_NAME = /<\s*\/?\s*([a-zA-Z][a-zA-Z0-9-]*)/g;
-/** Any `on…=` handler, in any casing, with or without spaces around the equals. */
-const EVENT_HANDLER = /\son[a-z]+\s*=/i;
+/**
+ * Any `on…=` handler, in any casing, with or without spaces around the equals. A browser starts
+ * a new attribute after a space, a slash or a closing quote alike (`<span/onmouseover=…>`,
+ * `<b title="x"onclick=…>`), so all of them count. The whole content is searched, not just what
+ * looks like a tag, since a `>` inside a quoted value would cut a tag short.
+ */
+const EVENT_HANDLER = /[\s/"']on[a-z]+\s*=/i;
 const SCRIPT_URL = /(javascript|data|vbscript)\s*:/i;
 const COMMENT_OR_PI = /<!|<\?/;
 

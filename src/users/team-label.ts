@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { Prisma, UserRole } from '../generated/prisma/client';
 import { TEAM_MEMBER_ROLES } from '../auth/role-groups';
+import { escapeLike } from '../leads/lead-search';
 
 /** `users.team` and `tag_access_policies.team` are both VARCHAR(120). */
 export const MAX_TEAM_NAME = 120;
@@ -23,8 +24,13 @@ export async function findTeamLabel(
   db: Prisma.TransactionClient,
   name: string,
 ): Promise<string | null> {
+  // Escaped: Prisma runs an insensitive `equals` as ILIKE, so "Dubai_Sales" would otherwise also
+  // be "Dubai Sales" — the wrong team renamed, or a member filed under it.
   const row = await db.user.findFirst({
-    where: { deletedAt: null, team: { equals: name, mode: 'insensitive' } },
+    where: {
+      deletedAt: null,
+      team: { equals: escapeLike(name), mode: 'insensitive' },
+    },
     select: { team: true },
     orderBy: { team: 'asc' },
   });

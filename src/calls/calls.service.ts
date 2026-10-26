@@ -50,7 +50,8 @@ export class CallsService {
       const leadId = await this.resolveLead(event);
       if (!leadId) {
         this.logger.warn(
-          `Call ${event.externalId} matched no lead (phone ${event.phone}); skipped — lead_id is NOT NULL (CALL-01.1).`,
+          // The last four digits only: enough to trace the call, without a customer's number in the log.
+          `Call ${event.externalId} matched no lead (phone ending ${event.phone.slice(-4)}); skipped — lead_id is NOT NULL (CALL-01.1).`,
         );
         return { id: null, status: 'unmatched' };
       }

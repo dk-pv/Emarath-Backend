@@ -58,6 +58,27 @@ interface UserWhere {
   NOT?: { team: string };
 }
 
+/**
+ * What PostgreSQL does with Prisma's insensitive `equals`: ILIKE, where `%` is any run, `_` any one
+ * character, and a backslash makes the next character literal — so the fake can catch a lookup
+ * that forgets to escape a name.
+ */
+function ilike(value: string, pattern: string): boolean {
+  let source = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i];
+    const literal = char === '\\' && i + 1 < pattern.length;
+    const next = literal ? pattern[++i] : char;
+    source +=
+      !literal && next === '%'
+        ? '[\\s\\S]*'
+        : !literal && next === '_'
+          ? '[\\s\\S]'
+          : next.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(`^${source}$`, 'i').test(value);
+}
+
 function teamMatches(team: string | null, filter: TeamFilter): boolean {
   if (filter === null) return team === null;
   if (typeof filter === 'string') return team === filter;
@@ -66,7 +87,7 @@ function teamMatches(team: string | null, filter: TeamFilter): boolean {
   if (filter.equals !== undefined) {
     if (team === null) return false;
     return filter.mode === 'insensitive'
-      ? team.toLowerCase() === filter.equals.toLowerCase()
+      ? ilike(team, filter.equals)
       : team === filter.equals;
   }
   return true;
@@ -575,6 +596,64 @@ describe('TeamsService.assign', () => {
     await expect(
       service.assign({ team: 'Alpha', userIds: [ids.logi] }),
     ).rejects.toThrow(BadRequestException);
+  });
+});
+
+// Regression: team names reached an ILIKE unescaped, so "_" stood for any character and
+// "Dubai_Sales" also meant "Dubai Sales" — the first of the two alphabetically won.
+describe('Team names are matched literally (an underscore is not a wildcard)', () => {
+  const twoTeams = () => [
+    user(ids.ana, 'Ana', 'Dubai Sales'),
+    user(ids.ben, 'Ben', 'Dubai_Sales'),
+    user(ids.dee, 'Dee', null),
+  ];
+
+  it('renames only the team named, never another its name matches as a pattern', async () => {
+    const { service, users } = makeService(twoTeams());
+
+    await service.rename({ name: 'Dubai_Sales', newName: 'Dubai North' });
+
+    expect(teamOf(users, ids.ben)).toBe('Dubai North');
+    expect(teamOf(users, ids.ana)).toBe('Dubai Sales');
+  });
+
+  it('never files a member under another team: a name no team has is a 404', async () => {
+    const users = [
+      user(ids.ana, 'Ana', 'Dubai Sales'),
+      user(ids.dee, 'Dee', null),
+    ];
+    const { service } = makeService(users);
+
+    await expect(
+      service.assign({ team: 'Dubai_Sales', userIds: [ids.dee] }),
+    ).rejects.toThrow(NotFoundException);
+    expect(teamOf(users, ids.dee)).toBeNull();
+  });
+
+  it('creates "Dubai_Sales" beside "Dubai Sales" rather than calling it taken', async () => {
+    const users = [
+      user(ids.ana, 'Ana', 'Dubai Sales'),
+      user(ids.dee, 'Dee', null),
+    ];
+    const { service } = makeService(users);
+
+    await service.create({ name: 'Dubai_Sales', memberIds: [ids.dee] });
+
+    expect(teamOf(users, ids.dee)).toBe('Dubai_Sales');
+    expect(teamOf(users, ids.ana)).toBe('Dubai Sales');
+  });
+
+  it('allows a rename to "Dubai_Sales" while "Dubai Sales" exists', async () => {
+    const users = [
+      user(ids.ana, 'Ana', 'Dubai Sales'),
+      user(ids.dee, 'Dee', 'Alpha'),
+    ];
+    const { service } = makeService(users);
+
+    await service.rename({ name: 'Alpha', newName: 'Dubai_Sales' });
+
+    expect(teamOf(users, ids.dee)).toBe('Dubai_Sales');
+    expect(teamOf(users, ids.ana)).toBe('Dubai Sales');
   });
 });
 

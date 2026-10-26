@@ -8,7 +8,7 @@ import bcrypt from 'bcryptjs';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
-import { UserRole } from '../generated/prisma/client';
+import { Prisma, UserRole } from '../generated/prisma/client';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenService } from './refresh-token.service';
 import { PasswordResetService } from './password-reset.service';
@@ -45,6 +45,25 @@ export interface SessionResult {
  */
 const TIMING_EQUALISER_HASH = bcrypt.hashSync('emarath-timing-equaliser', 10);
 
+/**
+ * The account an address names, among the rows a case-insensitive lookup returned: the exact
+ * match, else one equal to it ignoring case. The lookup only narrows — Prisma runs
+ * `mode: 'insensitive'` as ILIKE on PostgreSQL, where `%` and `_`, both legal in an address, are
+ * wildcards — so a returned row is not yet a match. One lookup either way, so an unknown address
+ * costs what a known one does (AC2).
+ */
+function accountFor<T extends { email: string }>(
+  rows: T[],
+  email: string,
+): T | null {
+  const lower = email.toLowerCase();
+  return (
+    rows.find((row) => row.email === email) ??
+    rows.find((row) => row.email.toLowerCase() === lower) ??
+    null
+  );
+}
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -65,18 +84,28 @@ export class AuthService {
    * fail with the same generic 401 (AC2); the profile omits the hash (AC5).
    */
   async login(dto: LoginDto, userAgent?: string): Promise<SessionResult> {
-    const user = await this.prisma.user.findFirst({
-      where: { email: dto.email, deletedAt: null },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        team: true,
-        isActive: true,
-        passwordHash: true,
-      },
-    });
+    const select = {
+      id: true,
+      name: true,
+      email: true,
+      role: true,
+      team: true,
+      isActive: true,
+      passwordHash: true,
+    } satisfies Prisma.UserSelect;
+    // Addresses are stored lower-cased, but a phone keyboard capitalises the first letter and an
+    // older account may hold capitals, so the lookup ignores case. The password still decides,
+    // so a case-only twin can at worst fail the login.
+    const user = accountFor(
+      await this.prisma.user.findMany({
+        where: {
+          email: { equals: dto.email, mode: 'insensitive' },
+          deletedAt: null,
+        },
+        select,
+      }),
+      dto.email,
+    );
 
     const passwordMatches = await bcrypt.compare(
       dto.password,
@@ -162,10 +191,18 @@ export class AuthService {
     if (!this.mailer.enabled) {
       throw new ServiceUnavailableException(PASSWORD_RESET_DISABLED_MESSAGE);
     }
-    const user = await this.prisma.user.findFirst({
-      where: { email, deletedAt: null, isActive: true },
-      select: { id: true, email: true },
-    });
+    // As at login: one lookup that ignores case, and the address itself decides.
+    const user = accountFor(
+      await this.prisma.user.findMany({
+        where: {
+          email: { equals: email, mode: 'insensitive' },
+          deletedAt: null,
+          isActive: true,
+        },
+        select: { id: true, email: true },
+      }),
+      email,
+    );
     if (!user) {
       return;
     }
@@ -177,8 +214,10 @@ export class AuthService {
     void this.mailer
       .sendPasswordReset({ to: user.email, resetUrl })
       .catch((error: unknown) => {
+        // The user id, not the address: a provider outage must not copy every requester's
+        // email into the log.
         this.logger.error(
-          `Password reset email failed for ${user.email}: ${
+          `Password reset email failed for user ${user.id}: ${
             error instanceof Error ? error.message : 'unknown error'
           }`,
         );

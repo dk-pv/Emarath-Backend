@@ -3,7 +3,7 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
-import { UserRole } from '../generated/prisma/client';
+import { Prisma, UserRole } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -11,6 +11,12 @@ import {
   TagAccessService,
 } from '../tag-access/tag-access.service';
 import { TagsService } from './tags.service';
+
+const uniqueViolation = () =>
+  new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+    code: 'P2002',
+    clientVersion: 'test',
+  });
 
 interface DataCall {
   data: { name?: string; isActive?: boolean; deletedAt?: Date };
@@ -158,6 +164,28 @@ describe('TagsService.create', () => {
     expect(call.where.name?.mode).toBe('insensitive');
     expect(call.where.deletedAt).toBeNull();
   });
+
+  // Regression: a deleted tag keeps its exact name in the unique index; the live-name check
+  // passed, the insert failed, and the user got a 500.
+  it('refuses a deleted tag’s exact name with a 409 naming the cause, not a 500', async () => {
+    const { service, txCreate } = makeService();
+    txCreate.mockRejectedValue(uniqueViolation());
+
+    await expect(service.create({ name: 'VIP' })).rejects.toThrow(
+      new ConflictException(
+        '“VIP” is the name of a deleted tag, so it can’t be reused. Choose another name.',
+      ),
+    );
+  });
+
+  it('passes any other failure through unchanged', async () => {
+    const { service, txCreate } = makeService();
+    txCreate.mockRejectedValue(new Error('connection lost'));
+
+    await expect(service.create({ name: 'VIP' })).rejects.toThrow(
+      'connection lost',
+    );
+  });
 });
 
 describe('TagsService.create — Tag Permissions (ADR-0091)', () => {
@@ -246,6 +274,20 @@ describe('TagsService.update', () => {
 
     const [call] = update.mock.calls[0] as [DataCall];
     expect(call.data).toEqual({ isActive: false });
+  });
+
+  // Regression: the retired tag still holds its exact name in the unique index; the clash
+  // escaped as a 500.
+  it('refuses a rename onto a deleted tag’s name with a 409, not a 500', async () => {
+    const { service, findFirst, update } = makeService();
+    findFirst.mockResolvedValueOnce({ id: 't1', name: 'BDE RISK' });
+    update.mockRejectedValue(uniqueViolation());
+
+    await expect(service.update('t1', { name: 'VIP' })).rejects.toThrow(
+      new ConflictException(
+        '“VIP” is the name of a deleted tag, so it can’t be reused. Choose another name.',
+      ),
+    );
   });
 
   it('refuses a rename onto another live tag', async () => {

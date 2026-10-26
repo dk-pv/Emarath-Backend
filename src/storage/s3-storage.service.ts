@@ -112,6 +112,18 @@ export class S3StorageService extends StorageService {
       return type;
     }
     const safe = options.downloadName.replace(/["\\\r\n]/g, '_');
-    return `${type}; filename="${safe}"`;
+    // An ASCII fallback, plus the exact UTF-8 name (RFC 6266/5987) that every current browser
+    // prefers: a raw Arabic name in a header is read differently by each browser.
+    const ascii = safe.replace(/[^\x20-\x7e]/g, '_');
+    if (ascii === safe) return `${type}; filename="${safe}"`;
+    return `${type}; filename="${ascii}"; filename*=UTF-8''${encodeRfc5987(options.downloadName)}`;
   }
+}
+
+/** RFC 5987 text: percent-encoded UTF-8, including the characters that standard reserves. */
+function encodeRfc5987(value: string): string {
+  return encodeURIComponent(value).replace(
+    /['()*]/g,
+    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
 }

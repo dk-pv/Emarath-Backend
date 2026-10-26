@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { Response } from 'express';
-import { Prisma, UserRole } from '../generated/prisma/client';
+import { Prisma } from '../generated/prisma/client';
 import { CurrentUserService } from '../auth/current-user';
 import { PrismaService } from '../prisma/prisma.service';
 import { toLeadListItem } from '../leads/dto/lead-response.dto';

@@ -190,7 +190,7 @@ describe('leadConditionWhere', () => {
   it('matches team through the assignee (the Leads By Status drill-down)', () => {
     expect(
       leadConditionWhere([
-        { field: 'team', operator: 'is', values: ['Sales'] } as LeadCondition,
+        { field: 'team', operator: 'is', values: ['Sales'] },
       ]),
     ).toEqual([
       { assignments: { some: { user: { team: { in: ['Sales'] } } } } },
@@ -210,7 +210,7 @@ describe('leadConditionWhere', () => {
         field: 'activity',
         operator: 'is',
         values: ['Contacted'],
-      } as LeadCondition,
+      },
     ]);
     expect(JSON.stringify(contacted)).toContain('"outcome":"ANSWERED"');
     const [none] = leadConditionWhere([
@@ -218,7 +218,7 @@ describe('leadConditionWhere', () => {
         field: 'activity',
         operator: 'is',
         values: ['No Activity'],
-      } as LeadCondition,
+      },
     ]);
     expect(none.activities?.none).toBeDefined();
     expect(none.calls?.none).toBeDefined();

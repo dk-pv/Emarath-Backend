@@ -23,6 +23,9 @@ import { DocumentsService } from './documents.service';
         limits: {
           fileSize: config.getOrThrow<StorageConfig>('storage').maxBytes,
         },
+        // Browsers send the file name as UTF-8; multer's default reads it as latin1, which
+        // stored an Arabic name as mojibake. The import upload already sets this.
+        defParamCharset: 'utf8',
       }),
     }),
   ],

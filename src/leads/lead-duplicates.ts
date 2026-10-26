@@ -1,4 +1,5 @@
 import { Prisma } from '../generated/prisma/client';
+import { escapeLike } from './lead-search';
 
 /** What a new enquiry is matched on. Fixed, exactly as the reference's banner states. */
 export interface DuplicateCandidate {
@@ -42,7 +43,9 @@ export function duplicateWhere(
     );
   }
   if (email) {
-    or.push({ email: { equals: email, mode: 'insensitive' } });
+    // Prisma runs an insensitive `equals` as ILIKE, where `%` and `_` (legal in an address) are
+    // wildcards: escaped, the address matches only itself, ignoring case.
+    or.push({ email: { equals: escapeLike(email), mode: 'insensitive' } });
   }
   if (or.length === 0) return null;
 

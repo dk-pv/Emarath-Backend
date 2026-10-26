@@ -1,5 +1,11 @@
+import { Readable } from 'node:stream';
 import ExcelJS from 'exceljs';
-import { parseSpreadsheet } from './spreadsheet-parser';
+import {
+  csvShape,
+  MAX_IMPORT_COLUMNS,
+  MAX_IMPORT_ROWS,
+  parseSpreadsheet,
+} from './spreadsheet-parser';
 
 const csv = (body: string | Buffer, name = 'leads.csv') => {
   const buffer = typeof body === 'string' ? Buffer.from(body, 'utf8') : body;
@@ -81,6 +87,139 @@ describe('parseSpreadsheet — CSV', () => {
     await expect(
       parseSpreadsheet(csv('Name\nAli', 'leads.xls')),
     ).rejects.toThrow('File must be a CSV or XLSX.');
+  });
+});
+
+describe('parseSpreadsheet — the size of the work, not only of the bytes', () => {
+  const tooLarge = /too large to import/;
+
+  it('refuses a row of a million commas quickly, before it is padded or checked for repeats', async () => {
+    const started = Date.now();
+    await expect(
+      parseSpreadsheet(csv(','.repeat(1_000_000) + 'x\nAli\n')),
+    ).rejects.toThrow(tooLarge);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('refuses millions of one-letter rows quickly, before they are built in memory', async () => {
+    const started = Date.now();
+    await expect(
+      parseSpreadsheet(csv('Name\n' + 'x\n'.repeat(4_000_000))),
+    ).rejects.toThrow(tooLarge);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('accepts a file exactly at both limits', async () => {
+    const header = Array.from(
+      { length: MAX_IMPORT_COLUMNS },
+      (_, i) => `C${i}`,
+    ).join(',');
+    const sheet = await parseSpreadsheet(
+      csv(header + '\n' + 'a\n'.repeat(MAX_IMPORT_ROWS)),
+    );
+    expect(sheet.headers).toHaveLength(MAX_IMPORT_COLUMNS);
+    expect(sheet.rows).toHaveLength(MAX_IMPORT_ROWS);
+  });
+
+  // Regression: lines ended by a CR alone were never counted, so a classic Mac Excel CSV was
+  // refused as "too large" and millions of such rows reached ExcelJS (the process ran out of heap).
+  it('reads a CSV whose lines end with a carriage return alone', async () => {
+    const header = 'Name,Phone,Email,City,Notes,Source,Status,Owner,Tag,Extra';
+    const rows = Array.from(
+      { length: 100 },
+      (_, i) =>
+        `Lead ${i},0500${i},l${i}@x.test,Dubai,"a, b",Web,New,Ali,VIP,x`,
+    );
+    const sheet = await parseSpreadsheet(csv([header, ...rows].join('\r')));
+    expect(sheet.headers).toHaveLength(10);
+    expect(sheet.rows).toHaveLength(100);
+    expect(sheet.rows[99].cells[4]).toBe('a, b');
+  });
+
+  it('refuses millions of rows ended by a carriage return alone, quickly', async () => {
+    const started = Date.now();
+    await expect(
+      parseSpreadsheet(csv('Name\r' + 'x\r'.repeat(4_000_000))),
+    ).rejects.toThrow(tooLarge);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('counts a CRLF line break once, so a CRLF file at the row limit is accepted', async () => {
+    const sheet = await parseSpreadsheet(
+      csv('Name\r\n' + 'a\r\n'.repeat(MAX_IMPORT_ROWS)),
+    );
+    expect(sheet.rows).toHaveLength(MAX_IMPORT_ROWS);
+  });
+
+  // Regression: every quote flipped the count's quoted state, so a quote inside a field (an inch
+  // mark, 55" LED) hid the line breaks after it, and rows the count missed were built in memory.
+  it('counts as the parser does: a quote is text unless it opens a field', () => {
+    const shape = (text: string) => csvShape(Buffer.from(text));
+    expect(shape('Name,Note\nTV,55" LED\nTV,32" LCD, wall\n')).toEqual({
+      lineBreaks: 3,
+      widest: 3,
+    });
+    expect(shape('a,"x, ""y""\nz",b\n')).toEqual({ lineBreaks: 1, widest: 3 });
+    expect(shape('a,  "x,y"\r\nb\rc\n')).toEqual({ lineBreaks: 3, widest: 2 });
+  });
+
+  it('never counts fewer rows or columns than ExcelJS builds, over random files', async () => {
+    let seed = 20261026;
+    const random = () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const alphabet = ['a', ',', '"', ' ', '\r', '\n'];
+    let compared = 0;
+    for (let run = 0; run < 1500; run++) {
+      const text = Array.from(
+        { length: Math.floor(random() * 30) },
+        () => alphabet[Math.floor(random() * alphabet.length)],
+      ).join('');
+      let sheet: ExcelJS.Worksheet;
+      try {
+        sheet = await new ExcelJS.Workbook().csv.read(Readable.from([text]), {
+          map: (value: string) => value,
+        });
+      } catch {
+        continue; // ExcelJS refused it: nothing was built.
+      }
+      compared++;
+      const { lineBreaks, widest } = csvShape(Buffer.from(text));
+      let built = 0;
+      sheet.eachRow({ includeEmpty: true }, (row) => {
+        built = Math.max(built, row.cellCount);
+      });
+      expect([text, sheet.rowCount <= lineBreaks + 1]).toEqual([text, true]);
+      expect([text, built <= widest]).toEqual([text, true]);
+    }
+    expect(compared).toBeGreaterThan(500);
+  });
+
+  it('does not count commas or line breaks inside quotes', async () => {
+    const note = '"' + ', '.repeat(MAX_IMPORT_COLUMNS + 10) + '\nsecond line"';
+    const sheet = await parseSpreadsheet(csv(`Name,Note\nAli,${note}\n`));
+    expect(sheet.rows).toHaveLength(1);
+    expect(sheet.rows[0].cells[1]).toContain('second line');
+  });
+
+  it('refuses an XLSX wider than the column limit', async () => {
+    const file = await xlsx((sheet) => {
+      sheet.getRow(1).getCell(MAX_IMPORT_COLUMNS + 1).value = 'Too far';
+      sheet.getRow(2).getCell(1).value = 'Ali';
+    });
+    await expect(parseSpreadsheet(file)).rejects.toThrow(tooLarge);
+  });
+
+  it('still names a repeated header, among many columns', async () => {
+    const header = Array.from({ length: 300 }, (_, i) => `C${i}`)
+      .concat('C7')
+      .join(',');
+    await expect(parseSpreadsheet(csv(header + '\nAli\n'))).rejects.toThrow(
+      'The column "C7" appears more than once',
+    );
   });
 });
 

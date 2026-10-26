@@ -1,6 +1,7 @@
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  ArrayUnique,
   IsArray,
   IsDateString,
   IsEmail,
@@ -48,6 +49,15 @@ const MAX_ATTEMPTS = 1000;
  * here rather than a 500 from the write.
  */
 const NOT_NEGATIVE = /^(?!-)/;
+
+/**
+ * What a `Decimal(12, 2)` column holds exactly: ten integer digits and two decimals. A wider value
+ * was a 500 (numeric overflow) and a third decimal was silently rounded; the import already
+ * refuses both. The sign is left to `NOT_NEGATIVE`, so a negative value names that rule alone.
+ */
+const DECIMAL_12_2 = /^-?\d{1,10}(\.\d{1,2})?$/;
+const DECIMAL_MESSAGE =
+  'must have at most 10 digits before and 2 after the decimal point';
 
 export class CreateLeadDto {
   @Transform(trim)
@@ -113,6 +123,7 @@ export class CreateLeadDto {
   @IsArray()
   @IsUUID('all', { each: true, message: 'each tag must be a valid id' })
   @ArrayMaxSize(50)
+  @ArrayUnique({ message: 'each tag may be chosen once' })
   @IsOptional()
   tagIds?: string[];
 
@@ -131,6 +142,7 @@ export class CreateLeadDto {
   @Transform(emptyToUndefined)
   @IsNumberString({}, { message: 'QTY must be a number' })
   @Matches(NOT_NEGATIVE, { message: 'QTY cannot be negative' })
+  @Matches(DECIMAL_12_2, { message: `QTY ${DECIMAL_MESSAGE}` })
   @IsOptional()
   productQty?: string;
 
@@ -143,6 +155,7 @@ export class CreateLeadDto {
   @Transform(emptyToUndefined)
   @IsNumberString({}, { message: 'QTY of Product 2 must be a number' })
   @Matches(NOT_NEGATIVE, { message: 'QTY of Product 2 cannot be negative' })
+  @Matches(DECIMAL_12_2, { message: `QTY of Product 2 ${DECIMAL_MESSAGE}` })
   @IsOptional()
   product2Qty?: string;
 
@@ -234,12 +247,14 @@ export class CreateLeadDto {
   @Transform(emptyToUndefined)
   @IsNumberString({}, { message: 'Actual Amount must be a number' })
   @Matches(NOT_NEGATIVE, { message: 'Actual Amount cannot be negative' })
+  @Matches(DECIMAL_12_2, { message: `Actual Amount ${DECIMAL_MESSAGE}` })
   @IsOptional()
   actualAmount?: string;
 
   @Transform(emptyToUndefined)
   @IsNumberString({}, { message: 'Forecasted Amount must be a number' })
   @Matches(NOT_NEGATIVE, { message: 'Forecasted Amount cannot be negative' })
+  @Matches(DECIMAL_12_2, { message: `Forecasted Amount ${DECIMAL_MESSAGE}` })
   @IsOptional()
   forecastedAmount?: string;
 

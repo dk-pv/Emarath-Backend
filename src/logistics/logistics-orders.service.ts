@@ -390,7 +390,7 @@ export class LogisticsOrdersService {
       .setHeader('Content-Type', 'text/csv; charset=utf-8')
       .setHeader(
         'Content-Disposition',
-        `attachment; filename="${exportFilename()}"`,
+        `attachment; filename="${exportFilename(this.timeZone)}"`,
       );
     let exported = 0;
     try {

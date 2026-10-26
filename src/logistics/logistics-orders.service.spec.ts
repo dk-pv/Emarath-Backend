@@ -18,6 +18,7 @@ import {
 } from './logistics-status';
 import {
   CorrectAwbDto,
+  DispatchOrderDto,
   EDITABLE_ORDER_FIELDS,
   ListLogisticsOrdersDto,
   LogisticsOrderFiltersDto,
@@ -3130,6 +3131,19 @@ describe('Logistics DTOs — what the routes refuse before the service runs', ()
       'awbNumber',
     ]);
   });
+
+  // Regression: a blank AWB passed the DTO untrimmed and was refused later as a 409 conflict.
+  it.each(['', '   '])(
+    'refuses a dispatch AWB of %j as invalid input (400), and trims a real one',
+    async (awbNumber) => {
+      expect(await invalid(DispatchOrderDto, { awbNumber })).toEqual([
+        'awbNumber',
+      ]);
+      const dto = plainToInstance(DispatchOrderDto, { awbNumber: ' AWB-1 ' });
+      expect(await validate(dto)).toEqual([]);
+      expect(dto.awbNumber).toBe('AWB-1');
+    },
+  );
 
   it('takes the Sales delivery date as a day', async () => {
     const dto = plainToInstance(SetDeliveryDateDto, {

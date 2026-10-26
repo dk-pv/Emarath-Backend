@@ -1,3 +1,4 @@
+import { Transform } from 'class-transformer';
 import { IsEmail, IsNotEmpty, IsString, MaxLength } from 'class-validator';
 
 /**
@@ -7,6 +8,9 @@ import { IsEmail, IsNotEmpty, IsString, MaxLength } from 'class-validator';
  * 401 (AC2) — the two never leak which field was wrong or whether the account exists.
  */
 export class LoginDto {
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsEmail({}, { message: 'A valid email is required.' })
   @MaxLength(180)
   email!: string;
