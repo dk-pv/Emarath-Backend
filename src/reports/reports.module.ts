@@ -31,12 +31,14 @@ import { SalesFunnelController } from './sales-funnel.controller';
 import { SalesFunnelReportService } from './sales-funnel.service';
 import { SalesPipelineController } from './sales-pipeline.controller';
 import { SalesPipelineReportService } from './sales-pipeline.service';
+import { RevenueController } from './revenue.controller';
+import { RevenueReportService } from './revenue.service';
 import { StagesModule } from '../stages/stages.module';
 
 /**
  * The Reports feature (RPT-02.1: No Activity Leads; RPT-02.2: Today Leads; RPT-02.3: Leads By
  * Status; RPT-02.4: Leads By Source; RPT-02.5: Leads By Ownership; RPT-02.6: Converted Leads;
- * RPT-02.7: Lost Leads; RPT-03.2: Overdue Follow Ups; RPT-03.1: Today's Follow Ups; RPT-03.3: Upcoming Follow Ups; Teams v1: Team Performance; Analytics: Sales Funnel, Sales Pipeline Analysis). PrismaService and
+ * RPT-02.7: Lost Leads; RPT-03.2: Overdue Follow Ups; RPT-03.1: Today's Follow Ups; RPT-03.3: Upcoming Follow Ups; Teams v1: Team Performance; Analytics: Sales Funnel, Sales Pipeline Analysis, Revenue Report). PrismaService and
  * CurrentUserService are global; the leads reports reuse the leads module's `buildLeadWhere` and
  * the follow-up reports reuse the activities module's scope/bucket helpers directly (pure
  * functions). The Analytics reports read the stage catalogue through StagesModule. Later report
@@ -61,6 +63,7 @@ import { StagesModule } from '../stages/stages.module';
     TeamPerformanceController,
     SalesFunnelController,
     SalesPipelineController,
+    RevenueController,
   ],
   providers: [
     NoActivityReportService,
@@ -79,6 +82,7 @@ import { StagesModule } from '../stages/stages.module';
     TeamPerformanceService,
     SalesFunnelReportService,
     SalesPipelineReportService,
+    RevenueReportService,
   ],
 })
 export class ReportsModule {}

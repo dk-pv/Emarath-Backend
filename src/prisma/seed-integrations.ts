@@ -35,10 +35,10 @@ import { assertSeedTarget } from './database-target';
  * *internal* connection page, which is an open INT-02.1 parity item, so these are
  * recorded as-shipped rather than replaced with routes that do not exist.
  *
- * `enabled` reproduces the reference header's "2 Enabled Integrations". **Which** two
- * Workpex has enabled is not captured in any screenshot; Facebook and Whatsapp are the
- * pair the shipped frontend already assumes, kept here so the count matches without a
- * second, conflicting guess.
+ * `enabled` is false for every row. The reference header's "2 Enabled Integrations" is the
+ * Workpex organisation's own state, not part of the design, and no provider here is
+ * connected (no webhook, poller or API client exists), so a fresh environment must not
+ * report one as enabled (owner decision 2026-10-27, system audit FX-4).
  */
 const INTEGRATIONS = [
   {
@@ -48,7 +48,7 @@ const INTEGRATIONS = [
       'Connect Facebook to capture leads, manage campaigns, and sync audience data',
     category: 'Meta',
     logo: 'IconBrandFacebook',
-    enabled: true,
+    enabled: false,
     detailUrl: null,
   },
   {
@@ -68,7 +68,7 @@ const INTEGRATIONS = [
       'Manage chats and create leads from customer interactions on WhatsApp',
     category: 'Meta',
     logo: 'IconBrandWhatsapp',
-    enabled: true,
+    enabled: false,
     detailUrl: null,
   },
   {

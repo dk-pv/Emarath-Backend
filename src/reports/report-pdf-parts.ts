@@ -184,3 +184,9 @@ export function table(
 function utcStamp(date: Date): string {
   return date.toISOString().slice(0, 16).replace('T', ' ');
 }
+
+/** `YYYYMMDD-HHmmss` (UTC), the other exports' file-name stamp. */
+export function fileStamp(now: Date): string {
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}-${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
+}

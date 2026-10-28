@@ -1,5 +1,6 @@
 import { Logger, ServiceUnavailableException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
+import type { Resend } from 'resend';
 import type { MailConfig } from '../config/mail.config';
 import {
   DisabledMailerService,
@@ -65,6 +66,56 @@ describe('DisabledMailerService (email is optional)', () => {
     log.mockRestore();
     error.mockRestore();
     warn.mockRestore();
+  });
+});
+
+describe('ResendMailerService send timeout', () => {
+  const config = {
+    getOrThrow: () => ({
+      provider: 'resend',
+      resendApiKey: 'test-key-not-real',
+      from: 'Emarath <no-reply@example.test>',
+      webAppUrl: 'https://app.example.test',
+    }),
+  } as unknown as ConfigService;
+  const outbound = { to: ['agent@emarath.local'], subject: 'Hi', text: 'Body' };
+  const providerOf = (mailer: ResendMailerService) =>
+    (mailer as unknown as { resend: Resend }).resend.emails;
+
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it('turns a provider that never answers into the usual failed send after 15 s', async () => {
+    jest.useFakeTimers();
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+    const mailer = new ResendMailerService(config);
+    jest
+      .spyOn(providerOf(mailer), 'send')
+      .mockReturnValue(new Promise(() => undefined));
+
+    const sent = expect(mailer.sendMail(outbound)).rejects.toThrow(
+      'Failed to send the email.',
+    );
+    await jest.advanceTimersByTimeAsync(15_000);
+    await sent;
+    expect(error).toHaveBeenCalledWith(
+      'Resend send failed: no answer within 15 s',
+    );
+  });
+
+  it('leaves no timer behind once the provider answers', async () => {
+    jest.useFakeTimers();
+    const mailer = new ResendMailerService(config);
+    jest.spyOn(providerOf(mailer), 'send').mockResolvedValue({
+      data: { id: 'email-1' },
+      error: null,
+      headers: {},
+    });
+
+    await expect(mailer.sendMail(outbound)).resolves.toBeUndefined();
+    expect(jest.getTimerCount()).toBe(0);
   });
 });
 

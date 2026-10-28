@@ -17,6 +17,7 @@ import { LeadsByStatusController } from '../reports/leads-by-status.controller';
 import { LostLeadsController } from '../reports/lost-leads.controller';
 import { OverdueFollowUpsController } from '../reports/overdue-follow-ups.controller';
 import { ReportsController } from '../reports/reports.controller';
+import { RevenueController } from '../reports/revenue.controller';
 import { TodayLeadsController } from '../reports/today-leads.controller';
 import { TodaysFollowUpsController } from '../reports/todays-follow-ups.controller';
 import { UpcomingFollowUpsController } from '../reports/upcoming-follow-ups.controller';
@@ -151,6 +152,7 @@ describe('every export route is audited (AUD-01)', () => {
       UpcomingFollowUpsController.prototype,
     ],
     ['logistics.orders.export', LogisticsOrdersController.prototype],
+    ['reports.revenue.export', RevenueController.prototype],
   ];
 
   it.each(routes)(

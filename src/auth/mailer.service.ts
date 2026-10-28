@@ -4,8 +4,14 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Resend } from 'resend';
+import { Resend, type CreateEmailOptions } from 'resend';
 import type { MailConfig } from '../config/mail.config';
+
+/**
+ * How long one send may wait on Resend. Unbounded, a hung provider holds the request open until
+ * the HTTP client gives up minutes later, and the Lead Email composer spins the whole time.
+ */
+const SEND_TIMEOUT_MS = 15_000;
 
 /** Shown when a send is asked for while no email provider is configured. */
 export const EMAIL_DISABLED_MESSAGE =
@@ -97,8 +103,33 @@ export class ResendMailerService extends MailerService {
     this.from = mail.from;
   }
 
+  /**
+   * One send, bounded by SEND_TIMEOUT_MS. A timeout reads as the provider's own error, so each
+   * caller logs and reports it exactly as it does a refusal. The SDK takes no abort signal, so a
+   * request that times out is not cancelled and a late acceptance can still deliver.
+   */
+  private async send(
+    payload: CreateEmailOptions,
+  ): Promise<{ error: { message: string } | null }> {
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<{ error: { message: string } }>((resolve) => {
+      timer = setTimeout(
+        () =>
+          resolve({
+            error: { message: `no answer within ${SEND_TIMEOUT_MS / 1000} s` },
+          }),
+        SEND_TIMEOUT_MS,
+      );
+    });
+    try {
+      return await Promise.race([this.resend.emails.send(payload), timedOut]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async sendPasswordReset(email: PasswordResetEmail): Promise<void> {
-    const { error } = await this.resend.emails.send({
+    const { error } = await this.send({
       from: this.from,
       to: email.to,
       subject: 'Reset your Emarath password',
@@ -120,7 +151,7 @@ export class ResendMailerService extends MailerService {
   async sendMail(email: OutboundEmail): Promise<void> {
     // `from` is the verified `MAIL_FROM`, never caller-supplied — Resend rejects an
     // unverified sender, so a spoofed From cannot go out (and cannot be `yopmail`/`gmail`).
-    const { error } = await this.resend.emails.send({
+    const { error } = await this.send({
       from: this.from,
       to: email.to,
       cc: email.cc?.length ? email.cc : undefined,
