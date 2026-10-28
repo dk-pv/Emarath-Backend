@@ -82,7 +82,7 @@ function resolvePort(): number {
  * Blank entries are dropped so a trailing comma is harmless. Defaults to the two ports
  * `next dev` actually uses locally, so a fresh clone works whichever one it lands on.
  */
-function resolveCorsOrigins(): string[] {
+export function resolveCorsOrigins(): string[] {
   const raw = process.env.CORS_ORIGIN;
   if (!raw) return ['http://localhost:3000', 'http://localhost:3001'];
   const origins = raw

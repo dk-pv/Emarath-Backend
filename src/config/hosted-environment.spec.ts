@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { UnauthorizedException } from '@nestjs/common';
 import type { ExecutionContext } from '@nestjs/common';
 import type { Reflector } from '@nestjs/core';
@@ -8,7 +8,11 @@ import { UserRole } from '../generated/prisma/client';
 import type { PrismaService } from '../prisma/prisma.service';
 import authConfig, { DEV_INSECURE_SECRET } from './auth.config';
 import mailConfig from './mail.config';
-import { MIN_SECRET_LENGTH, assertStrongSecret } from './secret-strength';
+import {
+  MIN_SECRET_LENGTH,
+  PUBLISHED_SECRET_SHA256,
+  assertStrongSecret,
+} from './secret-strength';
 import storageConfig, { DEV_INSECURE_SIGNING_SECRET } from './storage.config';
 
 /*
@@ -19,13 +23,30 @@ import storageConfig, { DEV_INSECURE_SIGNING_SECRET } from './storage.config';
 /** Each run gets a fresh random value: nothing secret-looking is written into this file. */
 const strong = () => randomBytes(32).toString('base64');
 
+/**
+ * Runs `check` with `value` counted as published (S1). The real published values never appear in
+ * this file, so a fresh random value stands in for one; its fingerprint is removed afterwards.
+ */
+function whilePublished(value: string, check: () => void): void {
+  const fingerprints = PUBLISHED_SECRET_SHA256 as Set<string>;
+  const fingerprint = createHash('sha256').update(value).digest('hex');
+  fingerprints.add(fingerprint);
+  try {
+    check();
+  } finally {
+    fingerprints.delete(fingerprint);
+  }
+}
+
 const KEYS = [
   'NODE_ENV',
   'JWT_ACCESS_SECRET',
   'COOKIE_SAMESITE',
+  'CORS_ORIGIN',
   'MAIL_PROVIDER',
   'RESEND_API_KEY',
   'MAIL_FROM',
+  'WEB_APP_URL',
   'STORAGE_PROVIDER',
   'STORAGE_SIGNING_SECRET',
   'STORAGE_BUCKET',
@@ -78,6 +99,38 @@ describe('assertStrongSecret', () => {
     expect(() => assertStrongSecret('SOME_SECRET', strong())).not.toThrow();
   });
 
+  it('refuses a value this repository published, with stray whitespace or quotes too, without repeating it (S1)', () => {
+    const value = strong();
+    whilePublished(value, () => {
+      for (const configured of [
+        value,
+        ` ${value}\n`,
+        `"${value}"`,
+        ` '${value}' `,
+        `" ${value} "`,
+      ]) {
+        let message = '';
+        try {
+          assertStrongSecret('SOME_SECRET', configured);
+        } catch (error) {
+          message = (error as Error).message;
+        }
+        expect(message).toMatch(
+          /^SOME_SECRET was published in this repository and must be rotated\./,
+        );
+        expect(message).not.toContain(value);
+      }
+    });
+    expect(() => assertStrongSecret('SOME_SECRET', value)).not.toThrow();
+  });
+
+  it('holds only fingerprints of the two published secrets, never a value', () => {
+    expect(PUBLISHED_SECRET_SHA256.size).toBe(2);
+    for (const fingerprint of PUBLISHED_SECRET_SHA256) {
+      expect(fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    }
+  });
+
   it('never repeats the value it refuses', () => {
     const value = 'example-value-that-is-long-enough-to-check';
     let message = '';
@@ -124,15 +177,99 @@ describe('auth config', () => {
     'uses a strong secret and Secure cookies in %s',
     (nodeEnv) => {
       const secret = strong();
-      setEnv({ NODE_ENV: nodeEnv, JWT_ACCESS_SECRET: secret });
+      setEnv({
+        NODE_ENV: nodeEnv,
+        JWT_ACCESS_SECRET: secret,
+        COOKIE_SAMESITE: 'none',
+      });
       const config = authConfig();
       expect(config.jwtAccessSecret).toBe(secret);
       expect(config.cookieSecure).toBe(true);
+      expect(config.cookieSameSite).toBe('none');
     },
   );
 
+  it.each(['staging', 'production'])(
+    'refuses to boot %s on a JWT_ACCESS_SECRET this repository published (S1)',
+    (nodeEnv) => {
+      const secret = strong();
+      setEnv({
+        NODE_ENV: nodeEnv,
+        JWT_ACCESS_SECRET: secret,
+        COOKIE_SAMESITE: 'none',
+      });
+      whilePublished(secret, () => {
+        expect(() => authConfig()).toThrow(
+          /^JWT_ACCESS_SECRET was published in this repository and must be rotated\./,
+        );
+      });
+      expect(authConfig().jwtAccessSecret).toBe(secret);
+    },
+  );
+
+  it('lets development keep its secret even if it was published: only hosted boots are refused', () => {
+    const secret = strong();
+    setEnv({ NODE_ENV: 'development', JWT_ACCESS_SECRET: secret });
+    whilePublished(secret, () => {
+      expect(authConfig().jwtAccessSecret).toBe(secret);
+    });
+  });
+
+  it.each(['staging', 'production'])(
+    'refuses to boot %s without an explicit COOKIE_SAMESITE (C4)',
+    (nodeEnv) => {
+      for (const sameSite of [undefined, '', '  ']) {
+        setEnv(
+          sameSite === undefined
+            ? { NODE_ENV: nodeEnv, JWT_ACCESS_SECRET: strong() }
+            : {
+                NODE_ENV: nodeEnv,
+                JWT_ACCESS_SECRET: strong(),
+                COOKIE_SAMESITE: sameSite,
+              },
+        );
+        expect(() => authConfig()).toThrow(
+          /^COOKIE_SAMESITE must be set outside development: "none" when the frontend and the API are on different sites/,
+        );
+      }
+    },
+  );
+
+  it.each([
+    ['none', 'none'],
+    ['lax', 'lax'],
+    ['strict', 'strict'],
+    ['None', 'none'],
+    [' none ', 'none'],
+  ] as const)(
+    'accepts COOKIE_SAMESITE=%s outside development',
+    (value, expected) => {
+      setEnv({
+        NODE_ENV: 'production',
+        JWT_ACCESS_SECRET: strong(),
+        COOKIE_SAMESITE: value,
+      });
+      expect(authConfig().cookieSameSite).toBe(expected);
+    },
+  );
+
+  it('still refuses a COOKIE_SAMESITE the cookies cannot use, and keeps lax as the development default', () => {
+    setEnv({
+      NODE_ENV: 'production',
+      JWT_ACCESS_SECRET: strong(),
+      COOKIE_SAMESITE: 'sometimes',
+    });
+    expect(() => authConfig()).toThrow(/Invalid COOKIE_SAMESITE "sometimes"/);
+    setEnv({ NODE_ENV: 'development' });
+    expect(authConfig().cookieSameSite).toBe('lax');
+  });
+
   it('rejects a session token signed with the development default once a hosted secret is in force', async () => {
-    setEnv({ NODE_ENV: 'staging', JWT_ACCESS_SECRET: strong() });
+    setEnv({
+      NODE_ENV: 'staging',
+      JWT_ACCESS_SECRET: strong(),
+      COOKIE_SAMESITE: 'none',
+    });
     const hosted = new JwtService({ secret: authConfig().jwtAccessSecret });
     const claims = {
       sub: '0b8a4c56-3d1e-4f2a-9b7c-5e6d7f8a9b0c',
@@ -221,8 +358,84 @@ describe('mail config', () => {
       MAIL_PROVIDER: 'resend',
       RESEND_API_KEY: 'test-key-not-real',
       MAIL_FROM: 'Emarath <no-reply@example.test>',
+      WEB_APP_URL: 'https://app.example.test',
+      CORS_ORIGIN: 'https://app.example.test',
     });
     expect(mailConfig().provider).toBe('resend');
+  });
+
+  describe('WEB_APP_URL when Resend sends from a hosted deploy (C3)', () => {
+    const resend = (vars: Record<string, string>) =>
+      setEnv({
+        NODE_ENV: 'production',
+        MAIL_PROVIDER: 'resend',
+        RESEND_API_KEY: 'test-key-not-real',
+        MAIL_FROM: 'Emarath <no-reply@example.test>',
+        CORS_ORIGIN: 'https://app.example.test,https://admin.example.test',
+        ...vars,
+      });
+
+    it.each([
+      ['unset', undefined, /WEB_APP_URL is not set\./],
+      ['blank', '  ', /WEB_APP_URL is not set\./],
+      ['not a URL', 'app.example.test', /WEB_APP_URL is not a valid URL\./],
+      ['plain http', 'http://app.example.test', /must use https/],
+      ['localhost', 'https://localhost:3000', /points at this machine/],
+      ['a loopback address', 'https://127.0.0.1', /points at this machine/],
+      ['IPv6 loopback', 'https://[::1]', /points at this machine/],
+      ['a path', 'https://app.example.test/app', /must be an origin only/],
+      ['a query', 'https://app.example.test/?a=1', /must be an origin only/],
+      ['credentials', 'https://user:pw@app.example.test', /origin only/],
+      [
+        'an origin outside CORS_ORIGIN',
+        'https://other.example.test',
+        /is not one of the CORS_ORIGIN origins/,
+      ],
+    ])('refuses to boot when it is %s', (_label, value, why) => {
+      resend(value === undefined ? {} : { WEB_APP_URL: value });
+      let message = '';
+      try {
+        mailConfig();
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toMatch(why);
+      expect(message).toMatch(/password-reset emails link to it/);
+      if (value?.trim()) expect(message).not.toContain(value.trim());
+    });
+
+    it('says how to write CORS_ORIGIN when the list, not WEB_APP_URL, is malformed', () => {
+      resend({
+        CORS_ORIGIN: 'https://app.example.test/',
+        WEB_APP_URL: 'https://app.example.test',
+      });
+      expect(() => mailConfig()).toThrow(
+        /is not one of the CORS_ORIGIN origins \(each written as the browser sends it: lowercase, no trailing slash\)/,
+      );
+    });
+
+    it('accepts an https origin listed in CORS_ORIGIN, with or without a trailing slash', () => {
+      for (const value of [
+        'https://admin.example.test',
+        'https://admin.example.test/',
+      ]) {
+        resend({ WEB_APP_URL: value });
+        expect(mailConfig().webAppUrl).toBe('https://admin.example.test');
+      }
+    });
+
+    it('leaves it alone when no mail is sent, and in development', () => {
+      setEnv({ NODE_ENV: 'production', MAIL_PROVIDER: 'disabled' });
+      expect(mailConfig().webAppUrl).toBe('http://localhost:3000');
+      setEnv({
+        NODE_ENV: 'development',
+        MAIL_PROVIDER: 'resend',
+        RESEND_API_KEY: 'test-key-not-real',
+        MAIL_FROM: 'Emarath <no-reply@example.test>',
+        WEB_APP_URL: 'http://localhost:3000',
+      });
+      expect(mailConfig().webAppUrl).toBe('http://localhost:3000');
+    });
   });
 
   it('refuses an unknown provider', () => {
@@ -273,6 +486,29 @@ describe('storage config', () => {
       STORAGE_SECRET_ACCESS_KEY: 'test-secret-not-real',
     });
     expect(storageConfig().provider).toBe('s3');
+  });
+
+  it('refuses a published STORAGE_SIGNING_SECRET only where it signs links (S1)', () => {
+    const secret = strong();
+    whilePublished(secret, () => {
+      setEnv({
+        NODE_ENV: 'production',
+        STORAGE_PROVIDER: 'local',
+        STORAGE_SIGNING_SECRET: secret,
+      });
+      expect(() => storageConfig()).toThrow(
+        /^STORAGE_SIGNING_SECRET was published in this repository and must be rotated\./,
+      );
+      setEnv({
+        NODE_ENV: 'production',
+        STORAGE_PROVIDER: 's3',
+        STORAGE_BUCKET: 'bucket',
+        STORAGE_ACCESS_KEY_ID: 'test-key-id-not-real',
+        STORAGE_SECRET_ACCESS_KEY: 'test-secret-not-real',
+        STORAGE_SIGNING_SECRET: secret,
+      });
+      expect(storageConfig().provider).toBe('s3');
+    });
   });
 
   it('keeps the 25 MB default when STORAGE_MAX_BYTES is absent', () => {

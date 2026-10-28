@@ -7,8 +7,9 @@ import { assertStrongSecret } from './secret-strength';
  * consumed via `ConfigService.get<AuthConfig>('auth')` so application code never
  * reads `process.env` directly (CLAUDE.md §5).
  *
- * Outside development (staging and production) the JWT secret must be set and strong,
- * or the app refuses to boot, and the session cookies are `Secure` (ADR-0095). In
+ * Outside development (staging and production) the JWT secret must be set and strong and
+ * COOKIE_SAMESITE must be named, or the app refuses to boot, and the session cookies are
+ * `Secure` (ADR-0095). In
  * development it falls back to a clearly-insecure default so local work needs no setup;
  * the hosted rule refuses that default, so a token it signed never verifies there.
  */
@@ -38,7 +39,15 @@ export default registerAs('auth', (): AuthConfig => {
   const secret = process.env.JWT_ACCESS_SECRET;
   if (hosted) assertStrongSecret('JWT_ACCESS_SECRET', secret);
 
-  const sameSite = (process.env.COOKIE_SAMESITE ?? 'lax').toLowerCase();
+  // Which policy works is a fact of the deployment the code cannot see (ADR-0029 §4.1): lax when
+  // the frontend and the API share a site, none when they do not. A hosted deploy names it, so a
+  // cross-site one never runs on the silent lax that breaks every session (C4).
+  if (hosted && !process.env.COOKIE_SAMESITE?.trim()) {
+    throw new Error(
+      'COOKIE_SAMESITE must be set outside development: "none" when the frontend and the API are on different sites (such as Vercel and Render), "lax" when they share one (ADR-0029 §4.1).',
+    );
+  }
+  const sameSite = (process.env.COOKIE_SAMESITE?.trim() || 'lax').toLowerCase();
   if (sameSite !== 'lax' && sameSite !== 'strict' && sameSite !== 'none') {
     throw new Error(`Invalid COOKIE_SAMESITE "${sameSite}".`);
   }

@@ -1,5 +1,5 @@
 import { registerAs } from '@nestjs/config';
-import { resolveEnvironment } from './configuration';
+import { resolveCorsOrigins, resolveEnvironment } from './configuration';
 
 /**
  * Mail configuration (AUTH-03.1, ADR-0031). Its own `mail` namespace, consumed via
@@ -13,7 +13,7 @@ import { resolveEnvironment } from './configuration';
  * selected its API key and from-address are required and the app refuses to boot without them,
  * as the JWT secret fails closed. The log transport writes each reset link, token included, to
  * the log, so it is refused outside development (ADR-0095). `webAppUrl` is the frontend origin
- * the reset link points at.
+ * the reset link points at; when Resend sends from a hosted deploy it must be a real one (C3).
  */
 export type MailProvider = 'disabled' | 'log' | 'resend';
 
@@ -25,6 +25,48 @@ export interface MailConfig {
   from: string;
   /** Frontend origin used to build the reset link (`<webAppUrl>/reset-password?token=…`). */
   webAppUrl: string;
+}
+
+/** Hosts that name the server itself, never a link a recipient can open. */
+const LOOPBACK =
+  /^(localhost|.+\.localhost|127(\.\d{1,3}){3}|0\.0\.0\.0|\[::1?\])$/i;
+
+/**
+ * `WEB_APP_URL` when Resend mails reset links from a hosted deploy (C3): the frontend's https
+ * origin and nothing after it, since the link appends `/reset-password`, and one of the CORS
+ * origins, since the reset page posts the new password from there and the Origin check refuses
+ * every other site. Unset, the links would point at localhost. The error never repeats the value.
+ */
+function hostedWebAppUrl(raw: string | undefined): string {
+  let url: URL | null = null;
+  try {
+    url = new URL(raw?.trim() ?? '');
+  } catch {
+    url = null;
+  }
+  const problem = !raw?.trim()
+    ? 'is not set'
+    : !url
+      ? 'is not a valid URL'
+      : url.protocol !== 'https:'
+        ? 'must use https'
+        : LOOPBACK.test(url.hostname)
+          ? 'points at this machine'
+          : url.username ||
+              url.password ||
+              url.pathname !== '/' ||
+              url.search ||
+              url.hash
+            ? 'must be an origin only, such as https://app.example.com'
+            : !resolveCorsOrigins().includes(url.origin)
+              ? 'is not one of the CORS_ORIGIN origins (each written as the browser sends it: lowercase, no trailing slash)'
+              : null;
+  if (problem || !url) {
+    throw new Error(
+      `WEB_APP_URL ${problem}. With MAIL_PROVIDER "resend" outside development it must be the frontend's public https origin, listed in CORS_ORIGIN: password-reset emails link to it.`,
+    );
+  }
+  return url.origin;
 }
 
 export default registerAs('mail', (): MailConfig => {
@@ -63,6 +105,9 @@ export default registerAs('mail', (): MailConfig => {
     provider,
     resendApiKey,
     from,
-    webAppUrl: process.env.WEB_APP_URL ?? 'http://localhost:3000',
+    webAppUrl:
+      provider === 'resend' && !isDevelopment
+        ? hostedWebAppUrl(process.env.WEB_APP_URL)
+        : (process.env.WEB_APP_URL ?? 'http://localhost:3000'),
   };
 });
