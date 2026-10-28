@@ -5,6 +5,7 @@ import type { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UserRole } from '../generated/prisma/client';
+import type { PrismaService } from '../prisma/prisma.service';
 import authConfig, { DEV_INSECURE_SECRET } from './auth.config';
 import mailConfig from './mail.config';
 import { MIN_SECRET_LENGTH, assertStrongSecret } from './secret-strength';
@@ -133,11 +134,19 @@ describe('auth config', () => {
   it('rejects a session token signed with the development default once a hosted secret is in force', async () => {
     setEnv({ NODE_ENV: 'staging', JWT_ACCESS_SECRET: strong() });
     const hosted = new JwtService({ secret: authConfig().jwtAccessSecret });
-    const claims = { sub: 'user-1', role: UserRole.SUPERADMIN };
+    const claims = {
+      sub: '0b8a4c56-3d1e-4f2a-9b7c-5e6d7f8a9b0c',
+      role: UserRole.SUPERADMIN,
+    };
     const signOptions = { issuer: 'emarath-api', audience: 'emarath-app' };
-    const guard = new JwtAuthGuard(hosted, {
-      getAllAndOverride: () => false,
-    } as unknown as Reflector);
+    const liveAccount = {
+      user: { findFirst: () => Promise.resolve({ id: claims.sub }) },
+    } as unknown as PrismaService;
+    const guard = new JwtAuthGuard(
+      hosted,
+      { getAllAndOverride: () => false } as unknown as Reflector,
+      liveAccount,
+    );
     const contextFor = (token: string) =>
       ({
         getHandler: () => undefined,

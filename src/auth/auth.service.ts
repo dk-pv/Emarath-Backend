@@ -290,7 +290,8 @@ export class AuthService {
 
   /**
    * The access token carries user id + role claims (AUTH-01.3 AC2), plus the team label
-   * (AUTH-02.1 / ADR-0030 §4) so the guard can resolve manager team-scope without a DB read.
+   * (AUTH-02.1 / ADR-0030 §4) for manager team-scope. The guard checks all three against the
+   * account on every request (SEC-04), so a token stops working once any of them changes.
    * `team` is null for users with no team; the claim is still present for uniformity.
    */
   private signAccessToken(

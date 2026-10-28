@@ -9,7 +9,8 @@ import { UserRole } from '../generated/prisma/client';
  *
  * `team` is the caller's team label (AUTH-02.1 / ADR-0030 §4) — the manager
  * team-scoping rule's one consumer. It travels as a signed access-token claim,
- * so resolving it costs no DB read; `null` when the user has no team. Optional
+ * which the guard checks against the account on each request (SEC-04); `null`
+ * when the user has no team. Optional
  * so the many `{ id, role }` literals in tests still type-check — production
  * requests always set it (value or null) via the guard.
  *

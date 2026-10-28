@@ -6,6 +6,7 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { UserRole } from '../src/generated/prisma/client';
+import { stubLiveAccounts } from './e2e-app';
 
 const UUID = '11111111-1111-1111-1111-111111111111';
 
@@ -29,6 +30,7 @@ describe('Integration registry (e2e)', () => {
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
+    stubLiveAccounts(moduleRef);
 
     app = moduleRef.createNestApplication();
     jwt = moduleRef.get(JwtService);
